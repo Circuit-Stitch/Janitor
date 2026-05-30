@@ -2,7 +2,8 @@
 //!
 //! Holds everything that matters and is testable without a GUI (ADR 0003):
 //! the secret-shape model (parsing AWS Secret Sets into comparable Entries),
-//! zeroizing secret types, and Config load/save. **No GUI dependencies.**
+//! the comparison engine (the Aligned/Drift/Gap matrix), zeroizing secret
+//! types, and Config load/save. **No GUI dependencies.**
 //! Targets ≥80% line coverage.
 //!
 //! ## AWS access (future slices)
