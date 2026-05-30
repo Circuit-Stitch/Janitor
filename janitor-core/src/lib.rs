@@ -18,3 +18,4 @@ pub mod config;
 pub mod secret;
 pub mod mock;
 pub mod source;
+pub mod view;
