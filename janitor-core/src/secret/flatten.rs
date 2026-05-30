@@ -46,6 +46,65 @@ fn leaf_to_value(leaf: &Json) -> Value {
     }
 }
 
+/// Something went wrong reconstructing JSON from Entries.
+#[derive(Debug, thiserror::Error)]
+pub enum ShapeError {
+    /// A leaf's stored content was not valid for its [`LeafKind`] (e.g. a
+    /// `Number` Entry whose content is not a JSON number). Only reachable for
+    /// hand-constructed Entries; [`flatten`] never produces such a set.
+    #[error("entry {name} has malformed {kind:?} content")]
+    MalformedLeaf { name: String, kind: LeafKind },
+}
+
+/// Rebuild a JSON object from Entries. Inverse of [`flatten`].
+pub fn unflatten(entries: &BTreeMap<EntryName, Value>) -> Result<Json, ShapeError> {
+    let mut root = Map::new();
+    for (name, value) in entries {
+        let leaf = value_to_leaf(name, value)?;
+        insert_at_path(&mut root, &name.segments(), leaf);
+    }
+    Ok(Json::Object(root))
+}
+
+fn value_to_leaf(name: &EntryName, value: &Value) -> Result<Json, ShapeError> {
+    let malformed = || ShapeError::MalformedLeaf {
+        name: name.to_string(),
+        kind: value.kind(),
+    };
+    let content = value.expose();
+    let json = match value.kind() {
+        LeafKind::String => Json::String(content.to_string()),
+        LeafKind::Number => {
+            let n: serde_json::Number = serde_json::from_str(content).map_err(|_| malformed())?;
+            Json::Number(n)
+        }
+        LeafKind::Bool => Json::Bool(content.parse().map_err(|_| malformed())?),
+        LeafKind::Null => Json::Null,
+        LeafKind::Json => serde_json::from_str(content).map_err(|_| malformed())?,
+    };
+    Ok(json)
+}
+
+fn insert_at_path(root: &mut Map<String, Json>, segments: &[String], leaf: Json) {
+    // `segments` is always non-empty for Entries produced by `flatten`.
+    let Some((first, rest)) = segments.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        root.insert(first.clone(), leaf);
+        return;
+    }
+    let child = root
+        .entry(first.clone())
+        .or_insert_with(|| Json::Object(Map::new()));
+    if let Json::Object(map) = child {
+        insert_at_path(map, rest, leaf);
+    }
+    // If `child` already exists and isn't an object, the Entry set is internally
+    // inconsistent; `flatten` never produces such a set, so we keep the first
+    // writer rather than panicking.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +181,63 @@ mod tests {
         // A top-level {} has no leaves → zero Entries. (Contrast: a *nested*
         // empty object is itself one Json leaf, per ADR 0008.)
         assert!(flatten(&parse_obj("{}")).is_empty());
+    }
+
+    #[test]
+    fn round_trips_through_flatten_unflatten() {
+        let inputs = [
+            r#"{"A":"1","B":"2"}"#,
+            r#"{"db":{"primary":{"url":"postgres://x"}}}"#,
+            r#"{"db":{"host":"h","port":5432}}"#,
+            r#"{"port":5432,"tls":true,"opt":null}"#,
+            r#"{"hosts":["a","b"],"meta":{}}"#,
+            r#"{"a.b":"flat","a":{"b":"nested"}}"#,
+            r#"{"":"empty-key","x":{"":"nested-empty-key"}}"#,
+            r#"{"big":1.5e3,"neg":-7}"#,
+            // Strings that look like other kinds must round-trip AS strings
+            // (the reason LeafKind exists — content is never re-coerced).
+            r#"{"a":"null","b":"true","c":"5432"}"#,
+            r#"{"data":[{"id":1},{"id":2}]}"#, // array of objects (opaque Json leaf)
+            r#"{"config":{"sub":{}}}"#,        // nested empty object at depth
+            r#"{"a":{"b":{"c":{"d":"deep"}}}}"#, // deep nesting
+            r#"{"a\\b":"v1"}"#,                // key containing a literal backslash
+            "{}",
+        ];
+        for input in inputs {
+            let original: Json = serde_json::from_str(input).unwrap();
+            let object = match &original {
+                Json::Object(m) => m.clone(),
+                _ => unreachable!(),
+            };
+            let rebuilt = unflatten(&flatten(&object)).unwrap();
+            assert_eq!(rebuilt, original, "round-trip changed value for {input}");
+        }
+    }
+
+    #[test]
+    fn unflatten_rejects_malformed_number_leaf() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            name(&["port"]),
+            Value::new("not-a-number", LeafKind::Number),
+        );
+        let err = unflatten(&entries).unwrap_err();
+        assert!(matches!(err, ShapeError::MalformedLeaf { .. }));
+    }
+
+    #[test]
+    fn unflatten_rejects_malformed_bool_and_json_leaves() {
+        // The Bool and Json arms are the other two fallible reconstructions.
+        for bad in [
+            Value::new("maybe", LeafKind::Bool),
+            Value::new("{not json", LeafKind::Json),
+        ] {
+            let mut entries = BTreeMap::new();
+            entries.insert(name(&["x"]), bad);
+            assert!(matches!(
+                unflatten(&entries).unwrap_err(),
+                ShapeError::MalformedLeaf { .. }
+            ));
+        }
     }
 }

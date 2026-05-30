@@ -5,6 +5,6 @@ mod flatten;
 mod name;
 mod value;
 
-pub use flatten::flatten;
+pub use flatten::{flatten, unflatten, ShapeError};
 pub use name::EntryName;
 pub use value::{LeafKind, Value};
