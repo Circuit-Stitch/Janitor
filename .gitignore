@@ -1,0 +1,11 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Serena local agent tooling (per-developer, not project source)
+/.serena/
+
+# OS cruft
+.DS_Store
+Thumbs.db
