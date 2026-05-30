@@ -92,6 +92,27 @@ pub fn reveal_value<'a>(
     }
 }
 
+/// Row ordering for the matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    /// The engine's default — Entry name order.
+    Name,
+    /// High-signal rows on top: Gap, then Drift, then Aligned.
+    GapFirst,
+}
+
+/// Reorder `view.rows` per `sort`. Stable, so within a rank the engine's name
+/// order is preserved. `Name` is a no-op (the engine already name-sorts).
+pub fn sort_rows(view: &mut MatrixView, sort: SortKey) {
+    if sort == SortKey::GapFirst {
+        view.rows.sort_by_key(|r| match r.state {
+            EntryState::Gap => 0u8,
+            EntryState::Drift => 1,
+            EntryState::Aligned => 2,
+        });
+    }
+}
+
 /// Cosmetic 4-hex-char tag from the Entry name + equality group (**never** the
 /// Value). Equal cells in a row share a tag; different Entries differ. Display
 /// flavor only — the equality mechanism is the group id.
@@ -217,5 +238,30 @@ mod tests {
         assert!(reveal_value(&sets, &entry_key("MISSING"), 0).is_none());
         assert!(reveal_value(&sets, &entry_key("A"), 9).is_none(), "col out of range");
         assert!(reveal_value(&sets, &RowKey::WholeSet, 1).is_none(), "binary never reveals");
+    }
+
+    #[test]
+    fn gap_first_sort_is_stable_and_high_signal_first() {
+        // aaa: drift, bbb: aligned, ccc: prod-only gap. Engine order: aaa,bbb,ccc.
+        let sets = [
+            env("prod", r#"{"aaa":"1","bbb":"1","ccc":"1"}"#),
+            env("staging", r#"{"aaa":"2","bbb":"1"}"#),
+        ];
+        let mut view = project(&Comparison::build(&sets));
+        sort_rows(&mut view, SortKey::GapFirst);
+        let order: Vec<&str> = view.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(order, vec!["ccc", "aaa", "bbb"], "Gap, then Drift, then Aligned");
+    }
+
+    #[test]
+    fn name_sort_keeps_engine_order() {
+        let sets = [
+            env("prod", r#"{"bbb":"1","aaa":"1"}"#),
+            env("staging", r#"{"bbb":"1","aaa":"1"}"#),
+        ];
+        let mut view = project(&Comparison::build(&sets));
+        sort_rows(&mut view, SortKey::Name);
+        let order: Vec<&str> = view.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(order, vec!["aaa", "bbb"], "engine already sorts by name");
     }
 }
