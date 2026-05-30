@@ -2,12 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Status: design phase.** No source code or `Cargo.toml` exists yet. The design
-> is fully specified in [`CONTEXT.md`](CONTEXT.md) (domain glossary),
-> [`docs/adr/`](docs/adr/) (decisions 0001–0007), and
+> **Status: foundation landed.** The Cargo workspace and `janitor-core`'s offline
+> bedrock exist — secret-shape model (parse/flatten/unflatten), zeroizing `Value`,
+> and `Config` load/save — under a CI lint/test/coverage lane. No AWS, GUI, or
+> write path yet. The design is specified in [`CONTEXT.md`](CONTEXT.md) (domain
+> glossary), [`docs/adr/`](docs/adr/) (decisions 0001–0008), and
 > [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (security posture). **Read those
-> first** — this file only summarizes. Replace the placeholder command/architecture
-> notes below with verified specifics as real code lands.
+> first** — this file only summarizes.
 
 ## What this is
 
@@ -66,7 +67,8 @@ cargo test -p janitor-core <name> # a single core test (substring match)
 cargo test -- --nocapture         # show test stdout/stderr
 cargo clippy --all-targets        # lint
 cargo fmt                         # format
-cargo run -p janitor-gui          # run the app
+cargo llvm-cov -p janitor-core    # coverage (≥80% gate)
+# cargo run -p janitor-gui        # (not yet — GUI lands in a later slice)
 ```
 
 ## Working agreements
