@@ -16,3 +16,4 @@
 pub mod compare;
 pub mod config;
 pub mod secret;
+pub mod source;
