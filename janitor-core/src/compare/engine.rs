@@ -1,9 +1,5 @@
 //! Comparison construction and classification.
 
-// NOTE: `BTreeSet`, `EntryName`, `SecretShape`, and the `Cell`/`Comparison`/
-// `EntryState`/`Row`/`RowKey` model types are used by `build`/`build_row` in
-// Task 4. They are imported now but unused until then — do NOT remove them when
-// tidying warnings; Task 4 will not compile without them.
 use std::collections::BTreeSet;
 
 use crate::secret::{EntryName, SecretBytes, SecretShape, Value};
@@ -76,22 +72,31 @@ impl<'a> Comparison<'a> {
 
         let mut rows: Vec<Row<'a>> = Vec::with_capacity(entry_names.len() + has_whole_set as usize);
         for name in &entry_names {
-            rows.push(build_row(RowKey::Entry(name.clone()), environments, |shape| {
-                match shape {
+            rows.push(build_row(
+                RowKey::Entry(name.clone()),
+                environments,
+                |shape| match shape {
                     SecretShape::Json(entries) => entries.get(name).map(Present::Text),
                     SecretShape::Raw(_) | SecretShape::Binary(_) => None,
-                }
-            }));
+                },
+            ));
         }
         if has_whole_set {
-            rows.push(build_row(RowKey::WholeSet, environments, |shape| match shape {
-                SecretShape::Raw(value) => Some(Present::Text(value)),
-                SecretShape::Binary(bytes) => Some(Present::Binary(bytes)),
-                SecretShape::Json(_) => None,
-            }));
+            rows.push(build_row(
+                RowKey::WholeSet,
+                environments,
+                |shape| match shape {
+                    SecretShape::Raw(value) => Some(Present::Text(value)),
+                    SecretShape::Binary(bytes) => Some(Present::Binary(bytes)),
+                    SecretShape::Json(_) => None,
+                },
+            ));
         }
 
-        Comparison { environments: labels, rows }
+        Comparison {
+            environments: labels,
+            rows,
+        }
     }
 }
 
@@ -103,8 +108,10 @@ fn build_row<'a>(
     cell_of: impl Fn(&'a SecretShape) -> Option<Present<'a>>,
 ) -> Row<'a> {
     // Per-column present content (None = Absent), in input order.
-    let present_by_col: Vec<Option<Present<'a>>> =
-        environments.iter().map(|(_, shape)| cell_of(shape)).collect();
+    let present_by_col: Vec<Option<Present<'a>>> = environments
+        .iter()
+        .map(|(_, shape)| cell_of(shape))
+        .collect();
 
     // Group ids over just the present cells, in column order.
     let present: Vec<Present<'a>> = present_by_col.iter().copied().flatten().collect();
@@ -123,12 +130,19 @@ fn build_row<'a>(
             Some(Present::Text(value)) => {
                 let group = ids[next];
                 next += 1;
-                cells.push(Cell::Text { value, len: value.expose().len(), group });
+                cells.push(Cell::Text {
+                    value,
+                    len: value.expose().len(),
+                    group,
+                });
             }
             Some(Present::Binary(bytes)) => {
                 let group = ids[next];
                 next += 1;
-                cells.push(Cell::Binary { len: bytes.len(), group });
+                cells.push(Cell::Binary {
+                    len: bytes.len(),
+                    group,
+                });
             }
         }
     }
@@ -204,9 +218,6 @@ mod tests {
         assert_eq!(group_ids(present), Vec::new());
     }
 
-    // `SecretShape`, the model types, and `EntryName` are already in scope via
-    // the `use super::*;` at the top of this `mod tests`.
-
     fn env(name: &str, shape: SecretShape) -> (String, SecretShape) {
         (name.to_string(), shape)
     }
@@ -229,28 +240,63 @@ mod tests {
 
     #[test]
     fn aligned_when_present_and_equal_everywhere() {
-        let envs = [env("prod", json(r#"{"A":"1"}"#)), env("staging", json(r#"{"A":"1"}"#))];
+        let envs = [
+            env("prod", json(r#"{"A":"1"}"#)),
+            env("staging", json(r#"{"A":"1"}"#)),
+        ];
         let cmp = Comparison::build(&envs);
-        assert_eq!(cmp.environments, vec!["prod".to_string(), "staging".to_string()]);
+        assert_eq!(
+            cmp.environments,
+            vec!["prod".to_string(), "staging".to_string()]
+        );
         let r = row(&cmp, "A");
         assert_eq!(r.state, EntryState::Aligned);
-        assert!(matches!(r.cells[0], Cell::Text { group: GroupId(0), .. }));
-        assert!(matches!(r.cells[1], Cell::Text { group: GroupId(0), .. }));
+        assert!(matches!(
+            r.cells[0],
+            Cell::Text {
+                group: GroupId(0),
+                ..
+            }
+        ));
+        assert!(matches!(
+            r.cells[1],
+            Cell::Text {
+                group: GroupId(0),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn drift_when_present_everywhere_but_values_differ() {
-        let envs = [env("prod", json(r#"{"A":"1"}"#)), env("staging", json(r#"{"A":"2"}"#))];
+        let envs = [
+            env("prod", json(r#"{"A":"1"}"#)),
+            env("staging", json(r#"{"A":"2"}"#)),
+        ];
         let cmp = Comparison::build(&envs);
         let r = row(&cmp, "A");
         assert_eq!(r.state, EntryState::Drift);
-        assert!(matches!((&r.cells[0], &r.cells[1]),
-            (Cell::Text { group: GroupId(0), .. }, Cell::Text { group: GroupId(1), .. })));
+        assert!(matches!(
+            (&r.cells[0], &r.cells[1]),
+            (
+                Cell::Text {
+                    group: GroupId(0),
+                    ..
+                },
+                Cell::Text {
+                    group: GroupId(1),
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]
     fn gap_when_present_in_some_and_absent_in_others() {
-        let envs = [env("prod", json(r#"{"A":"1"}"#)), env("staging", json(r#"{"B":"1"}"#))];
+        let envs = [
+            env("prod", json(r#"{"A":"1"}"#)),
+            env("staging", json(r#"{"B":"1"}"#)),
+        ];
         let cmp = Comparison::build(&envs);
         assert_eq!(row(&cmp, "A").state, EntryState::Gap);
         assert!(matches!(row(&cmp, "A").cells[1], Cell::Absent));
@@ -273,18 +319,27 @@ mod tests {
     #[test]
     fn leafkind_difference_is_drift() {
         // 5432 (Number) vs "5432" (String): same text, different JSON type.
-        let envs = [env("prod", json(r#"{"port":5432}"#)), env("staging", json(r#"{"port":"5432"}"#))];
+        let envs = [
+            env("prod", json(r#"{"port":5432}"#)),
+            env("staging", json(r#"{"port":"5432"}"#)),
+        ];
         let cmp = Comparison::build(&envs);
         assert_eq!(row(&cmp, "port").state, EntryState::Drift);
     }
 
     #[test]
     fn empty_value_is_present_not_absent() {
-        let envs = [env("prod", json(r#"{"A":""}"#)), env("staging", json(r#"{"A":""}"#))];
+        let envs = [
+            env("prod", json(r#"{"A":""}"#)),
+            env("staging", json(r#"{"A":""}"#)),
+        ];
         let cmp = Comparison::build(&envs);
         let r = row(&cmp, "A");
         assert_eq!(r.state, EntryState::Aligned);
-        assert!(matches!(r.cells[0], Cell::Text { len: 0, .. }), "empty value is Present len 0");
+        assert!(
+            matches!(r.cells[0], Cell::Text { len: 0, .. }),
+            "empty value is Present len 0"
+        );
     }
 
     #[test]
@@ -310,7 +365,11 @@ mod tests {
         ];
         let cmp = Comparison::build(&envs);
         let r = whole_set(&cmp);
-        assert_eq!(r.state, EntryState::Drift, "equal length but different bytes is Drift");
+        assert_eq!(
+            r.state,
+            EntryState::Drift,
+            "equal length but different bytes is Drift"
+        );
         for cell in &r.cells {
             assert!(matches!(cell, Cell::Binary { len: 4, .. }));
             assert!(cell.reveal().is_none(), "Binary must never reveal");
@@ -320,7 +379,10 @@ mod tests {
     #[test]
     fn mixed_shapes_do_not_panic() {
         // prod is JSON, dev is Raw: entries become Gaps and a WholeSet row appears.
-        let envs = [env("prod", json(r#"{"A":"1"}"#)), env("dev", SecretShape::from_secret_string("raw"))];
+        let envs = [
+            env("prod", json(r#"{"A":"1"}"#)),
+            env("dev", SecretShape::from_secret_string("raw")),
+        ];
         let cmp = Comparison::build(&envs);
         assert_eq!(row(&cmp, "A").state, EntryState::Gap);
         assert_eq!(whole_set(&cmp).state, EntryState::Gap);
@@ -328,11 +390,20 @@ mod tests {
 
     #[test]
     fn rows_are_sorted_by_name_with_whole_set_last() {
-        let envs = [env("prod", json(r#"{"B":"1","A":"1"}"#)), env("staging", SecretShape::from_secret_string("raw"))];
+        let envs = [
+            env("prod", json(r#"{"B":"1","A":"1"}"#)),
+            env("staging", SecretShape::from_secret_string("raw")),
+        ];
         let cmp = Comparison::build(&envs);
         let keys: Vec<&RowKey> = cmp.rows.iter().map(|r| &r.key).collect();
-        assert_eq!(keys[0], &RowKey::Entry(EntryName::from_path(&["A".to_string()])));
-        assert_eq!(keys[1], &RowKey::Entry(EntryName::from_path(&["B".to_string()])));
+        assert_eq!(
+            keys[0],
+            &RowKey::Entry(EntryName::from_path(&["A".to_string()]))
+        );
+        assert_eq!(
+            keys[1],
+            &RowKey::Entry(EntryName::from_path(&["B".to_string()]))
+        );
         assert_eq!(keys[2], &RowKey::WholeSet);
     }
 
@@ -345,5 +416,21 @@ mod tests {
         let one = [env("prod", json(r#"{"A":"1"}"#))];
         let cmp1 = Comparison::build(&one);
         assert_eq!(row(&cmp1, "A").state, EntryState::Aligned); // single column => trivially Aligned
+    }
+
+    #[test]
+    fn columns_follow_input_order_not_alphabetical() {
+        // Input order is reverse-alphabetical; the matrix must preserve INPUT
+        // order, not sort the columns.
+        let envs = [
+            env("staging", json(r#"{"A":"1"}"#)),
+            env("prod", json(r#"{"A":"1"}"#)),
+        ];
+        let cmp = Comparison::build(&envs);
+        assert_eq!(
+            cmp.environments,
+            vec!["staging".to_string(), "prod".to_string()]
+        );
+        assert_eq!(row(&cmp, "A").cells.len(), 2);
     }
 }
