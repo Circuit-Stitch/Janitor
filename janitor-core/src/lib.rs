@@ -12,6 +12,4 @@
 //! its own module, so the network stays mockable and the coverage gate stays
 //! reachable. Do not wire the SDK directly into the modules here.
 
-// Modules are introduced by later tasks:
-//   pub mod secret;   (Task 3+)
-//   pub mod config;   (Task 8)
+pub mod secret;
