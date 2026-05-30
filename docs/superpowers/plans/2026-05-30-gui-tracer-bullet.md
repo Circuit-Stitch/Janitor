@@ -608,13 +608,32 @@ mod tests {
         assert!(matches!(a.cells[0], MatrixCell::Present { len: 5, .. }));
         assert!(matches!(a.cells[1], MatrixCell::Absent));
     }
+
+    #[test]
+    fn project_handles_raw_and_binary_whole_set_rows() {
+        // Raw (non-JSON) sets → a single WholeSet row named "(whole set)".
+        let raw = [env("prod", "tok-aaaa"), env("staging", "tok-bbbb")];
+        let rv = project(&Comparison::build(&raw));
+        assert_eq!(rv.rows.len(), 1);
+        assert_eq!(rv.rows[0].name, "(whole set)");
+        assert!(matches!(rv.rows[0].cells[0], MatrixCell::Present { .. }));
+
+        // Binary sets → WholeSet row, masked length only (never a Value).
+        let bin = [
+            ("prod".to_string(), SecretShape::from_secret_binary(vec![1, 2, 3, 4])),
+            ("staging".to_string(), SecretShape::from_secret_binary(vec![1, 2, 3, 9])),
+        ];
+        let bv = project(&Comparison::build(&bin));
+        assert_eq!(bv.rows[0].name, "(whole set)");
+        assert!(matches!(bv.rows[0].cells[0], MatrixCell::Present { len: 4, .. }));
+    }
 }
 ```
 
 - [ ] **Step 3: Run the tests**
 
 Run: `cargo test -p janitor-core view::tests`
-Expected: 4 tests PASS. (If `group.0` is a privacy error, confirm `view` is a module *inside* `janitor-core` — `pub(crate)` access requires it.)
+Expected: 5 tests PASS. (If `group.0` is a privacy error, confirm `view` is a module *inside* `janitor-core` — `pub(crate)` access requires it.)
 
 - [ ] **Step 4: Commit**
 
@@ -803,7 +822,7 @@ git commit -m "feat(core): sort_rows + SortKey (name / gap-first matrix ordering
 
 # Part B: GUI (incremental, manually verified)
 
-> From here the `.slint` file grows. Each task shows the **full current `app.slint`** when it changes substantially, and full Rust functions when modified, so tasks can be read out of order. Styling is rough on purpose.
+> From here `app.slint` and `main.rs` are **edited in place** and grow across tasks. The GUI snippets are **deltas to the current files**, not full-file replacements — so Tasks 7–11 must run where those files persist between tasks: execute them **inline in one session** (or hand each subagent the *current* file contents to edit, never reconstruct from deltas alone). Styling is rough on purpose.
 
 ## Task 7: Render the matrix from mock data
 
@@ -1848,6 +1867,8 @@ git commit -m "docs: note the GUI tracer-bullet slice landed"
 
 Run: `cargo run -p janitor-gui`
 Walk the whole thread once: pick each Application, reveal a few cells, open Settings, add/remove an App, flip theme/sort/auto-hide. Confirm nothing panics and the matrix always reflects the selection.
+
+> Known cosmetic limitation (not a bug): the theme toggle only swaps `Window.background`; text colors are hardcoded for dark mode, so **light mode renders text dim/low-contrast**. Acceptable for "rough look first"; full theming is a later slice.
 
 ---
 
