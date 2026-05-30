@@ -38,6 +38,8 @@ fn group_ids(present: &[Present]) -> Vec<GroupId> {
     let mut ids = Vec::with_capacity(present.len());
     let mut representatives: Vec<usize> = Vec::new(); // index of each group's first cell
     for (i, cell) in present.iter().enumerate() {
+        // `r` is always a valid index into `present`: each representative was
+        // pushed as an `i` from this same enumerate loop, so `r < present.len()`.
         match representatives
             .iter()
             .position(|&r| same_value(&present[r], cell))
@@ -63,7 +65,10 @@ mod tests {
         let b = Value::string("x");
         let c = Value::string("y");
         let present = [Present::Text(&a), Present::Text(&b), Present::Text(&c)];
-        assert_eq!(group_ids(&present), vec![GroupId(0), GroupId(0), GroupId(1)]);
+        assert_eq!(
+            group_ids(&present),
+            vec![GroupId(0), GroupId(0), GroupId(1)]
+        );
     }
 
     #[test]
@@ -88,7 +93,20 @@ mod tests {
         let a = SecretBytes::new(vec![1, 2, 3]);
         let b = SecretBytes::new(vec![1, 2, 3]);
         let c = SecretBytes::new(vec![1, 2, 4]);
-        let present = [Present::Binary(&a), Present::Binary(&b), Present::Binary(&c)];
-        assert_eq!(group_ids(&present), vec![GroupId(0), GroupId(0), GroupId(1)]);
+        let present = [
+            Present::Binary(&a),
+            Present::Binary(&b),
+            Present::Binary(&c),
+        ];
+        assert_eq!(
+            group_ids(&present),
+            vec![GroupId(0), GroupId(0), GroupId(1)]
+        );
+    }
+
+    #[test]
+    fn group_ids_of_empty_input_is_empty() {
+        let present: &[Present] = &[];
+        assert_eq!(group_ids(present), Vec::new());
     }
 }
