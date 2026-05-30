@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **Status: design phase.** No source code or `Cargo.toml` exists yet. The design
 > is fully specified in [`CONTEXT.md`](CONTEXT.md) (domain glossary),
-> [`docs/adr/`](docs/adr/) (decisions 0001–0006), and
+> [`docs/adr/`](docs/adr/) (decisions 0001–0007), and
 > [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (security posture). **Read those
 > first** — this file only summarizes. Replace the placeholder command/architecture
 > notes below with verified specifics as real code lands.

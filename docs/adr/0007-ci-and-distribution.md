@@ -19,41 +19,53 @@ config storage.
 
 ## Decision
 
-**v1 ships raw, unsigned, per-OS binaries on tag; signing and native installers
-are deferred to a pre-release milestone.**
+**v1 ships unsigned native bundles built by `cargo-packager` on tag; code
+signing + notarization are deferred to a pre-release milestone.**
 
-- **Targets (v1):** `aarch64-apple-darwin` (Apple Silicon), `x86_64-pc-windows-msvc`,
-  `x86_64-unknown-linux-gnu`. No Intel macOS.
+- **Tooling: `cargo-packager` from the start.** Chosen over `dist` because
+  Janitor is a Slint GUI app, not a CLI: `cargo-packager` produces real windowed
+  bundles (macOS `.app`/`.dmg`, Windows `.msi`/NSIS `.exe`, Linux AppImage/`.deb`)
+  and has built-in signing + notarization hooks to switch on later. `dist`'s
+  sweet spot (tarball + shell/PowerShell installer) suits CLI tools and does not
+  cleanly emit a macOS `.app`.
+- **Targets (v1):** `aarch64-apple-darwin` (Apple Silicon),
+  `x86_64-apple-darwin` (Intel macOS), `x86_64-pc-windows-msvc`,
+  `x86_64-unknown-linux-gnu`.
 - **CI (every push / PR):** `cargo fmt --check`, `cargo clippy --all-targets`,
   `cargo test` — with `janitor-core`'s ≥80% coverage gate (ADR 0003).
-- **Release (on `vX.Y.Z` tag):** GitHub Actions builds all three targets and
-  publishes a GitHub Release with one archive per OS (`.tar.gz` / `.zip`)
-  containing the raw binary. Tag-driven, so cutting a release is `git tag` + push.
-- **No signing in v1.** Gatekeeper (macOS) and SmartScreen (Windows) friction is
-  accepted and **documented in release notes / README** so users of a secrets
-  tool aren't blindsided by a scary prompt.
+- **Release (on `vX.Y.Z` tag):** GitHub Actions runs `cargo-packager` on each
+  target's runner and publishes a GitHub Release with the per-OS bundles
+  attached. Tag-driven, so cutting a release is `git tag` + push.
+- **No signing in v1.** The bundles are real but **unsigned**, so Gatekeeper
+  (macOS) and SmartScreen (Windows) friction remains; this is accepted and
+  **documented in release notes / README** so users of a secrets tool aren't
+  blindsided by a scary prompt.
 
 **Deferred to a pre-release milestone (not v1):**
-- Notarized macOS `.app` / `.dmg` — requires Apple Developer Program ($99/yr).
-- Signed Windows `.msi` / setup `.exe` — Azure Artifact Signing (~$10/mo;
-  now open to self-employed individuals).
-- Linux packaging niceties (AppImage / `.deb`).
-- **Bundler tool choice** (`dist` aka cargo-dist, vs `cargo-packager`) — decided
-  once there's a real binary to evaluate. `dist` is strongest for CLI-shaped
-  artifacts (tarball/msi/shell installer); a GUI app wanting a true macOS `.app`
-  bundle leans toward `cargo-packager`. Not committing now.
+- macOS notarization + Developer ID signing — requires Apple Developer Program
+  ($99/yr). Wired into the existing `cargo-packager` macOS step.
+- Windows Authenticode signing — Azure Artifact Signing (~$10/mo; now open to
+  self-employed individuals). Wired into the `cargo-packager` Windows step.
+- Auto-update channel (if desired later).
 
 ## Considered options
 
-- **Signed native installers from the start** — rejected for v1: needs Apple +
-  Azure identity/secrets wired into CI before anything ships; premature pre-release.
-- **Commit to `dist` now** — deferred: its CLI-tool sweet spot doesn't cleanly
-  produce a macOS `.app` bundle, and the GUI bundling need is a later concern.
+- **`dist` (cargo-dist)** — rejected as primary: excellent for CLI release CI but
+  doesn't produce a true macOS `.app` bundle, which a GUI app needs.
+- **Signed bundles from the start** — rejected for v1: needs Apple + Azure
+  identity and CI secrets in place before anything ships; premature pre-release.
+  The chosen tool makes turning signing on a config + secrets change, not a
+  re-architecture.
+- **Raw binaries (no bundles)** — rejected: a bare Mach-O / `.exe` is a poor and
+  trust-eroding experience for a desktop secrets tool; `cargo-packager` gives real
+  bundles for the same CI effort.
 
 ## Consequences
 
 - Releasing is trivial (tag push) but users must manually clear OS security
   prompts until signing lands; this is a temporary, documented state.
+- **Four targets means four runners**; Intel macOS doubles the macOS build/sign
+  matrix versus Apple-Silicon-only, accepted to support older Macs.
 - **Building a Slint GUI in CI is not dependency-free**: the Linux runner must
   install GUI/system dev libraries (e.g. xcb/wayland/font dev packages, per
   Slint's backend requirements) before `cargo build`; macOS/Windows runners need
