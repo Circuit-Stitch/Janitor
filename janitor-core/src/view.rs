@@ -4,6 +4,7 @@
 //! [`reveal_value`] against the still-owned Sets, never through this DTO.
 
 use crate::compare::{Cell, Comparison, EntryState, RowKey};
+use crate::secret::{SecretShape, Value};
 
 /// An owned, non-secret matrix ready to map onto view models.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +72,23 @@ pub fn project(comparison: &Comparison) -> MatrixView {
     MatrixView {
         environments: comparison.environments.clone(),
         rows,
+    }
+}
+
+/// Borrow the plaintext Value at `(row key, column)` for a momentary reveal,
+/// indexing the still-owned Sets directly (independent of any `Comparison`).
+/// `None` when the column is out of range, the Entry is absent there, or the
+/// Set is Binary (never revealable, ADR 0004).
+pub fn reveal_value<'a>(
+    sets: &'a [(String, SecretShape)],
+    key: &RowKey,
+    col: usize,
+) -> Option<&'a Value> {
+    let (_, shape) = sets.get(col)?;
+    match (key, shape) {
+        (RowKey::Entry(name), SecretShape::Json(map)) => map.get(name),
+        (RowKey::WholeSet, SecretShape::Raw(value)) => Some(value),
+        _ => None,
     }
 }
 
@@ -167,5 +185,37 @@ mod tests {
         let bv = project(&Comparison::build(&bin));
         assert_eq!(bv.rows[0].name, "(whole set)");
         assert!(matches!(bv.rows[0].cells[0], MatrixCell::Present { len: 4, .. }));
+    }
+
+    use crate::compare::RowKey;
+    use crate::secret::EntryName;
+
+    fn entry_key(name: &str) -> RowKey {
+        RowKey::Entry(EntryName::from_path(&[name.to_string()]))
+    }
+
+    #[test]
+    fn reveal_present_json_entry_and_raw_whole_set() {
+        let sets = [env("prod", r#"{"A":"secret"}"#)];
+        assert_eq!(
+            reveal_value(&sets, &entry_key("A"), 0).map(|v| v.expose()),
+            Some("secret")
+        );
+        let raw = [("prod".to_string(), SecretShape::from_secret_string("raw-token"))];
+        assert_eq!(
+            reveal_value(&raw, &RowKey::WholeSet, 0).map(|v| v.expose()),
+            Some("raw-token")
+        );
+    }
+
+    #[test]
+    fn reveal_is_none_for_absent_oob_and_binary() {
+        let sets = [
+            env("prod", r#"{"A":"x"}"#),
+            ("bin".to_string(), SecretShape::from_secret_binary(vec![1, 2, 3])),
+        ];
+        assert!(reveal_value(&sets, &entry_key("MISSING"), 0).is_none());
+        assert!(reveal_value(&sets, &entry_key("A"), 9).is_none(), "col out of range");
+        assert!(reveal_value(&sets, &RowKey::WholeSet, 1).is_none(), "binary never reveals");
     }
 }
