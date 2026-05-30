@@ -11,7 +11,8 @@ use super::name::EntryName;
 use super::value::Value;
 
 /// Opaque bytes of a `SecretBinary`, held in a zeroizing buffer and never
-/// rendered (ADR 0004). Compared only by length/hash in a later slice.
+/// rendered (ADR 0004). The comparison engine compares them by content
+/// (`bytes_eq`) and surfaces only their length as a masked token.
 pub struct SecretBytes(SecretBox<[u8]>);
 
 impl SecretBytes {
@@ -25,6 +26,15 @@ impl SecretBytes {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Crate-internal byte equality, used by the comparison engine to group
+    /// Binary cells. Deliberately **not** a public `PartialEq`: a secret type
+    /// should not gain broad value comparison. Not constant-time — both
+    /// operands are in-process secrets the same user owns, so there is no
+    /// cross-trust timing channel to defend.
+    pub(crate) fn bytes_eq(&self, other: &SecretBytes) -> bool {
+        self.0.expose_secret() == other.0.expose_secret()
     }
 }
 
@@ -119,6 +129,20 @@ mod tests {
             }
             other => panic!("expected Binary, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bytes_eq_compares_contents_not_just_length() {
+        let a = SecretBytes::new(vec![1, 2, 3]);
+        let b = SecretBytes::new(vec![1, 2, 3]);
+        let same_len_diff = SecretBytes::new(vec![1, 2, 4]); // equal length, different bytes
+        let diff_len = SecretBytes::new(vec![1, 2]);
+        assert!(a.bytes_eq(&b), "identical bytes must be equal");
+        assert!(
+            !a.bytes_eq(&same_len_diff),
+            "equal length but different bytes must NOT be equal"
+        );
+        assert!(!a.bytes_eq(&diff_len), "different length must not be equal");
     }
 
     #[test]
