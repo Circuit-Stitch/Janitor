@@ -3,8 +3,6 @@
 
 use crate::secret::{EntryName, Value};
 
-// Result types are added in Step 4 (below the imports, above this test module).
-
 /// A point-in-time comparison of one Application's Set across its Environments.
 /// Borrows the fetched Sets — build it to render, don't store it (ADR 0009).
 #[derive(Debug)]
@@ -46,9 +44,21 @@ pub enum EntryState {
 /// One Environment's view of a row.
 pub enum Cell<'a> {
     /// A JSON leaf Entry or a Raw whole-value — revealable.
-    Text { value: &'a Value, len: usize, group: GroupId },
+    Text {
+        value: &'a Value,
+        /// Byte length of the Value, **precomputed** so the masked view can
+        /// render length-sized dots without exposing the Value (ADR 0003). The
+        /// engine is the sole constructor and sets this from `value.expose().len()`.
+        len: usize,
+        group: GroupId,
+    },
     /// A `SecretBinary` Set — length and equality only; never revealable.
-    Binary { len: usize, group: GroupId },
+    Binary {
+        /// Byte length of the binary blob (`SecretBytes::len`) — the masked
+        /// length token; there is no Value to expose for a binary cell.
+        len: usize,
+        group: GroupId,
+    },
     /// Not present in this Environment.
     Absent,
 }
@@ -102,8 +112,15 @@ mod tests {
     #[test]
     fn reveal_exposes_text_but_not_binary_or_absent() {
         let v = Value::string("s3cr3t");
-        let text = Cell::Text { value: &v, len: 6, group: GroupId(0) };
-        let binary = Cell::Binary { len: 4, group: GroupId(0) };
+        let text = Cell::Text {
+            value: &v,
+            len: 6,
+            group: GroupId(0),
+        };
+        let binary = Cell::Binary {
+            len: 4,
+            group: GroupId(0),
+        };
         let absent = Cell::Absent;
         assert_eq!(text.reveal().map(|v| v.expose()), Some("s3cr3t"));
         assert!(binary.reveal().is_none(), "Binary must never reveal");
@@ -122,14 +139,27 @@ mod tests {
                 key: RowKey::Entry(entry("PASSWORD")),
                 state: EntryState::Gap,
                 cells: vec![
-                    Cell::Text { value: &v, len: 7, group: GroupId(0) },
-                    Cell::Binary { len: 4, group: GroupId(1) },
+                    Cell::Text {
+                        value: &v,
+                        len: 7,
+                        group: GroupId(0),
+                    },
+                    Cell::Binary {
+                        len: 4,
+                        group: GroupId(1),
+                    },
                     Cell::Absent,
                 ],
             }],
         };
         let rendered = format!("{cmp:?}");
-        assert!(!rendered.contains("hunter2"), "Debug leaked the secret: {rendered}");
-        assert!(rendered.contains("PASSWORD"), "Entry names are metadata and should show");
+        assert!(
+            !rendered.contains("hunter2"),
+            "Debug leaked the secret: {rendered}"
+        );
+        assert!(
+            rendered.contains("PASSWORD"),
+            "Entry names are metadata and should show"
+        );
     }
 }
