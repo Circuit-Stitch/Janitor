@@ -1,6 +1,8 @@
 slint::include_modules!();
 
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use slint::{ModelRc, SharedString, VecModel};
 
@@ -9,7 +11,7 @@ use janitor_core::config::Mapping;
 use janitor_core::mock::MockSource;
 use janitor_core::secret::SecretShape;
 use janitor_core::source::SecretSource;
-use janitor_core::view::{project, MatrixCell, MatrixRow, MatrixView};
+use janitor_core::view::{project, reveal_value, MatrixCell, MatrixRow, MatrixView};
 
 /// Hardcoded Payments App for this task (the sidebar/config arrives in Task 9).
 fn payments_mappings() -> Vec<Mapping> {
@@ -109,15 +111,53 @@ fn env_models(view: &MatrixView) -> ModelRc<SharedString> {
     ModelRc::from(Rc::new(VecModel::from(envs)))
 }
 
+/// In-memory state shared across Slint callbacks. Owns the fetched Sets (so a
+/// reveal can re-borrow plaintext) and the owned, masked `MatrixView`. It never
+/// stores a `Comparison` (which would borrow `sets` — a self-referential trap).
+struct AppState {
+    sets: Vec<(String, SecretShape)>,
+    view: MatrixView,
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
 
     let source = MockSource::new();
     let sets = fetch_sets(&source, &payments_mappings());
-    let view = project(&Comparison::build(&sets)); // Comparison is transient — dropped here.
+    let view = project(&Comparison::build(&sets));
 
     ui.set_environments(env_models(&view));
     ui.set_rows(to_row_models(&view));
+
+    let state = Rc::new(RefCell::new(AppState { sets, view }));
+
+    // Reveal: re-borrow plaintext from the owned Sets, show it, auto-clear.
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_reveal_cell(move |row, col| {
+            let ui = ui_weak.unwrap();
+            let st = state.borrow();
+            let Some(matrix_row) = st.view.rows.get(row as usize) else {
+                return;
+            };
+            if let Some(value) = reveal_value(&st.sets, &matrix_row.key, col as usize) {
+                ui.set_revealed_row(row);
+                ui.set_revealed_col(col);
+                ui.set_revealed_text(SharedString::from(value.expose()));
+
+                // Clear (not just hide) the plaintext out of the model on timeout.
+                let ui_weak = ui.as_weak();
+                slint::Timer::single_shot(Duration::from_secs(5), move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_revealed_text(SharedString::new());
+                        ui.set_revealed_row(-1);
+                        ui.set_revealed_col(-1);
+                    }
+                });
+            }
+        });
+    }
 
     ui.run()
 }
