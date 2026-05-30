@@ -1,11 +1,96 @@
+import { ScrollView } from "std-widgets.slint";
+
+export struct CellView {
+    absent: bool,
+    dots: string,
+    length: string,
+    hex: string,
+}
+
+export struct RowView {
+    name: string,
+    state: string,    // "Aligned" / "Drift" / "Gap"
+    glyph: string,    // "=" / "≠" / "ø"  (meaningful for 2 envs)
+    cells: [CellView],
+}
+
 export component MainWindow inherits Window {
     title: "Janitor";
     preferred-width: 1100px;
     preferred-height: 720px;
     background: #14161a;
 
-    Text {
-        text: "Janitor — booting…";
-        color: #c8ccd4;
+    in property <[string]> environments;
+    in property <[RowView]> rows;
+
+    // Reveal slot (Task 8 sets these). -1 = nothing revealed.
+    in property <int> revealed-row: -1;
+    in property <int> revealed-col: -1;
+    in property <string> revealed-text;
+
+    callback reveal-cell(int, int);
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 6px;
+
+        // Column header
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: "ENTRY"; color: #8a8f98; width: 320px; }
+            for env in environments : Text {
+                text: env;
+                color: #c8ccd4;
+                horizontal-stretch: 1;
+            }
+        }
+
+        ScrollView {
+            VerticalLayout {
+                spacing: 2px;
+                for row[i] in rows : HorizontalLayout {
+                    spacing: 12px;
+                    // Entry name + state
+                    VerticalLayout {
+                        width: 320px;
+                        Text { text: row.name; color: white; overflow: elide; }
+                        Text {
+                            text: row.state + "   " + row.glyph;
+                            color: row.state == "Gap" ? #6b7280
+                                 : row.state == "Drift" ? #e0a356
+                                 : #5db07a;
+                            font-size: 11px;
+                        }
+                    }
+                    // One cell per environment
+                    for cell[j] in row.cells : Rectangle {
+                        horizontal-stretch: 1;
+                        property <bool> is-revealed:
+                            root.revealed-row == i && root.revealed-col == j;
+                        background: touch.has-hover ? #1b1e24 : transparent;
+                        touch := TouchArea {
+                            clicked => { root.reveal-cell(i, j); }
+                        }
+                        HorizontalLayout {
+                            padding: 6px;
+                            spacing: 8px;
+                            if cell.absent : Text {
+                                text: "— absent";
+                                color: #4b5563;
+                                horizontal-stretch: 1;
+                            }
+                            if !cell.absent : Text {
+                                text: is-revealed ? root.revealed-text : cell.dots;
+                                color: is-revealed ? #ffd479 : #6b7280;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                            if !cell.absent : Text { text: cell.length; color: #6b7280; }
+                            if !cell.absent : Text { text: cell.hex; color: #9aa0aa; }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
