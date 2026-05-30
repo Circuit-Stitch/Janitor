@@ -3,7 +3,7 @@
 A short statement of what Janitor defends against, what it explicitly does not,
 and the trust boundaries the design assumes. Consolidates the security posture
 spread across [ADR 0001](adr/0001-non-stomping-writes-via-staged-put-and-cas.md)–
-[ADR 0006](adr/0006-version-history-and-restore.md). See [CONTEXT.md](../CONTEXT.md)
+[ADR 0007](adr/0007-ci-and-distribution.md). See [CONTEXT.md](../CONTEXT.md)
 for terminology.
 
 ## What Janitor is
@@ -58,6 +58,11 @@ visibility** across Environments.
   background polling (ADR 0005).
 - **Version-quota exhaustion / AWS limits** — enforced write-rate + retry caps +
   mandatory cleanup of staged versions (ADR 0001).
+- **Tampered / spoofed downloads** — macOS bundles are Developer ID signed +
+  notarized and Windows bundles are Authenticode signed, so users install cleanly
+  and the artifact's origin is cryptographically verifiable (ADR 0007). Linux is
+  unsigned (no platform gatekeeping). If a signing identity lapses, the release
+  job fails loudly rather than shipping unsigned.
 
 ## Explicit non-goals (what Janitor does NOT defend against)
 
