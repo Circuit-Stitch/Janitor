@@ -7,30 +7,54 @@ use std::time::Duration;
 use slint::{ModelRc, SharedString, VecModel};
 
 use janitor_core::compare::{Comparison, EntryState};
-use janitor_core::config::Mapping;
+use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::mock::MockSource;
 use janitor_core::secret::SecretShape;
 use janitor_core::source::SecretSource;
 use janitor_core::view::{project, reveal_value, MatrixCell, MatrixRow, MatrixView};
 
-/// Hardcoded Payments App for this task (the sidebar/config arrives in Task 9).
-fn payments_mappings() -> Vec<Mapping> {
-    vec![
-        Mapping {
-            environment: "prod".into(),
-            account_id: "914xxxxxx021".into(),
-            region: "us-east-1".into(),
-            secret_id: "payments/prod".into(),
-            permission_set: "ReadOnly".into(),
-        },
-        Mapping {
-            environment: "staging".into(),
-            account_id: "550xxxxxx118".into(),
-            region: "us-west-2".into(),
-            secret_id: "payments/staging".into(),
-            permission_set: "ReadOnly".into(),
-        },
-    ]
+/// A few seeded Applications. Payments is hand-seeded in MockSource; the others
+/// fall back to deterministic fabrication, and some have >2 Environments to show
+/// the matrix generalize.
+fn seeded_config() -> Config {
+    let app = |name: &str, base: &str, envs: &[(&str, &str, &str)]| Application {
+        name: name.into(),
+        environments: envs
+            .iter()
+            .map(|(env, account, region)| Mapping {
+                environment: (*env).into(),
+                account_id: (*account).into(),
+                region: (*region).into(),
+                secret_id: format!("{base}/{env}"),
+                permission_set: "ReadOnly".into(),
+            })
+            .collect(),
+    };
+    Config {
+        sso_start_url: "https://acme.awsapps.com/start".into(),
+        sso_region: "us-east-1".into(),
+        applications: vec![
+            app("Payments API", "payments", &[
+                ("prod", "914xxxxxx021", "us-east-1"),
+                ("staging", "550xxxxxx118", "us-west-2"),
+            ]),
+            app("Auth Service", "auth", &[
+                ("prod", "914xxxxxx021", "us-east-1"),
+                ("staging", "550xxxxxx118", "us-west-2"),
+                ("dev", "330xxxxxx777", "us-west-2"),
+            ]),
+            app("Billing Worker", "billing", &[
+                ("prod", "914xxxxxx021", "us-east-1"),
+                ("staging", "550xxxxxx118", "us-west-2"),
+            ]),
+            app("Notifications", "notif", &[
+                ("prod", "914xxxxxx021", "us-east-1"),
+                ("staging", "550xxxxxx118", "us-west-2"),
+                ("dev", "330xxxxxx777", "us-west-2"),
+                ("qa", "330xxxxxx777", "us-west-2"),
+            ]),
+        ],
+    }
 }
 
 /// Fetch every Environment's Set for a set of mappings.
@@ -39,6 +63,23 @@ fn fetch_sets(source: &dyn SecretSource, mappings: &[Mapping]) -> Vec<(String, S
         .iter()
         .map(|m| (m.environment.clone(), source.fetch(m).expect("mock never fails")))
         .collect()
+}
+
+/// Build the masked view for one Application from the source.
+fn build_app(
+    source: &dyn SecretSource,
+    app: &Application,
+) -> (Vec<(String, SecretShape)>, MatrixView) {
+    let sets = fetch_sets(source, &app.environments);
+    let view = project(&Comparison::build(&sets));
+    (sets, view)
+}
+
+fn drift_count(view: &MatrixView) -> usize {
+    view.rows
+        .iter()
+        .filter(|r| r.state == EntryState::Drift)
+        .count()
 }
 
 /// Masked length-dots, capped so a long Value does not blow out the row.
@@ -111,27 +152,81 @@ fn env_models(view: &MatrixView) -> ModelRc<SharedString> {
     ModelRc::from(Rc::new(VecModel::from(envs)))
 }
 
-/// In-memory state shared across Slint callbacks. Owns the fetched Sets (so a
-/// reveal can re-borrow plaintext) and the owned, masked `MatrixView`. It never
-/// stores a `Comparison` (which would borrow `sets` — a self-referential trap).
+/// Sidebar models, marking `selected`.
+fn app_models(source: &dyn SecretSource, config: &Config, selected: usize) -> ModelRc<AppItem> {
+    let items: Vec<AppItem> = config
+        .applications
+        .iter()
+        .enumerate()
+        .map(|(i, app)| {
+            let (_, view) = build_app(source, app);
+            let n = drift_count(&view);
+            AppItem {
+                name: app.name.clone().into(),
+                subtitle: format!("{} envs", app.environments.len()).into(),
+                drift: if n > 0 {
+                    format!("{n} drift").into()
+                } else {
+                    SharedString::new()
+                },
+                selected: i == selected,
+            }
+        })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(items)))
+}
+
+/// In-memory state shared across Slint callbacks.
 struct AppState {
+    source: MockSource,
+    config: Config,
+    selected: usize,
     sets: Vec<(String, SecretShape)>,
     view: MatrixView,
+}
+
+/// Rebuild the matrix for the currently-selected Application and push all models.
+fn render(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let mut st = state.borrow_mut();
+    let selected = st.selected;
+    let app = st.config.applications[selected].clone();
+    let (sets, view) = build_app(&st.source, &app);
+    st.sets = sets;
+    st.view = view;
+    ui.set_environments(env_models(&st.view));
+    ui.set_rows(to_row_models(&st.view));
+    ui.set_apps(app_models(&st.source, &st.config, selected));
 }
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
 
-    let source = MockSource::new();
-    let sets = fetch_sets(&source, &payments_mappings());
-    let view = project(&Comparison::build(&sets));
+    let config = seeded_config();
+    let state = Rc::new(RefCell::new(AppState {
+        source: MockSource::new(),
+        config,
+        selected: 0,
+        sets: Vec::new(),
+        view: MatrixView {
+            environments: Vec::new(),
+            rows: Vec::new(),
+        },
+    }));
 
-    ui.set_environments(env_models(&view));
-    ui.set_rows(to_row_models(&view));
+    render(&ui, &state);
 
-    let state = Rc::new(RefCell::new(AppState { sets, view }));
+    // Sidebar selection.
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_select_app(move |index| {
+            let ui = ui_weak.unwrap();
+            state.borrow_mut().selected = index as usize;
+            render(&ui, &state);
+        });
+    }
 
-    // Reveal: re-borrow plaintext from the owned Sets, show it, auto-clear.
+    // Reveal.
     {
         let ui_weak = ui.as_weak();
         let state = state.clone();
@@ -145,8 +240,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_revealed_row(row);
                 ui.set_revealed_col(col);
                 ui.set_revealed_text(SharedString::from(value.expose()));
-
-                // Clear (not just hide) the plaintext out of the model on timeout.
                 let ui_weak = ui.as_weak();
                 slint::Timer::single_shot(Duration::from_secs(5), move || {
                     if let Some(ui) = ui_weak.upgrade() {
