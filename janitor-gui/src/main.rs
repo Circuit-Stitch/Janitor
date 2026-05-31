@@ -430,21 +430,14 @@ fn on_env_discovered(ui: &MainWindow, state: &Rc<RefCell<AppState>>, mapping: Ma
         let Some(app) = st.config.applications.get_mut(target) else {
             return;
         };
-        // Reject a duplicate Environment name rather than overwrite its Mapping.
-        if app
-            .environments
-            .iter()
-            .any(|m| m.environment == mapping.environment)
-        {
+        let env_name = mapping.environment.clone();
+        // Reject a duplicate Environment name rather than overwrite its Mapping;
+        // the no-stomp invariant lives in core (`Application::add_environment`).
+        if let Err(e) = app.add_environment(mapping.clone()) {
             drop(st);
-            set_manage_status(&format!(
-                "Environment \"{}\" already exists.",
-                mapping.environment
-            ));
+            set_manage_status(&format!("Cannot add: {e}."));
             return;
         }
-        let env_name = mapping.environment.clone();
-        app.environments.push(mapping.clone());
         st.config.last_pick = Some(mapping);
         if !matches!(st.backend, Backend::Mock { .. }) {
             let _ = st.config.save();
@@ -504,6 +497,10 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
         win.on_remove_env(move |index| remove_bound_env(&state, index as usize));
     }
     {
+        let state = state.clone();
+        win.on_rename_app(move |name| rename_bound_app(&state, name.to_string()));
+    }
+    {
         let weak = win.as_weak();
         win.on_close_window(move || {
             if let Some(win) = weak.upgrade() {
@@ -557,9 +554,7 @@ fn remove_bound_env(state: &Rc<RefCell<AppState>>, index: usize) {
         let mut st = state.borrow_mut();
         let Some(target) = st.manage_app else { return };
         if let Some(app) = st.config.applications.get_mut(target) {
-            if index < app.environments.len() {
-                app.environments.remove(index);
-            }
+            app.remove_environment(index);
         }
         if !matches!(st.backend, Backend::Mock { .. }) {
             let _ = st.config.save();
@@ -568,6 +563,24 @@ fn remove_bound_env(state: &Rc<RefCell<AppState>>, index: usize) {
     };
     refresh_manage_window(state);
     dispatch_via_state_refresh(state, target, reload);
+}
+
+/// Rename the **bound** Application (ADR 0013): update Config (locations only),
+/// persist, then refresh the Manage window (title + name field) and the sidebar.
+/// A blank/invalid name is refused by core and leaves the name untouched.
+fn rename_bound_app(state: &Rc<RefCell<AppState>>, name: String) {
+    {
+        let mut st = state.borrow_mut();
+        let Some(target) = st.manage_app else { return };
+        if !st.config.rename_application(target, &name) {
+            return;
+        }
+        if !matches!(st.backend, Backend::Mock { .. }) {
+            let _ = st.config.save();
+        }
+    }
+    refresh_manage_window(state);
+    with_main_ui(|ui| push_matrix(ui, state));
 }
 
 /// Push the bound Application's name + Environment rows into the Manage window.

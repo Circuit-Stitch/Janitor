@@ -323,6 +323,7 @@ export component ManageWindow inherits Window {
     callback add-env-discover(string); // env name only → Discovery fills the rest
     callback pick-choice(int);         // chosen index → AdvanceDiscovery
     callback remove-env(int);
+    callback rename-app(string);       // new name → Config::rename_application
     callback close-window();
 
     VerticalLayout {
@@ -330,6 +331,19 @@ export component ManageWindow inherits Window {
         spacing: 10px;
 
         Text { text: "Manage · " + root.app-name; color: white; font-size: 18px; }
+
+        // Rename the Application. Seeded with the current name; the field is
+        // re-seeded by `app-name` changing (so a refresh shows the saved name).
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Name"; color: #8a8f98; vertical-alignment: center; width: 60px; }
+            rename-field := LineEdit {
+                text: root.app-name;
+                horizontal-stretch: 1;
+                accepted => { root.rename-app(self.text); }
+            }
+            Button { text: "Rename"; clicked => { root.rename-app(rename-field.text); } }
+        }
 
         Text { text: "ENVIRONMENTS"; color: #8a8f98; font-size: 11px; }
         if root.envs.length == 0 : Text {
