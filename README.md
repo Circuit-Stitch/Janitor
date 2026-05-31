@@ -7,7 +7,7 @@
 > The name is the thesis: the janitor holds the most keys, yet keeps none.
 
 **License:** [GPL-3.0-only](LICENSE) · **Status:** core + GUI tracer-bullet +
-headless Identity Center auth landed; no write path yet, GUI still on mock data
+guided Identity Center sign-in landed; no write path yet, GUI still on mock data
 ([details below](#status)) · **CI:** lint · test · coverage
 
 ---
@@ -84,6 +84,7 @@ write path or live-wired data flow exists yet.
 | Comparison matrix (Aligned / Drift / Gap) + masked read model | ✅ Implemented & tested — [ADR 0009](docs/adr/0009-comparison-engine-result-model.md) |
 | `janitor-gui` (Slint matrix view) — masked cells, per-cell reveal, settings | ✅ Tracer-bullet on a mock `SecretSource` — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) |
 | Identity Center Sign-in + per-Environment Credentials + Secrets Manager I/O | ✅ Headless slice in `janitor-aws` (logic tested vs. fakes; browser/SDK shell untested by design) — [ADR 0002](docs/adr/0002-identity-center-only-memory-only-auth.md) / [ADR 0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md). Live verification (Milestone B) pending |
+| Guided sign-in — browser → log in → auto-discovered account / role / secret, org + last pick remembered | ✅ `live-verify` binary in `janitor-aws` (`ListAccounts`/`Roles`/`Secrets` + tested `select::resolve`; stdin/SDK shell untested) — [ADR 0011](docs/adr/0011-guided-sign-in-and-discovery.md). Live verification (Milestone B) pending |
 | `janitor-aws` ↔ GUI wiring (real data in the matrix) | 📋 Next slice, not built |
 | Non-stomping write engine | 📋 Designed — [ADR 0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md), not built |
 
@@ -112,7 +113,7 @@ cargo run -p janitor-gui             # tracer-bullet GUI (mock data; no real AWS
 
 # janitor-aws human-gated binaries (need a browser + a real Identity Center org):
 cargo run -p janitor-aws --bin loopback-spike   # browser↔loopback shell, no AWS
-cargo run -p janitor-aws --bin live-verify -- … # live round-trip (ADR 0010 §5)
+cargo run -p janitor-aws --bin live-verify      # guided sign-in: log in, then pick (ADR 0011)
 ```
 
 ## Architecture
@@ -168,6 +169,7 @@ This README is only the front door — the depth lives here:
   - [0008](docs/adr/0008-secret-shape-flattening-scheme.md) — Secret-shape flattening: leaf-type-preserving dotted paths with escaped dots
   - [0009](docs/adr/0009-comparison-engine-result-model.md) — Comparison engine result model (Aligned / Drift / Gap)
   - [0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md) — `janitor-aws` adapter crate and the Identity Center auth object model
+  - [0011](docs/adr/0011-guided-sign-in-and-discovery.md) — Guided sign-in: issuer-scoped registration, post-sign-in discovery, remembered picks
 - **[CLAUDE.md](CLAUDE.md)** — working agreements and invariants for
   contributors (and AI assistants).
 
