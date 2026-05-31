@@ -63,8 +63,8 @@ impl OidcClient for AwsOidcClient {
         let out = self
             .inner
             .create_token()
-            .client_id(&ex.registration.client_id)
-            .client_secret(&ex.registration.client_secret)
+            .client_id(ex.registration.client_id.as_str())
+            .client_secret(ex.registration.client_secret.as_str())
             .grant_type("authorization_code")
             .code(ex.code)
             .code_verifier(ex.code_verifier)
