@@ -6,8 +6,9 @@
 > and no credentials of its own — it borrows them on demand and forgets them.
 > The name is the thesis: the janitor holds the most keys, yet keeps none.
 
-**License:** [GPL-3.0-only](LICENSE) · **Status:** core + GUI tracer-bullet +
-guided Identity Center sign-in landed; no write path yet, GUI still on mock data
+**License:** [GPL-3.0-only](LICENSE) · **Status:** core + GUI + guided Identity
+Center sign-in + the GUI↔AWS bridge landed — the matrix reads real AWS (mock
+behind `JANITOR_MOCK=1`); no write path yet
 ([details below](#status)) · **CI:** lint · test · coverage
 
 ---
@@ -85,7 +86,7 @@ write path or live-wired data flow exists yet.
 | `janitor-gui` (Slint matrix view) — masked cells, per-cell reveal, settings | ✅ Tracer-bullet on a mock `SecretSource` — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) |
 | Identity Center Sign-in + per-Environment Credentials + Secrets Manager I/O | ✅ Headless slice in `janitor-aws` (logic tested vs. fakes; browser/SDK shell untested by design) — [ADR 0002](docs/adr/0002-identity-center-only-memory-only-auth.md) / [ADR 0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md). Live verification (Milestone B) pending |
 | Guided sign-in — browser → log in → auto-discovered account / role / secret, org + last pick remembered | ✅ `live-verify` binary in `janitor-aws` (`ListAccounts`/`Roles`/`Secrets` + tested `select::resolve`; stdin/SDK shell untested) — [ADR 0011](docs/adr/0011-guided-sign-in-and-discovery.md). Live verification (Milestone B) pending |
-| `janitor-aws` ↔ GUI wiring (real data in the matrix) | 📋 Next slice, not built |
+| `janitor-aws` ↔ GUI wiring (real data in the matrix) | ✅ Worker-threaded bridge + lazy sign-in; secrets stay in the worker; reveal round-trips; `JANITOR_MOCK=1` runs offline — [ADR 0012](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md) (live browser path human-gated) |
 | Non-stomping write engine | 📋 Designed — [ADR 0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md), not built |
 
 The workspace is three crates — `janitor-core` (offline, ≥80% coverage gate),
@@ -109,7 +110,8 @@ cargo fmt                            # format
 #   cargo install cargo-llvm-cov
 cargo llvm-cov -p janitor-core
 
-cargo run -p janitor-gui             # tracer-bullet GUI (mock data; no real AWS)
+cargo run -p janitor-gui             # real AWS via the worker bridge (browser sign-in; needs a configured org)
+JANITOR_MOCK=1 cargo run -p janitor-gui          # offline mock (bash); PowerShell: $env:JANITOR_MOCK=1; cargo run -p janitor-gui
 
 # janitor-aws human-gated binaries (need a browser + a real Identity Center org):
 # First run? docs/iam_setup.md sets up the Identity Center org + permission set.
@@ -175,6 +177,7 @@ This README is only the front door — the depth lives here:
   - [0009](docs/adr/0009-comparison-engine-result-model.md) — Comparison engine result model (Aligned / Drift / Gap)
   - [0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md) — `janitor-aws` adapter crate and the Identity Center auth object model
   - [0011](docs/adr/0011-guided-sign-in-and-discovery.md) — Guided sign-in: issuer-scoped registration, post-sign-in discovery, remembered picks
+  - [0012](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md) — GUI↔AWS bridge: worker thread, a tested `Session`, and lazy sign-in
 - **[CLAUDE.md](CLAUDE.md)** — working agreements and invariants for
   contributors (and AI assistants).
 

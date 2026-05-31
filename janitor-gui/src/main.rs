@@ -59,7 +59,7 @@ fn seeded_config() -> Config {
             .collect(),
     };
     Config {
-        sso_start_url: "https://acme.awsapps.com/start".into(),
+        sso_start_url: "https://identitycenter.amazonaws.com/ssoins-mockmock0000".into(),
         sso_region: "us-east-1".into(),
         applications: vec![
             app(
