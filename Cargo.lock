@@ -3270,9 +3270,11 @@ dependencies = [
 name = "janitor-gui"
 version = "0.1.0"
 dependencies = [
+ "janitor-aws",
  "janitor-core",
  "slint",
  "slint-build",
+ "tokio",
 ]
 
 [[package]]
