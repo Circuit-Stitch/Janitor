@@ -13,14 +13,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > `GetRoleCredentials` → `GetSecretValue` → `SecretShape`) behind a tested
 > `AuthenticatedSource` facade. All of `janitor-aws`'s brokering / orchestration /
 > error logic is unit-tested against fakes; only the browser/loopback/SDK shell is
-> untested by design (ADR 0010 §5). **Not yet wired:** the GUI still reads the mock
-> source (no `janitor-aws` ↔ GUI bridge), `Config` disk persistence is unbuilt, and
-> SDK error mapping is conservative pending **Milestone B** — running
-> `janitor-aws`'s `live-verify` binary against a real org to resolve the ADR 0010
-> verify list. Design and plan: [`docs/adr/0010-aws-adapter-crate-and-auth-object-model.md`](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md)
-> and [`docs/superpowers/plans/2026-05-30-identity-center-auth.md`](docs/superpowers/plans/2026-05-30-identity-center-auth.md).
+> untested by design (ADR 0010 §5). The `live-verify` binary is now a **guided
+> sign-in**: browser → log in → auto-discovered account/role/secret (via
+> `ListAccounts`/`ListAccountRoles`/`ListSecrets`, with a pure tested
+> 0/1/many+remembered-default `select::resolve`), with the org + last pick
+> remembered in `Config` (ADR 0011). The `--authorize-endpoint` flag is gone —
+> the endpoint is read from `RegisterClient`'s response and `issuerUrl` is passed.
+> **Not yet wired:** the GUI still reads the mock source (no `janitor-aws` ↔ GUI
+> bridge); SDK error mapping is conservative pending **Milestone B** — running
+> `live-verify` against a real org to resolve the ADR 0010/0011 verify lists
+> (incl. whether the start URL is accepted as `issuerUrl`). Design and plan:
+> [`docs/adr/0011-guided-sign-in-and-discovery.md`](docs/adr/0011-guided-sign-in-and-discovery.md)
+> and [`docs/superpowers/plans/2026-05-31-guided-sign-in.md`](docs/superpowers/plans/2026-05-31-guided-sign-in.md).
 > Domain glossary: [`CONTEXT.md`](CONTEXT.md); decisions: [`docs/adr/`](docs/adr/)
-> (0001–0010); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+> (0001–0011); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 > **Read those first** — this file only summarizes.
 
 ## What this is
