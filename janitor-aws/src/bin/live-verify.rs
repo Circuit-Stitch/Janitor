@@ -2,7 +2,7 @@
 //! a real Identity Center org:
 //!
 //!   cargo run -p janitor-aws --bin live-verify -- \
-//!       --authorize-endpoint https://oidc.<region>.amazonaws.com/authorize \
+//!       --start-url https://<org>.awsapps.com/start \
 //!       --sso-region <region> \
 //!       --account-id <acct> --role <permission-set> \
 //!       --secret-region <region> --secret-id <name-or-arn>
@@ -33,7 +33,7 @@ fn arg(flag: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() {
-    let authorize_endpoint = arg("--authorize-endpoint").expect("--authorize-endpoint");
+    let start_url = arg("--start-url").expect("--start-url");
     let sso_region = arg("--sso-region").expect("--sso-region");
     let account_id = arg("--account-id").expect("--account-id");
     let role = arg("--role").expect("--role");
@@ -53,7 +53,7 @@ async fn main() {
     let secrets_api = Arc::new(AwsSecretsApi::new());
     let clock = Arc::new(SystemClock);
 
-    let authenticator = Arc::new(Authenticator::new(oidc, authorize_endpoint));
+    let authenticator = Arc::new(Authenticator::new(oidc, start_url));
 
     // Initial Sign-in (this opens the browser).
     println!("Signing in (a browser tab will open)...");

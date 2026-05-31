@@ -16,6 +16,9 @@ use crate::types::{Credential, SsoToken};
 pub struct ClientRegistration {
     pub client_id: String,
     pub client_secret: String,
+    /// The `/authorize` endpoint AWS returns for this registration (ADR 0011);
+    /// used to build the browser URL instead of a hardcoded host.
+    pub authorization_endpoint: String,
 }
 
 /// Inputs needed to exchange an auth code for an SSO token.
@@ -29,10 +32,12 @@ pub struct TokenExchange<'a> {
 /// Wraps the unauthenticated OIDC ops: `RegisterClient` + `CreateToken`.
 #[async_trait]
 pub trait OidcClient: Send + Sync {
-    /// `RegisterClient` for a public client with the given loopback redirect
-    /// URIs and the `authorization_code` + `refresh_token` grants.
+    /// `RegisterClient` for a public client with the org `issuer_url`, the given
+    /// loopback redirect URIs, and the `authorization_code` + `refresh_token`
+    /// grants. The returned registration carries the authorize endpoint.
     async fn register_client(
         &self,
+        issuer_url: &str,
         redirect_uris: &[String],
     ) -> Result<ClientRegistration, SignInError>;
 

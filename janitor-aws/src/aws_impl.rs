@@ -39,6 +39,7 @@ impl AwsOidcClient {
 impl OidcClient for AwsOidcClient {
     async fn register_client(
         &self,
+        issuer_url: &str,
         redirect_uris: &[String],
     ) -> Result<ClientRegistration, SignInError> {
         let mut req = self
@@ -46,6 +47,7 @@ impl OidcClient for AwsOidcClient {
             .register_client()
             .client_name("janitor")
             .client_type("public")
+            .issuer_url(issuer_url)
             .grant_types("authorization_code")
             .grant_types("refresh_token")
             .scopes("sso:account:access");
@@ -58,6 +60,7 @@ impl OidcClient for AwsOidcClient {
         Ok(ClientRegistration {
             client_id: out.client_id().unwrap_or_default().to_string(),
             client_secret: out.client_secret().unwrap_or_default().to_string(),
+            authorization_endpoint: out.authorization_endpoint().unwrap_or_default().to_string(),
         })
     }
 

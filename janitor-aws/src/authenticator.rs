@@ -23,24 +23,22 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
 /// Drives a full Identity Center browser Sign-in.
 pub struct Authenticator {
     oidc: Arc<dyn OidcClient>,
-    /// The Identity Center authorization endpoint base (from the org's SSO start
-    /// URL / region), e.g. `https://oidc.<region>.amazonaws.com/authorize`.
-    authorize_endpoint: String,
+    /// The org's IAM Identity Center start/issuer URL (e.g.
+    /// `https://my-org.awsapps.com/start`). Passed to `RegisterClient` as
+    /// `issuerUrl`; the `/authorize` endpoint comes back in the registration.
+    issuer_url: String,
 }
 
 impl Authenticator {
-    pub fn new(oidc: Arc<dyn OidcClient>, authorize_endpoint: String) -> Self {
-        Authenticator {
-            oidc,
-            authorize_endpoint,
-        }
+    pub fn new(oidc: Arc<dyn OidcClient>, issuer_url: String) -> Self {
+        Authenticator { oidc, issuer_url }
     }
 
     /// Run the flow once, returning a fresh SSO token.
     pub async fn sign_in_once(&self) -> Result<SsoToken, SignInError> {
-        // 1. Register a public client for our loopback redirect URIs.
+        // 1. Register a public client (issuer-scoped) for our loopback redirects.
         let uris = redirect_uris();
-        let registration = self.oidc.register_client(&uris).await?;
+        let registration = self.oidc.register_client(&self.issuer_url, &uris).await?;
 
         // 2. Bind a loopback port from the registered set, THEN build the URL
         //    with that exact redirect_uri (ADR 0010 §7 ordering).
@@ -49,7 +47,7 @@ impl Authenticator {
         let csrf = state::generate();
         let authorize_url = format!(
             "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state={}&scopes=sso:account:access",
-            self.authorize_endpoint,
+            registration.authorization_endpoint,
             urlencode(&registration.client_id),
             urlencode(&redirect_uri),
             urlencode(&pkce.challenge),
