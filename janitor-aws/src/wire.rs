@@ -4,7 +4,6 @@
 //! `aws_impl.rs` (untested shell).
 
 use async_trait::async_trait;
-use std::time::SystemTime;
 
 use crate::error::{SessionError, SignInError};
 use crate::types::{Credential, SsoToken};
@@ -81,7 +80,7 @@ pub trait SecretsApi: Send + Sync {
 pub mod fakes {
     use super::*;
     use std::sync::Mutex;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     /// A scripted role-credential client: each call pops the next scripted
     /// outcome, and records how many times it was called (to assert "exactly
