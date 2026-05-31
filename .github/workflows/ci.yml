@@ -20,6 +20,18 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
 
+      # janitor-gui (Slint) links system libraries at build time; the workspace
+      # clippy/build below needs them on the headless runner (ADR 0007).
+      - name: Install Slint Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 

@@ -2,13 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Status: foundation landed.** The Cargo workspace and `janitor-core`'s offline
-> bedrock exist — secret-shape model (parse/flatten/unflatten), zeroizing `Value`,
-> and `Config` load/save — under a CI lint/test/coverage lane. No AWS, GUI, or
-> write path yet. The design is specified in [`CONTEXT.md`](CONTEXT.md) (domain
-> glossary), [`docs/adr/`](docs/adr/) (decisions 0001–0008), and
-> [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (security posture). **Read those
-> first** — this file only summarizes.
+> **Status: GUI tracer-bullet landed.** The Cargo workspace, `janitor-core`'s
+> offline bedrock (secret-shape model, zeroizing `Value`, `Config` load/save,
+> comparison engine), and a thin `janitor-gui` (Slint) tracer-bullet now exist
+> under a CI lint/test/coverage lane. The GUI renders the masked Aligned/Drift/Gap
+> matrix with per-cell momentary reveal, sidebar Application switching, and an
+> in-memory settings/preferences surface — driven entirely by a mock `SecretSource`
+> in `janitor-core`. Real Identity Center auth, Secrets Manager I/O, and `Config`
+> disk persistence remain unbuilt. Design and plan: [`docs/superpowers/specs/2026-05-30-gui-tracer-bullet-design.md`](docs/superpowers/specs/2026-05-30-gui-tracer-bullet-design.md)
+> and [`docs/superpowers/plans/2026-05-30-gui-tracer-bullet.md`](docs/superpowers/plans/2026-05-30-gui-tracer-bullet.md).
+> Domain glossary: [`CONTEXT.md`](CONTEXT.md); decisions: [`docs/adr/`](docs/adr/)
+> (0001–0009); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+> **Read those first** — this file only summarizes.
 
 ## What this is
 
@@ -68,7 +73,7 @@ cargo test -- --nocapture         # show test stdout/stderr
 cargo clippy --all-targets        # lint
 cargo fmt                         # format
 cargo llvm-cov -p janitor-core    # coverage (≥80% gate)
-# cargo run -p janitor-gui        # (not yet — GUI lands in a later slice)
+cargo run -p janitor-gui          # tracer-bullet GUI (mock data; no real AWS)
 ```
 
 ## Working agreements

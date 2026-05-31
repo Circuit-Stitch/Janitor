@@ -1,0 +1,210 @@
+import { ScrollView, LineEdit, Button, ComboBox, Switch, SpinBox } from "std-widgets.slint";
+
+export struct CellView {
+    absent: bool,
+    dots: string,
+    length: string,
+    hex: string,
+}
+
+export struct RowView {
+    name: string,
+    state: string,
+    glyph: string,
+    cells: [CellView],
+}
+
+export struct AppItem {
+    name: string,
+    subtitle: string,
+    drift: string,
+    selected: bool,
+}
+
+export component MainWindow inherits Window {
+    title: "Janitor";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    background: root.dark ? #14161a : #f4f5f7;
+
+    in property <[string]> environments;
+    in property <[RowView]> rows;
+    in property <[AppItem]> apps;
+
+    in property <int> revealed-row: -1;
+    in property <int> revealed-col: -1;
+    in property <string> revealed-text;
+
+    callback reveal-cell(int, int);
+    callback select-app(int);
+    in-out property <bool> settings-open: false;
+    in-out property <string> sso-start-url;
+    in-out property <string> sso-region;
+    callback toggle-settings();
+    callback save-sso();
+    callback add-app(string);
+    callback remove-app(int);
+
+    in property <bool> dark: true;
+    in-out property <int> auto-hide-secs: 5;
+    callback set-theme(bool);
+    callback set-sort(int);
+    callback set-auto-hide(int);
+
+    HorizontalLayout {
+        // Sidebar
+        Rectangle {
+            width: 240px;
+            background: #0f1115;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 4px;
+                Text { text: "APPLICATIONS"; color: #6b7280; font-size: 11px; }
+                for app[i] in apps : Rectangle {
+                    height: 48px;
+                    background: app.selected ? #1b2330 : (atouch.has-hover ? #161a20 : transparent);
+                    atouch := TouchArea { clicked => { root.select-app(i); } }
+                    HorizontalLayout {
+                        padding: 8px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: app.name; color: white; }
+                            Text { text: app.subtitle; color: #6b7280; font-size: 11px; }
+                        }
+                        Text { text: app.drift; color: #e0a356; font-size: 11px; }
+                    }
+                }
+            }
+        }
+        // Main pane
+        VerticalLayout {
+            padding: 16px;
+            spacing: 6px;
+
+            HorizontalLayout {
+                Text { text: "Payments matrix"; color: #c8ccd4; horizontal-stretch: 1; }
+                Button { text: root.settings-open ? "Close settings" : "Settings"; clicked => { root.toggle-settings(); } }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                Text { text: "ENTRY"; color: #8a8f98; width: 320px; }
+                for env in environments : Text {
+                    text: env;
+                    color: #c8ccd4;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            ScrollView {
+                VerticalLayout {
+                    spacing: 2px;
+                    for row[i] in rows : HorizontalLayout {
+                        spacing: 12px;
+                        VerticalLayout {
+                            width: 320px;
+                            Text { text: row.name; color: white; overflow: elide; }
+                            Text {
+                                text: row.state + "   " + row.glyph;
+                                color: row.state == "Gap" ? #6b7280
+                                     : row.state == "Drift" ? #e0a356
+                                     : #5db07a;
+                                font-size: 11px;
+                            }
+                        }
+                        for cell[j] in row.cells : Rectangle {
+                            horizontal-stretch: 1;
+                            property <bool> is-revealed:
+                                root.revealed-row == i && root.revealed-col == j;
+                            background: touch.has-hover ? #1b1e24 : transparent;
+                            touch := TouchArea {
+                                clicked => { root.reveal-cell(i, j); }
+                            }
+                            HorizontalLayout {
+                                padding: 6px;
+                                spacing: 8px;
+                                if cell.absent : Text {
+                                    text: "— absent";
+                                    color: #4b5563;
+                                    horizontal-stretch: 1;
+                                }
+                                if !cell.absent : Text {
+                                    text: is-revealed ? root.revealed-text : cell.dots;
+                                    color: is-revealed ? #ffd479 : #6b7280;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                if !cell.absent : Text { text: cell.length; color: #6b7280; }
+                                if !cell.absent : Text { text: cell.hex; color: #9aa0aa; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if settings-open : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0b0d11;
+        VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+            Text { text: "Settings"; color: white; font-size: 18px; }
+            Button { text: "Close"; clicked => { root.toggle-settings(); } }
+
+            Text { text: "Identity Center"; color: #8a8f98; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Start URL"; color: #c8ccd4; width: 120px; }
+                start-url := LineEdit { text <=> root.sso-start-url; horizontal-stretch: 1; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Region"; color: #c8ccd4; width: 120px; }
+                region := LineEdit { text <=> root.sso-region; horizontal-stretch: 1; }
+            }
+            Button { text: "Save accounts"; clicked => { root.save-sso(); } }
+
+            Text { text: "Applications"; color: #8a8f98; }
+            for app[i] in apps : HorizontalLayout {
+                spacing: 8px;
+                Text { text: app.name; color: white; horizontal-stretch: 1; }
+                Text { text: app.subtitle; color: #6b7280; }
+                Button { text: "Remove"; clicked => { root.remove-app(i); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
+                Button { text: "Add"; clicked => { root.add-app(new-app.text); } }
+            }
+
+            Text { text: "Preferences"; color: #8a8f98; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Dark theme"; color: #c8ccd4; width: 120px; }
+                Switch { checked: root.dark; toggled => { root.set-theme(self.checked); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Sort"; color: #c8ccd4; width: 120px; }
+                ComboBox {
+                    model: ["Name", "Gap first"];
+                    current-index: 0;
+                    selected => { root.set-sort(self.current-index); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Reveal seconds"; color: #c8ccd4; width: 120px; }
+                SpinBox {
+                    minimum: 1;
+                    maximum: 60;
+                    value <=> root.auto-hide-secs;
+                    edited => { root.set-auto-hide(self.value); }
+                }
+            }
+        }
+    }
+}
