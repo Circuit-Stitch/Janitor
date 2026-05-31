@@ -6,8 +6,9 @@
 > and no credentials of its own — it borrows them on demand and forgets them.
 > The name is the thesis: the janitor holds the most keys, yet keeps none.
 
-**License:** [GPL-3.0-only](LICENSE) · **Status:** core foundation only — no AWS,
-GUI, or write path yet ([details below](#status)) · **CI:** lint · test · coverage
+**License:** [GPL-3.0-only](LICENSE) · **Status:** core + GUI tracer-bullet +
+guided Identity Center sign-in landed; no write path yet, GUI still on mock data
+([details below](#status)) · **CI:** lint · test · coverage
 
 ---
 
@@ -71,31 +72,36 @@ length is a deliberate, accepted side-channel — see the
 
 ## Status
 
-The repository is at the **foundation** stage. The security-critical core exists
-and is tested; nothing here talks to the network yet.
+The security-critical core, a GUI tracer-bullet, and a headless Identity Center
+auth slice all exist and are tested. The GUI still runs on mock data, and no
+write path or live-wired data flow exists yet.
 
 | Area | State |
 | --- | --- |
 | Secret-shape model — parse a Secret Set into comparable Entries; lossless flatten / unflatten to dotted-path Names | ✅ Implemented & tested |
 | Zeroizing secret types — `Value` kept out of `Debug` / `Display` / logs | ✅ Implemented & tested |
 | `Config` load / save — atomic TOML write, locations only | ✅ Implemented & tested |
-| Identity Center Sign-in + per-Environment Credentials | 📋 Designed — [ADR 0002](docs/adr/0002-identity-center-only-memory-only-auth.md), not built |
-| Secrets Manager I/O + comparison matrix | 📋 Designed — [ADR 0005](docs/adr/0005-clipboard-and-read-model.md), not built |
+| Comparison matrix (Aligned / Drift / Gap) + masked read model | ✅ Implemented & tested — [ADR 0009](docs/adr/0009-comparison-engine-result-model.md) |
+| `janitor-gui` (Slint matrix view) — masked cells, per-cell reveal, settings | ✅ Tracer-bullet on a mock `SecretSource` — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) |
+| Identity Center Sign-in + per-Environment Credentials + Secrets Manager I/O | ✅ Headless slice in `janitor-aws` (logic tested vs. fakes; browser/SDK shell untested by design) — [ADR 0002](docs/adr/0002-identity-center-only-memory-only-auth.md) / [ADR 0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md). Live verification (Milestone B) pending |
+| Guided sign-in — browser → log in → auto-discovered account / role / secret, org + last pick remembered | ✅ `live-verify` binary in `janitor-aws` (`ListAccounts`/`Roles`/`Secrets` + tested `select::resolve`; stdin/SDK shell untested) — [ADR 0011](docs/adr/0011-guided-sign-in-and-discovery.md). Live verification (Milestone B) pending |
+| `janitor-aws` ↔ GUI wiring (real data in the matrix) | 📋 Next slice, not built |
 | Non-stomping write engine | 📋 Designed — [ADR 0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md), not built |
-| `janitor-gui` (Slint matrix view) | 📋 Designed — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md), not built |
 
-Today the workspace is a single offline crate, `janitor-core`, whose unit tests
-pass under a ≥80% coverage gate.
+The workspace is three crates — `janitor-core` (offline, ≥80% coverage gate),
+`janitor-gui` (Slint), and `janitor-aws` (async AWS adapter). `cargo test
+--workspace` runs them all; the coverage gate stays on `janitor-core`, where
+correctness is proven (ADR 0010 §5).
 
 ## Build & test
 
-Standard Cargo. Only `janitor-core` exists today; the GUI joins the workspace in
-a later slice.
+Standard Cargo across a three-crate workspace (`janitor-core`, `janitor-gui`,
+`janitor-aws`).
 
 ```bash
 cargo build                          # build the workspace
-cargo test -p janitor-core           # run core tests (offline, no network)
-cargo test -p janitor-core <name>    # a single test (substring match)
+cargo test --workspace               # all crates (core + gui + janitor-aws fakes)
+cargo test -p janitor-core <name>    # a single core test (substring match)
 cargo clippy --all-targets           # lint
 cargo fmt                            # format
 
@@ -103,7 +109,12 @@ cargo fmt                            # format
 #   cargo install cargo-llvm-cov
 cargo llvm-cov -p janitor-core
 
-# cargo run -p janitor-gui           # not yet — the GUI lands in a later slice
+cargo run -p janitor-gui             # tracer-bullet GUI (mock data; no real AWS)
+
+# janitor-aws human-gated binaries (need a browser + a real Identity Center org):
+# First run? docs/iam_setup.md sets up the Identity Center org + permission set.
+cargo run -p janitor-aws --bin loopback-spike   # browser↔loopback shell, no AWS
+cargo run -p janitor-aws --bin live-verify      # guided sign-in: log in, then pick (ADR 0011)
 ```
 
 ## Architecture
@@ -148,6 +159,10 @@ This README is only the front door — the depth lives here:
   Environment, Application, the Aligned / Drift / Gap states). Read this first.
 - **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** — what Janitor defends
   against, the explicit non-goals, and the trust boundaries.
+- **[docs/iam_setup.md](docs/iam_setup.md)** — set up an IAM Identity Center org
+  and permission set to run the live `live-verify` harness (Milestone B).
+- **[docs/iam_setup.md](docs/iam_setup.md)** — set up an IAM Identity Center org
+  and permission set to run the live `live-verify` harness (Milestone B).
 - **Architecture Decision Records** in [`docs/adr/`](docs/adr/):
   - [0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md) — Non-stomping writes via staged `PutSecretValue` + atomic stage CAS
   - [0002](docs/adr/0002-identity-center-only-memory-only-auth.md) — Identity-Center-only, memory-only authentication
@@ -157,6 +172,9 @@ This README is only the front door — the depth lives here:
   - [0006](docs/adr/0006-version-history-and-restore.md) — Version history and restore as a first-class feature
   - [0007](docs/adr/0007-ci-and-distribution.md) — CI and distribution: cargo-packager bundles, signed on macOS and Windows
   - [0008](docs/adr/0008-secret-shape-flattening-scheme.md) — Secret-shape flattening: leaf-type-preserving dotted paths with escaped dots
+  - [0009](docs/adr/0009-comparison-engine-result-model.md) — Comparison engine result model (Aligned / Drift / Gap)
+  - [0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md) — `janitor-aws` adapter crate and the Identity Center auth object model
+  - [0011](docs/adr/0011-guided-sign-in-and-discovery.md) — Guided sign-in: issuer-scoped registration, post-sign-in discovery, remembered picks
 - **[CLAUDE.md](CLAUDE.md)** — working agreements and invariants for
   contributors (and AI assistants).
 

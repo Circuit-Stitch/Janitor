@@ -41,8 +41,18 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # Run every crate's tests, including janitor-aws's brokering / orchestration
+      # / error unit tests (driven by fakes — no real AWS). This is the functional
+      # gate for the whole workspace; the coverage gate below stays core-only.
+      - name: Test (workspace)
+        run: cargo test --workspace
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      # janitor-aws is exercised by `cargo test --workspace` above but is NOT
+      # line-gated: its browser / loopback / SDK shell is untestable by design
+      # (ADR 0010 §5), so a blanket gate would fail on those shell lines. The
+      # tested logic is proven by its unit tests; the 80% line gate stays on core.
       - name: Test with coverage (janitor-core ≥80% lines)
         run: cargo llvm-cov --package janitor-core --all-features --fail-under-lines 80
