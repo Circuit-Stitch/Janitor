@@ -112,6 +112,7 @@ cargo llvm-cov -p janitor-core
 cargo run -p janitor-gui             # tracer-bullet GUI (mock data; no real AWS)
 
 # janitor-aws human-gated binaries (need a browser + a real Identity Center org):
+# First run? docs/iam_setup.md sets up the Identity Center org + permission set.
 cargo run -p janitor-aws --bin loopback-spike   # browser↔loopback shell, no AWS
 cargo run -p janitor-aws --bin live-verify      # guided sign-in: log in, then pick (ADR 0011)
 ```
@@ -158,6 +159,10 @@ This README is only the front door — the depth lives here:
   Environment, Application, the Aligned / Drift / Gap states). Read this first.
 - **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** — what Janitor defends
   against, the explicit non-goals, and the trust boundaries.
+- **[docs/iam_setup.md](docs/iam_setup.md)** — set up an IAM Identity Center org
+  and permission set to run the live `live-verify` harness (Milestone B).
+- **[docs/iam_setup.md](docs/iam_setup.md)** — set up an IAM Identity Center org
+  and permission set to run the live `live-verify` harness (Milestone B).
 - **Architecture Decision Records** in [`docs/adr/`](docs/adr/):
   - [0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md) — Non-stomping writes via staged `PutSecretValue` + atomic stage CAS
   - [0002](docs/adr/0002-identity-center-only-memory-only-auth.md) — Identity-Center-only, memory-only authentication

@@ -90,6 +90,7 @@ cargo llvm-cov -p janitor-core    # coverage (≥80% gate, core only)
 cargo run -p janitor-gui          # tracer-bullet GUI (mock data; no real AWS)
 
 # janitor-aws human-gated binaries (ADR 0010 Milestone B — need a browser):
+# Identity Center org + permission-set setup for these: docs/iam_setup.md
 cargo run -p janitor-aws --bin loopback-spike   # browser↔loopback shell, no AWS
 cargo run -p janitor-aws --bin live-verify -- … # live Identity Center round-trip
 ```
