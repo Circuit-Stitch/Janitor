@@ -413,7 +413,16 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
         } => set_manage_choice(what, labels, default),
         Event::DiscoveryFailed(msg) => {
             clear_manage_choice();
-            set_manage_status(&format!("Could not add: {msg}"))
+            set_manage_terminal(&format!("Could not add: {msg}"))
+        }
+        // A dead SSO token: the Session already cleared its sign-in, so route the
+        // main window back to the Sign-in state (status "error" surfaces the
+        // "Sign in" button) and show the masked reason in the wizard. No append,
+        // no Config write (only EnvDiscovered does that).
+        Event::DiscoveryReauthRequired => {
+            clear_manage_choice();
+            set_manage_terminal("Session expired — sign in again.");
+            set_status(ui, state, "error", "session expired — sign in again");
         }
     }
 }
@@ -491,6 +500,15 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
     {
         let state = state.clone();
         win.on_pick_choice(move |index| advance_discovery(&state, index as usize));
+    }
+    {
+        // Back from a terminal message: dismiss it (and any stale choice) so the
+        // user can re-enter an Environment name and try again. Nothing is
+        // appended or saved (only a `Done` walk does that).
+        win.on_back_discovery(move || {
+            clear_manage_choice();
+            set_manage_status("");
+        });
     }
     {
         let state = state.clone();
@@ -599,11 +617,25 @@ fn refresh_manage_window(state: &Rc<RefCell<AppState>>) {
     });
 }
 
-/// Set the Manage window's status/result line (masked text only).
+/// Set the Manage window's status/result line (masked text only). Transient —
+/// clears the terminal flag so no Back button shows (e.g. "Discovering…").
 fn set_manage_status(msg: &str) {
     MANAGE.with(|m| {
         if let Some(win) = m.borrow().as_ref() {
             win.set_discovery_status(msg.into());
+            win.set_discovery_terminal(false);
+        }
+    });
+}
+
+/// Set a terminal, retryable discovery message (no choices / session error /
+/// expired) and reveal the Back button so the user can adjust and try again.
+/// Masked text only (the reason comes from the tested `describe()`/labels).
+fn set_manage_terminal(msg: &str) {
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            win.set_discovery_status(msg.into());
+            win.set_discovery_terminal(true);
         }
     });
 }

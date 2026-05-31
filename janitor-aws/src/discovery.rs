@@ -49,6 +49,11 @@ pub enum Step {
     Done(Mapping),
     Empty(What),
     Failed(FetchFailReason),
+    /// The SSO token is dead and could not be silently refreshed — a fresh
+    /// browser Sign-in is required. A distinct terminal state (not `Failed`) so
+    /// the presenter routes back to Sign-in rather than offering Back/Close
+    /// (ADR 0013).
+    Reauth,
 }
 
 /// The choices the machine listed for the step it is currently blocked on, so
@@ -142,7 +147,7 @@ impl Discovery {
         if self.account.is_none() {
             let items = match self.catalog.list_accounts(&self.token).await {
                 Ok(v) => v,
-                Err(e) => return Step::Failed((&e).into()),
+                Err(e) => return terminal_for(&e),
             };
             match plan_selection(&items, self.remembered_account()) {
                 SelectionPlan::Empty => return Step::Empty(What::Accounts),
@@ -163,7 +168,7 @@ impl Discovery {
                 .await
             {
                 Ok(v) => v,
-                Err(e) => return Step::Failed((&e).into()),
+                Err(e) => return terminal_for(&e),
             };
             match plan_selection(&items, self.remembered_role()) {
                 SelectionPlan::Empty => return Step::Empty(What::Roles),
@@ -187,14 +192,14 @@ impl Discovery {
                 .await
             {
                 Ok(c) => self.cred = Some(c),
-                Err(e) => return Step::Failed((&e).into()),
+                Err(e) => return terminal_for(&e),
             }
         }
 
         let cred = self.cred.as_ref().unwrap();
         let items = match self.secrets.list_secrets(cred, &self.region).await {
             Ok(v) => v,
-            Err(e) => return Step::Failed((&e).into()),
+            Err(e) => return terminal_for(&e),
         };
         match plan_selection(&items, self.remembered_secret()) {
             SelectionPlan::Empty => Step::Empty(What::Secrets),
@@ -243,6 +248,18 @@ fn ask<T: Selectable>(what: What, items: &[T], default: Option<usize>) -> Step {
         what,
         choices: items.iter().map(|it| it.label()).collect(),
         default,
+    }
+}
+
+/// Classify a `SessionError` into the right terminal `Step`. `ReauthRequired`
+/// (a dead token the facade could not silently refresh) becomes `Reauth` so the
+/// presenter routes back to Sign-in; everything else becomes a masked,
+/// retryable `Failed` carrying only the tested `FetchFailReason` (no SDK text —
+/// THREAT-MODEL).
+fn terminal_for(e: &crate::error::SessionError) -> Step {
+    match e {
+        crate::error::SessionError::ReauthRequired => Step::Reauth,
+        _ => Step::Failed(e.into()),
     }
 }
 
@@ -622,5 +639,154 @@ mod tests {
         };
         assert_eq!(reason, FetchFailReason::Other);
         assert!(!reason.describe().contains("hunter2"), "no SDK text leaks");
+    }
+
+    #[tokio::test]
+    async fn reauth_required_listing_accounts_is_reauth_step() {
+        use crate::error::SessionError;
+        // A dead SSO token surfaces as a distinct terminal `Reauth` (not a
+        // `Failed` Back/Close message) so the GUI can route back to Sign-in.
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Err(SessionError::ReauthRequired)],
+            vec![],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![]));
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec,
+            api,
+            None,
+        );
+        assert!(matches!(d.start().await, Step::Reauth));
+    }
+
+    #[tokio::test]
+    async fn access_denied_listing_roles_is_failed_with_that_reason() {
+        use crate::error::SessionError;
+        // A non-reauth SessionError at the role stage is a retryable, masked
+        // Failed carrying the matching reason — not Reauth, not a leak.
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Err(SessionError::AccessDenied)],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![]));
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec,
+            api,
+            None,
+        );
+        let Step::Failed(reason) = d.start().await else {
+            panic!("expected Failed");
+        };
+        assert_eq!(reason, FetchFailReason::AccessDenied);
+    }
+
+    #[tokio::test]
+    async fn throttled_listing_secrets_is_failed_with_that_reason_no_leak() {
+        use crate::error::SessionError;
+        // Account + role auto-pick, credential mints; the secret listing is
+        // throttled → Failed(Throttled), and even an Sdk context never leaks.
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Ok(vec![role("ReadOnly")])],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![Err(
+            SessionError::Throttled,
+        )]));
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec,
+            api,
+            None,
+        );
+        let Step::Failed(reason) = d.start().await else {
+            panic!("expected Failed");
+        };
+        assert_eq!(reason, FetchFailReason::Throttled);
+        assert_eq!(reason.describe(), "throttled, try again");
+    }
+
+    #[tokio::test]
+    async fn reauth_required_listing_roles_is_reauth_step() {
+        use crate::error::SessionError;
+        // Account auto-picks (singleton); the role listing then finds the token
+        // dead → Reauth, not Failed.
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Err(SessionError::ReauthRequired)],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![]));
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec,
+            api,
+            None,
+        );
+        assert!(matches!(d.start().await, Step::Reauth));
+    }
+
+    #[tokio::test]
+    async fn reauth_required_minting_credentials_is_reauth_step() {
+        use crate::error::SessionError;
+        // Account + role auto-pick; minting the role credential to list secrets
+        // hits a dead token → Reauth.
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Ok(vec![role("ReadOnly")])],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![Err(SessionError::ReauthRequired)]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![]));
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec,
+            api,
+            None,
+        );
+        assert!(matches!(d.start().await, Step::Reauth));
+    }
+
+    #[tokio::test]
+    async fn reauth_required_listing_secrets_is_reauth_step() {
+        use crate::error::SessionError;
+        // Account + role auto-pick and the credential mints; listing secrets
+        // then finds the token dead → Reauth.
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Ok(vec![role("ReadOnly")])],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![Err(
+            SessionError::ReauthRequired,
+        )]));
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec,
+            api,
+            None,
+        );
+        assert!(matches!(d.start().await, Step::Reauth));
     }
 }

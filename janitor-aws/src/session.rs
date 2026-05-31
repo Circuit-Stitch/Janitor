@@ -186,14 +186,28 @@ impl Session {
         );
         let step = discovery.start().await;
         self.discovery = Some(discovery);
+        self.reset_if_reauth(&step);
         Ok(step)
     }
 
     /// Feed the user's chosen index into the in-progress `Discovery`. `None` if
     /// no walk is in progress (a presenter bug — there is nothing to advance).
     pub async fn advance_discovery(&mut self, choice: usize) -> Option<Step> {
-        let discovery = self.discovery.as_mut()?;
-        Some(discovery.advance(choice).await)
+        let step = self.discovery.as_mut()?.advance(choice).await;
+        self.reset_if_reauth(&step);
+        Some(step)
+    }
+
+    /// On a discovery `Step::Reauth` (a dead SSO token the facade could not
+    /// silently refresh), drop the cached sign-in + any in-progress walk so the
+    /// next `sign_in()` re-opens the browser instead of reusing the dead token.
+    /// No-op for any other Step.
+    fn reset_if_reauth(&mut self, step: &Step) {
+        if matches!(step, Step::Reauth) {
+            self.facade = None;
+            self.token = None;
+            self.discovery = None;
+        }
     }
 
     /// Load one Application: ensure signed in, fetch every Environment, and —
@@ -496,6 +510,44 @@ mod tests {
             .unwrap();
         assert!(matches!(step, Step::Done(_)));
         assert_eq!(reauth.count(), 1, "load + discovery share one Sign-in");
+    }
+
+    #[tokio::test]
+    async fn discovery_reauth_clears_sign_in_so_next_sign_in_reauthenticates() {
+        // A dead token surfaced by discovery (Step::Reauth) must reset the
+        // Session's sign-in, so the GUI's "Sign in again" actually re-opens the
+        // browser instead of reusing the dead token (ADR 0013 reauth routing).
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![]));
+        let catalog = Arc::new(FakeAccountCatalog::new(
+            vec![Err(SessionError::ReauthRequired)],
+            vec![],
+        ));
+        let mut s = Session::new(
+            reauth.clone(),
+            role,
+            api,
+            catalog,
+            Arc::new(FakeClock::at(0)),
+        );
+
+        let step = s
+            .begin_discovery("prod".into(), "us-east-1".into(), None)
+            .await
+            .unwrap();
+        assert!(matches!(step, Step::Reauth));
+        assert!(
+            !s.is_signed_in(),
+            "a dead-token discovery clears the session"
+        );
+
+        s.sign_in().await.unwrap();
+        assert_eq!(
+            reauth.count(),
+            2,
+            "re-sign-in re-authenticates against a fresh token, not a no-op"
+        );
     }
 
     #[tokio::test]

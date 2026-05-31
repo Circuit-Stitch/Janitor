@@ -67,6 +67,9 @@ pub enum Event {
     },
     /// A walk could not complete (no choices, session error). Masked text only.
     DiscoveryFailed(String),
+    /// A walk hit a dead SSO token (`Step::Reauth`). The GUI routes back to the
+    /// Sign-in state rather than offering Back/Close (ADR 0013); no SDK text.
+    DiscoveryReauthRequired,
 }
 
 /// Spawn the worker. `on_event` is invoked (on the UI thread, via the caller's
@@ -137,6 +140,7 @@ fn discovery_event(step: Step) -> Event {
             .to_string(),
         ),
         Step::Failed(reason) => Event::DiscoveryFailed(reason.describe().to_string()),
+        Step::Reauth => Event::DiscoveryReauthRequired,
     }
 }
 
@@ -176,10 +180,9 @@ async fn run_loop(
                 .await
             {
                 Ok(step) => on_event(discovery_event(step)),
-                // A failed Sign-in is the only Err here; surface it masked.
-                Err(_) => on_event(Event::DiscoveryFailed(
-                    "session expired — sign in again".into(),
-                )),
+                // A failed Sign-in is the only Err here; route back to Sign-in
+                // (masked), same as a dead token mid-walk.
+                Err(_) => on_event(Event::DiscoveryReauthRequired),
             },
             Command::AdvanceDiscovery { choice } => {
                 if let Some(step) = session.advance_discovery(choice).await {
@@ -220,5 +223,18 @@ mod tests {
             panic!("Empty must surface as a masked DiscoveryFailed");
         };
         assert_eq!(msg, "no secrets you can access");
+    }
+
+    #[test]
+    fn reauth_step_is_its_own_event_not_a_failed_message() {
+        // A dead token routes back to Sign-in via a distinct event — not the
+        // Back/Close DiscoveryFailed path.
+        assert!(
+            matches!(
+                discovery_event(Step::Reauth),
+                Event::DiscoveryReauthRequired
+            ),
+            "Reauth must surface as DiscoveryReauthRequired"
+        );
     }
 }
