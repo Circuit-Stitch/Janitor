@@ -72,15 +72,17 @@ use std::sync::Arc;
 
 use janitor_core::compare::Comparison;
 use janitor_core::compare::RowKey;
-use janitor_core::config::Application;
+use janitor_core::config::{Application, Mapping};
 use janitor_core::secret::SecretShape;
 use janitor_core::view::{project, reveal_value, MatrixView};
 
 use crate::broker::CredentialBroker;
+use crate::discovery::{Discovery, Step};
+use crate::error::SignInError;
 use crate::secrets::SecretsClient;
 use crate::source::{AuthenticatedSource, Reauth};
-use crate::types::Clock;
-use crate::wire::{RoleCredentialClient, SecretsApi};
+use crate::types::{Clock, SsoToken};
+use crate::wire::{AccountCatalog, RoleCredentialClient, SecretsApi};
 
 /// The GUI's authenticated session. Built from the same `Arc<dyn …>` seams as
 /// `live-verify`; signs in lazily and caches the current Application's fetched
@@ -89,25 +91,39 @@ pub struct Session {
     reauth: Arc<dyn Reauth>,
     role_client: Arc<dyn RoleCredentialClient>,
     secrets_api: Arc<dyn SecretsApi>,
+    catalog: Arc<dyn AccountCatalog>,
     clock: Arc<dyn Clock>,
     facade: Option<AuthenticatedSource>,
+    /// The Session's one SSO token, shared (`Arc`) with both the fetch broker
+    /// and any in-progress `Discovery` so neither triggers a second Sign-in.
+    /// `Some` once signed in.
+    token: Option<Arc<SsoToken>>,
+    /// The in-progress guided `Discovery` (ADR 0013). Owned here, independent of
+    /// the fetched-secret cache, so the wizard survives across `Command`s.
+    discovery: Option<Discovery>,
     cached: Vec<(String, SecretShape)>,
 }
 
 impl Session {
-    /// Construct from the adapters. No I/O, no sign-in (lazy).
+    /// Construct from the adapters. No I/O, no sign-in (lazy). `catalog` is the
+    /// account/role enumeration seam used by guided `Discovery` (the real
+    /// `AwsRoleClient` implements both it and `RoleCredentialClient`).
     pub fn new(
         reauth: Arc<dyn Reauth>,
         role_client: Arc<dyn RoleCredentialClient>,
         secrets_api: Arc<dyn SecretsApi>,
+        catalog: Arc<dyn AccountCatalog>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Session {
             reauth,
             role_client,
             secrets_api,
+            catalog,
             clock,
             facade: None,
+            token: None,
+            discovery: None,
             cached: Vec::new(),
         }
     }
@@ -125,9 +141,9 @@ impl Session {
         if self.facade.is_some() {
             return Ok(());
         }
-        let token = self.reauth.sign_in().await?;
+        let token = Arc::new(self.reauth.sign_in().await?);
         let broker = CredentialBroker::new(
-            token,
+            Arc::clone(&token),
             Arc::clone(&self.role_client),
             Arc::clone(&self.clock),
         );
@@ -139,7 +155,45 @@ impl Session {
             Arc::clone(&self.role_client),
             Arc::clone(&self.clock),
         ));
+        self.token = Some(token);
         Ok(())
+    }
+
+    /// Begin a guided `Discovery` walk for one new Environment (ADR 0013):
+    /// ensure signed in, then build and start the machine on the Session's SSO
+    /// token. The returned `Step` is the first `Ask`/terminal state; subsequent
+    /// picks go through [`advance_discovery`](Self::advance_discovery). A failed
+    /// Sign-in surfaces as `Err` (the worker maps it to "sign in again").
+    ///
+    /// `region` is the resolved browse region (`config.secret_region` else
+    /// `sso_region`); `remembered` is `config.last_pick`.
+    pub async fn begin_discovery(
+        &mut self,
+        environment: String,
+        region: String,
+        remembered: Option<Mapping>,
+    ) -> Result<Step, SignInError> {
+        self.sign_in().await?;
+        let token = Arc::clone(self.token.as_ref().expect("token set by sign_in"));
+        let mut discovery = Discovery::new(
+            environment,
+            region,
+            token,
+            Arc::clone(&self.catalog),
+            Arc::clone(&self.role_client),
+            Arc::clone(&self.secrets_api),
+            remembered,
+        );
+        let step = discovery.start().await;
+        self.discovery = Some(discovery);
+        Ok(step)
+    }
+
+    /// Feed the user's chosen index into the in-progress `Discovery`. `None` if
+    /// no walk is in progress (a presenter bug — there is nothing to advance).
+    pub async fn advance_discovery(&mut self, choice: usize) -> Option<Step> {
+        let discovery = self.discovery.as_mut()?;
+        Some(discovery.advance(choice).await)
     }
 
     /// Load one Application: ensure signed in, fetch every Environment, and —
@@ -180,8 +234,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::fakes::{CredSpec, FakeClock, FakeReauth, FakeRoleClient, FakeSecretsApi};
-    use crate::wire::RawSecret;
+    use crate::wire::fakes::{
+        CredSpec, FakeAccountCatalog, FakeClock, FakeReauth, FakeRoleClient, FakeSecretsApi,
+    };
+    use crate::wire::{AccountSummary, RawSecret, RoleSummary, SecretSummary};
     use janitor_core::compare::{EntryState, RowKey};
     use janitor_core::config::{Application, Mapping};
     use janitor_core::secret::EntryName;
@@ -214,7 +270,9 @@ mod tests {
         role: Arc<FakeRoleClient>,
         api: Arc<FakeSecretsApi>,
     ) -> Session {
-        Session::new(reauth, role, api, Arc::new(FakeClock::at(0)))
+        // Most tests do not touch discovery; an empty catalog suffices.
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![]));
+        Session::new(reauth, role, api, catalog, Arc::new(FakeClock::at(0)))
     }
 
     #[test]
@@ -354,5 +412,98 @@ mod tests {
         assert_send::<MatrixView>();
         assert_send::<SecretShape>();
         assert_send::<AppError>();
+    }
+
+    #[tokio::test]
+    async fn begin_discovery_signs_in_then_auto_picks_to_done() {
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![Ok(vec![SecretSummary {
+            name: "app/prod".into(),
+            arn: "arn:secret:app/prod".into(),
+        }])]));
+        let catalog = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![AccountSummary {
+                id: "111".into(),
+                name: "Prod".into(),
+            }])],
+            vec![Ok(vec![RoleSummary {
+                name: "ReadOnly".into(),
+            }])],
+        ));
+        let mut s = Session::new(
+            reauth.clone(),
+            role,
+            api,
+            catalog,
+            Arc::new(FakeClock::at(0)),
+        );
+
+        let step = s
+            .begin_discovery("prod".into(), "us-west-2".into(), None)
+            .await
+            .unwrap();
+        let Step::Done(m) = step else {
+            panic!("expected Done, got {step:?}");
+        };
+        assert_eq!(m.environment, "prod");
+        assert_eq!(m.account_id, "111");
+        assert_eq!(m.region, "us-west-2");
+        assert_eq!(m.secret_id, "arn:secret:app/prod");
+        assert_eq!(reauth.count(), 1, "discovery signs in exactly once");
+        assert!(s.is_signed_in());
+    }
+
+    #[tokio::test]
+    async fn discovery_reuses_the_load_token_without_a_second_sign_in() {
+        // Signing in (via load) then discovering must NOT open a second browser:
+        // both share the Session's one Arc<SsoToken>.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok(), cred_ok()]));
+        let api = Arc::new(FakeSecretsApi {
+            outcomes: std::sync::Mutex::new(vec![secret_json(r#"{"A":"1"}"#)]),
+            list_outcomes: std::sync::Mutex::new(vec![Ok(vec![SecretSummary {
+                name: "app/staging".into(),
+                arn: "arn:secret:app/staging".into(),
+            }])]),
+            calls: std::sync::Mutex::new(0),
+        });
+        let catalog = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![AccountSummary {
+                id: "222".into(),
+                name: "Staging".into(),
+            }])],
+            vec![Ok(vec![RoleSummary {
+                name: "ReadOnly".into(),
+            }])],
+        ));
+        let mut s = Session::new(
+            reauth.clone(),
+            role,
+            api,
+            catalog,
+            Arc::new(FakeClock::at(0)),
+        );
+
+        let app = Application {
+            name: "app".into(),
+            environments: vec![mapping("prod", "app/prod")],
+        };
+        s.load(&app).await.unwrap();
+        let step = s
+            .begin_discovery("staging".into(), "us-east-1".into(), None)
+            .await
+            .unwrap();
+        assert!(matches!(step, Step::Done(_)));
+        assert_eq!(reauth.count(), 1, "load + discovery share one Sign-in");
+    }
+
+    #[tokio::test]
+    async fn advance_discovery_is_none_without_a_walk() {
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![]));
+        let api = Arc::new(FakeSecretsApi::new(vec![]));
+        let mut s = session(reauth, role, api);
+        assert!(s.advance_discovery(0).await.is_none());
     }
 }

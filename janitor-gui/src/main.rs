@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use slint::{ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use janitor_aws::session::AppError;
 use janitor_core::compare::{Comparison, EntryState};
@@ -39,6 +39,43 @@ enum Backend {
 // is only ever touched on the UI thread.
 thread_local! {
     static STATE: RefCell<Option<Rc<RefCell<AppState>>>> = const { RefCell::new(None) };
+    // The non-modal Manage window (ADR 0013), created lazily on first open and
+    // reused. Held here (not in AppState) so its callbacks can capture `state`
+    // strongly without a reference cycle.
+    static MANAGE: RefCell<Option<ManageWindow>> = const { RefCell::new(None) };
+    // A weak handle to the main window, so commands initiated from the Manage
+    // window (which has no MainWindow handle) can still drive `dispatch`/the
+    // mock inline path.
+    static MAIN: RefCell<Option<slint::Weak<MainWindow>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with the upgraded main window, if it is still alive.
+fn with_main_ui(f: impl FnOnce(&MainWindow)) {
+    MAIN.with(|m| {
+        if let Some(ui) = m.borrow().as_ref().and_then(|w| w.upgrade()) {
+            f(&ui);
+        }
+    });
+}
+
+/// Dispatch a command from a context lacking a `MainWindow` (e.g. a Manage
+/// callback), reaching the main window via the `MAIN` weak handle.
+fn dispatch_via_state(state: &Rc<RefCell<AppState>>, cmd: Command) {
+    with_main_ui(|ui| dispatch(ui, state, cmd));
+}
+
+/// After mutating the bound app off-window, refresh the matrix and reload it if
+/// it is the visible app.
+fn dispatch_via_state_refresh(state: &Rc<RefCell<AppState>>, target: usize, reload: bool) {
+    with_main_ui(|ui| {
+        push_matrix(ui, state);
+        if reload {
+            let app = state.borrow().config.applications.get(target).cloned();
+            if let Some(app) = app {
+                dispatch(ui, state, Command::LoadApp(app));
+            }
+        }
+    });
 }
 
 /// A few seeded Applications. Payments is hand-seeded in MockSource; the others
@@ -194,6 +231,11 @@ struct AppState {
     view: MatrixView,
     /// "unauth" | "signing" | "loading" | "loaded" | "error".
     status: String,
+    /// The Application index the open Manage window is bound to (ADR 0013).
+    /// `Some` while a Manage window targets an app; selecting a different
+    /// sidebar app does not change it, so a discovered Environment lands in the
+    /// Application the window was opened for.
+    manage_app: Option<usize>,
 }
 
 /// Send a command to whichever backend is active. Mock serves it inline by
@@ -244,6 +286,24 @@ fn dispatch(ui: &MainWindow, state: &Rc<RefCell<AppState>>, cmd: Command) {
                 };
                 apply_event(ui, state, ev);
             }
+            // Offline discovery: no AWS, so fabricate the auto-pick outcome a
+            // single-account/role/secret org would yield. Lets the Manage flow
+            // be exercised under JANITOR_MOCK without a browser.
+            Command::BeginDiscovery {
+                environment,
+                region,
+                ..
+            } => {
+                let mapping = Mapping {
+                    environment: environment.clone(),
+                    account_id: "000000000000".into(),
+                    region,
+                    secret_id: format!("discovered/{environment}"),
+                    permission_set: "ReadOnly".into(),
+                };
+                apply_event(ui, state, Event::EnvDiscovered(mapping));
+            }
+            Command::AdvanceDiscovery { .. } => { /* mock never asks */ }
             Command::Shutdown => {}
         }
     } else if let Backend::Real(tx) = &state.borrow().backend {
@@ -286,7 +346,176 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             schedule_auto_hide(ui, state);
         }
         Event::RevealUnavailable => { /* leave masked */ }
+        Event::EnvDiscovered(mapping) => on_env_discovered(ui, state, mapping),
+        Event::DiscoveryNeedsChoice => {
+            // The picker UI lands in #2; for this slice say so plainly.
+            set_manage_status("Multiple matches — guided selection is coming soon.");
+        }
+        Event::DiscoveryFailed(msg) => set_manage_status(&format!("Could not add: {msg}")),
     }
+}
+
+/// A `Discovery` `Done`: append the Mapping to the **bound** Application (not the
+/// selected one — ADR 0013), persist Config (locations only), remember the pick,
+/// refresh the Manage window, and reload the matrix if it is the visible app.
+fn on_env_discovered(ui: &MainWindow, state: &Rc<RefCell<AppState>>, mapping: Mapping) {
+    let (target, reload) = {
+        let mut st = state.borrow_mut();
+        let Some(target) = st.manage_app else {
+            return; // no bound window — nothing to attach to
+        };
+        let Some(app) = st.config.applications.get_mut(target) else {
+            return;
+        };
+        // Reject a duplicate Environment name rather than overwrite its Mapping.
+        if app
+            .environments
+            .iter()
+            .any(|m| m.environment == mapping.environment)
+        {
+            drop(st);
+            set_manage_status(&format!(
+                "Environment \"{}\" already exists.",
+                mapping.environment
+            ));
+            return;
+        }
+        let env_name = mapping.environment.clone();
+        app.environments.push(mapping.clone());
+        st.config.last_pick = Some(mapping);
+        if !matches!(st.backend, Backend::Mock { .. }) {
+            let _ = st.config.save();
+        }
+        set_manage_status(&format!("Added \"{env_name}\"."));
+        (target, target == st.selected)
+    };
+    refresh_manage_window(state);
+    // Update sidebar env counts immediately.
+    push_matrix(ui, state);
+    // If the bound app is the one on screen, reload so the new column appears.
+    if reload {
+        let app = state.borrow().config.applications.get(target).cloned();
+        if let Some(app) = app {
+            dispatch(ui, state, Command::LoadApp(app));
+        }
+    }
+}
+
+/// Open (or rebind) the non-modal Manage window for Application `index`.
+fn open_manage(state: &Rc<RefCell<AppState>>, index: usize) {
+    {
+        let mut st = state.borrow_mut();
+        if index >= st.config.applications.len() {
+            return;
+        }
+        st.manage_app = Some(index);
+    }
+    MANAGE.with(|m| {
+        if m.borrow().is_none() {
+            *m.borrow_mut() = Some(build_manage_window(state));
+        }
+    });
+    refresh_manage_window(state);
+    set_manage_status("");
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            let _ = win.show();
+        }
+    });
+}
+
+/// Construct the Manage window once and wire its callbacks (which capture
+/// `state` strongly — no cycle, since `AppState` does not hold the window).
+fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
+    let win = ManageWindow::new().expect("create Manage window");
+    {
+        let state = state.clone();
+        win.on_add_env_discover(move |env| begin_discovery(&state, env.to_string()));
+    }
+    {
+        let state = state.clone();
+        win.on_remove_env(move |index| remove_bound_env(&state, index as usize));
+    }
+    {
+        let weak = win.as_weak();
+        win.on_close_window(move || {
+            if let Some(win) = weak.upgrade() {
+                let _ = win.hide();
+            }
+        });
+    }
+    win
+}
+
+/// Start a guided walk for a typed Environment name on the bound Application.
+/// Region resolves to `secret_region` else `sso_region` (ADR 0013); the
+/// remembered last-pick seeds the defaults.
+fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String) {
+    let env = env.trim().to_string();
+    if env.is_empty() {
+        return;
+    }
+    let cmd = {
+        let st = state.borrow();
+        let region = if st.config.secret_region.is_empty() {
+            st.config.sso_region.clone()
+        } else {
+            st.config.secret_region.clone()
+        };
+        Command::BeginDiscovery {
+            environment: env,
+            region,
+            remembered: st.config.last_pick.clone(),
+        }
+    };
+    set_manage_status("Discovering…");
+    // Dispatch needs a MainWindow handle for the mock inline path; reach it via
+    // the live STATE/event loop the same way worker events do.
+    dispatch_via_state(state, cmd);
+}
+
+/// Remove an Environment from the **bound** Application, persist, refresh.
+fn remove_bound_env(state: &Rc<RefCell<AppState>>, index: usize) {
+    let (target, reload) = {
+        let mut st = state.borrow_mut();
+        let Some(target) = st.manage_app else { return };
+        if let Some(app) = st.config.applications.get_mut(target) {
+            if index < app.environments.len() {
+                app.environments.remove(index);
+            }
+        }
+        if !matches!(st.backend, Backend::Mock { .. }) {
+            let _ = st.config.save();
+        }
+        (target, target == st.selected)
+    };
+    refresh_manage_window(state);
+    dispatch_via_state_refresh(state, target, reload);
+}
+
+/// Push the bound Application's name + Environment rows into the Manage window.
+fn refresh_manage_window(state: &Rc<RefCell<AppState>>) {
+    let st = state.borrow();
+    let Some(target) = st.manage_app else { return };
+    let (name, envs) = match st.config.applications.get(target) {
+        Some(app) => (app.name.clone(), env_rows(&st.config, target)),
+        None => return,
+    };
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            win.set_app_name(name.into());
+            win.set_envs(envs);
+        }
+    });
+}
+
+/// Set the Manage window's status/result line (masked text only).
+fn set_manage_status(msg: &str) {
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            win.set_discovery_status(msg.into());
+        }
+    });
 }
 
 /// "<env>: <reason>; …" — no SDK text (reasons come from the tested describe()).
@@ -313,7 +542,6 @@ fn push_matrix(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_environments(env_models(&st.view));
     ui.set_rows(to_row_models(&st.view));
     ui.set_apps(app_models(&st.config, st.selected, &st.view, &st.status));
-    ui.set_selected_envs(env_rows(&st.config, st.selected));
 }
 
 /// Sidebar items. Drift badge shows ONLY for the selected, loaded app — never a
@@ -414,11 +642,13 @@ fn main() -> Result<(), slint::PlatformError> {
             rows: Vec::new(),
         },
         status: "unauth".to_string(),
+        manage_app: None,
     }));
 
     // Publish the state on the UI thread so the (Send) worker bridge can reach
     // it without capturing the `!Send` `Rc`.
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
+    MAIN.with(|m| *m.borrow_mut() = Some(ui.as_weak()));
 
     // Real backend: spawn the worker, marshalling its Events onto the UI loop.
     if !mock {
@@ -588,53 +818,38 @@ fn main() -> Result<(), slint::PlatformError> {
             push_matrix(&ui_weak.unwrap(), &state);
         });
     }
-    // Add environment to the selected application.
+    // Sidebar "+": create an Application (name only) and open its Manage window
+    // bound to it (ADR 0013).
     {
         let ui_weak = ui.as_weak();
         let state = state.clone();
-        ui.on_add_env(move |env, account, region, secret, perm| {
-            let env = env.trim().to_string();
-            if env.is_empty() {
+        ui.on_new_app_managed(move |name| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
                 return;
             }
-            {
+            let index = {
                 let mut st = state.borrow_mut();
-                let selected = st.selected;
-                if let Some(app) = st.config.applications.get_mut(selected) {
-                    app.environments.push(Mapping {
-                        environment: env,
-                        account_id: account.trim().to_string(),
-                        region: region.trim().to_string(),
-                        secret_id: secret.trim().to_string(),
-                        permission_set: perm.trim().to_string(),
-                    });
-                }
+                st.config.applications.push(Application {
+                    name,
+                    environments: Vec::new(),
+                });
+                st.selected = st.config.applications.len() - 1;
                 if !matches!(st.backend, Backend::Mock { .. }) {
                     let _ = st.config.save();
                 }
-            }
+                st.selected
+            };
             push_matrix(&ui_weak.unwrap(), &state);
+            open_manage(&state, index);
         });
     }
-    // Remove environment.
+    // Header "Manage": open the Manage window for the selected Application.
     {
-        let ui_weak = ui.as_weak();
         let state = state.clone();
-        ui.on_remove_env(move |index| {
-            let index = index as usize;
-            {
-                let mut st = state.borrow_mut();
-                let selected = st.selected;
-                if let Some(app) = st.config.applications.get_mut(selected) {
-                    if index < app.environments.len() {
-                        app.environments.remove(index);
-                    }
-                }
-                if !matches!(st.backend, Backend::Mock { .. }) {
-                    let _ = st.config.save();
-                }
-            }
-            push_matrix(&ui_weak.unwrap(), &state);
+        ui.on_manage_selected(move || {
+            let index = state.borrow().selected;
+            open_manage(&state, index);
         });
     }
     // Theme / sort / auto-hide.

@@ -17,9 +17,11 @@ use janitor_core::config::Mapping;
 /// Re-mint a role Credential when it is within this window of expiry.
 pub const REFRESH_SKEW: Duration = Duration::from_secs(60);
 
-/// Brokers per-Environment Credentials from one SSO token.
+/// Brokers per-Environment Credentials from one SSO token. The token is held
+/// behind an `Arc` so the owning `Session` can lend the *same* token to a
+/// `Discovery` walk without a second browser Sign-in (ADR 0013).
 pub struct CredentialBroker {
-    token: SsoToken,
+    token: Arc<SsoToken>,
     role_client: Arc<dyn RoleCredentialClient>,
     clock: Arc<dyn Clock>,
     cache: Mutex<HashMap<String, Arc<Credential>>>,
@@ -27,7 +29,7 @@ pub struct CredentialBroker {
 
 impl CredentialBroker {
     pub fn new(
-        token: SsoToken,
+        token: Arc<SsoToken>,
         role_client: Arc<dyn RoleCredentialClient>,
         clock: Arc<dyn Clock>,
     ) -> Self {
@@ -119,10 +121,10 @@ mod tests {
         })]));
         let clock = Arc::new(FakeClock::at(0));
         let broker = CredentialBroker::new(
-            SsoToken::new(
+            Arc::new(SsoToken::new(
                 "token".into(),
                 std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
-            ),
+            )),
             role.clone(),
             clock,
         );
@@ -151,10 +153,10 @@ mod tests {
         ]));
         let clock = Arc::new(FakeClock::at(0));
         let broker = CredentialBroker::new(
-            SsoToken::new(
+            Arc::new(SsoToken::new(
                 "token".into(),
                 std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
-            ),
+            )),
             role.clone(),
             clock.clone(),
         );
@@ -172,7 +174,10 @@ mod tests {
         let role = Arc::new(FakeRoleClient::new(vec![Err(SessionError::ReauthRequired)]));
         let clock = Arc::new(FakeClock::at(0));
         let broker = CredentialBroker::new(
-            SsoToken::new("token".into(), std::time::SystemTime::UNIX_EPOCH),
+            Arc::new(SsoToken::new(
+                "token".into(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
             role,
             clock,
         );

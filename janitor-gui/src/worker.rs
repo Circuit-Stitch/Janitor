@@ -8,17 +8,35 @@ use std::sync::Arc;
 
 use janitor_aws::authenticator::Authenticator;
 use janitor_aws::aws_impl::{AwsOidcClient, AwsRoleClient, AwsSecretsApi};
+use janitor_aws::discovery::{Step, What};
 use janitor_aws::session::{AppError, Session};
 use janitor_aws::types::SystemClock;
 use janitor_core::compare::RowKey;
-use janitor_core::config::{Application, Config};
+use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::view::MatrixView;
 
 /// UI → worker.
 pub enum Command {
     SignIn,
     LoadApp(Application),
-    Reveal { row: usize, col: usize, key: RowKey },
+    Reveal {
+        row: usize,
+        col: usize,
+        key: RowKey,
+    },
+    /// Start a guided `Discovery` walk for one new Environment (ADR 0013). The
+    /// resolved browse region + remembered last-pick come from `Config`.
+    BeginDiscovery {
+        environment: String,
+        region: String,
+        remembered: Option<Mapping>,
+    },
+    /// Feed the user's chosen index back into the in-progress walk. Handled by
+    /// the worker now; the `Ask` picker UI that *sends* it lands in #2.
+    #[allow(dead_code)]
+    AdvanceDiscovery {
+        choice: usize,
+    },
     Shutdown,
 }
 
@@ -36,6 +54,14 @@ pub enum Event {
         text: String,
     },
     RevealUnavailable,
+    /// A guided walk reached `Done`: this Mapping is ready to append to the
+    /// Application the Manage window is bound to (THREAT-MODEL: locations only).
+    EnvDiscovered(Mapping),
+    /// A walk hit a `many` choice. The full picker UI lands in #2; for this
+    /// slice the GUI surfaces this as a masked notice.
+    DiscoveryNeedsChoice,
+    /// A walk could not complete (no choices, session error). Masked text only.
+    DiscoveryFailed(String),
 }
 
 /// Spawn the worker. `on_event` is invoked (on the UI thread, via the caller's
@@ -70,7 +96,34 @@ async fn build_session(config: &Config) -> Session {
     // `sso_start_url` holds the SSO start URL (AWS' term); passed as RegisterClient
     // `issuerUrl`. Must be the instance form (…/ssoins-…), not the portal …/start.
     let authenticator = Arc::new(Authenticator::new(oidc, config.sso_start_url.clone()));
-    Session::new(authenticator, role_client, secrets_api, clock)
+    // `AwsRoleClient` implements both `RoleCredentialClient` and `AccountCatalog`,
+    // so the same Arc serves credential minting and discovery enumeration.
+    Session::new(
+        authenticator,
+        role_client.clone(),
+        secrets_api,
+        role_client,
+        clock,
+    )
+}
+
+/// Map a `Discovery` `Step` to the UI Event the worker relays. `Ask*` collapses
+/// to `DiscoveryNeedsChoice` (the picker UI is #2); `Empty`/`Failed` carry only
+/// masked, tested phrases — never SDK text (THREAT-MODEL).
+fn discovery_event(step: Step) -> Event {
+    match step {
+        Step::Done(mapping) => Event::EnvDiscovered(mapping),
+        Step::AskAccount(_) | Step::AskRole(_) | Step::AskSecret(_) => Event::DiscoveryNeedsChoice,
+        Step::Empty(what) => Event::DiscoveryFailed(
+            match what {
+                What::Accounts => "no accounts you can access",
+                What::Roles => "no roles you can access",
+                What::Secrets => "no secrets you can access",
+            }
+            .to_string(),
+        ),
+        Step::Failed(reason) => Event::DiscoveryFailed(reason.describe().to_string()),
+    }
 }
 
 async fn run_loop(
@@ -100,6 +153,25 @@ async fn run_loop(
                 Some(text) => on_event(Event::Revealed { row, col, text }),
                 None => on_event(Event::RevealUnavailable),
             },
+            Command::BeginDiscovery {
+                environment,
+                region,
+                remembered,
+            } => match session
+                .begin_discovery(environment, region, remembered)
+                .await
+            {
+                Ok(step) => on_event(discovery_event(step)),
+                // A failed Sign-in is the only Err here; surface it masked.
+                Err(_) => on_event(Event::DiscoveryFailed(
+                    "session expired — sign in again".into(),
+                )),
+            },
+            Command::AdvanceDiscovery { choice } => {
+                if let Some(step) = session.advance_discovery(choice).await {
+                    on_event(discovery_event(step));
+                }
+            }
         }
     }
 }

@@ -113,3 +113,17 @@ cargo run -p janitor-aws --bin live-verify -- … # live Identity Center round-t
   a spec or scratchpad. Keep implementation detail out of it.
 - **ADR 0001 has open API-behavior items** ("verify against the live API")—
   resolve those with real AWS calls before relying on the write path.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked as GitHub issues (`Circuit-Stitch/Janitor`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary — `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
