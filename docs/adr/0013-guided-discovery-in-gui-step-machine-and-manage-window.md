@@ -41,13 +41,19 @@ therefore **supersedes that specific rejection.**
   ```
   start()            -> Step
   advance(choice)    -> Step
-  Step = AskAccount(items) | AskRole(items) | AskSecret(items)
+  Step = Ask { what, choices: Vec<label>, default: Option<index> }
        | Done(Mapping) | Empty(what) | Failed(reason)
   ```
 
   It owns the interleaved walk and reuses `plan_selection` internally to collapse
   `0/1` choices (auto-pick, no `Ask`) and pre-select the remembered default on
-  `many`. It is unit-tested against the existing `wire::fakes` with no blocking
+  `many`. **`Ask` is one presenter-ready variant (#7), not three typed ones:** it
+  carries the `Selectable::label` lines (in list order) and the remembered
+  `default` index directly, while the typed account/role/secret items stay inside
+  the machine — so a presenter renders a list and returns a bare index, knowing
+  nothing of the AWS summary types. `what` (Accounts/Roles/Secrets) lets it title
+  the list. This unification follows the owner's generic-over-coupled preference
+  (above): the GUI and a future stdin presenter share one rendering shape. It is unit-tested against the existing `wire::fakes` with no blocking
   and no real I/O — the testability ADR 0011 wanted, now extended to the
   sequencing itself. Each consumer writes a thin **presenter** that renders the
   current `Ask` and feeds back a choice. This dissolves ADR 0011's YAGNI argument:

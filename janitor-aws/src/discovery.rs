@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use janitor_core::config::Mapping;
 
-use crate::select::{plan_selection, SelectionPlan};
+use crate::select::{plan_selection, Selectable, SelectionPlan};
 use crate::session::FetchFailReason;
 use crate::types::{Credential, SsoToken};
 use crate::wire::SecretsApi;
@@ -32,14 +32,20 @@ pub enum What {
 }
 
 /// What the wizard is currently asking, or its terminal outcome (ADR 0013).
-/// `Ask*` carries the choices to render; the user's pick comes back via
-/// [`Discovery::advance`]. `Done` carries the fully-formed Mapping ready to
-/// append. `Empty`/`Failed` are masked terminal states (no SDK text).
+/// `Ask` is presenter-ready: `choices` are the `Selectable::label` lines to
+/// render in list order and `default` is the index to pre-select (the remembered
+/// pick, if still present); the typed items stay inside the machine so the user's
+/// pick comes back as a bare index via [`Discovery::advance`]. `what` lets the
+/// presenter title the list without knowing the variant. `Done` carries the
+/// fully-formed Mapping ready to append. `Empty`/`Failed` are masked terminal
+/// states (no SDK text).
 #[derive(Debug)]
 pub enum Step {
-    AskAccount(Vec<AccountSummary>),
-    AskRole(Vec<RoleSummary>),
-    AskSecret(Vec<SecretSummary>),
+    Ask {
+        what: What,
+        choices: Vec<String>,
+        default: Option<usize>,
+    },
     Done(Mapping),
     Empty(What),
     Failed(FetchFailReason),
@@ -140,9 +146,10 @@ impl Discovery {
             };
             match plan_selection(&items, self.remembered_account()) {
                 SelectionPlan::Empty => return Step::Empty(What::Accounts),
-                SelectionPlan::Ask { .. } => {
-                    self.awaiting = Some(Awaiting::Account(items.clone()));
-                    return Step::AskAccount(items);
+                SelectionPlan::Ask { default } => {
+                    let step = ask(What::Accounts, &items, default);
+                    self.awaiting = Some(Awaiting::Account(items));
+                    return step;
                 }
                 SelectionPlan::Auto(i) => self.account = Some(pick(items, i)),
             }
@@ -160,9 +167,10 @@ impl Discovery {
             };
             match plan_selection(&items, self.remembered_role()) {
                 SelectionPlan::Empty => return Step::Empty(What::Roles),
-                SelectionPlan::Ask { .. } => {
-                    self.awaiting = Some(Awaiting::Role(items.clone()));
-                    return Step::AskRole(items);
+                SelectionPlan::Ask { default } => {
+                    let step = ask(What::Roles, &items, default);
+                    self.awaiting = Some(Awaiting::Role(items));
+                    return step;
                 }
                 SelectionPlan::Auto(i) => self.role = Some(pick(items, i)),
             }
@@ -190,9 +198,10 @@ impl Discovery {
         };
         match plan_selection(&items, self.remembered_secret()) {
             SelectionPlan::Empty => Step::Empty(What::Secrets),
-            SelectionPlan::Ask { .. } => {
-                self.awaiting = Some(Awaiting::Secret(items.clone()));
-                Step::AskSecret(items)
+            SelectionPlan::Ask { default } => {
+                let step = ask(What::Secrets, &items, default);
+                self.awaiting = Some(Awaiting::Secret(items));
+                step
             }
             SelectionPlan::Auto(i) => {
                 let secret = pick(items, i);
@@ -223,6 +232,17 @@ impl Discovery {
             secret_id: secret.arn.clone(),
             permission_set: role.name.clone(),
         }
+    }
+}
+
+/// Build a presenter-ready `Step::Ask`: project the listed items to their
+/// `Selectable::label` lines (in list order, so the returned index maps straight
+/// back to the kept items) and carry the remembered `default`.
+fn ask<T: Selectable>(what: What, items: &[T], default: Option<usize>) -> Step {
+    Step::Ask {
+        what,
+        choices: items.iter().map(|it| it.label()).collect(),
+        default,
     }
 }
 
@@ -305,6 +325,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn many_accounts_ask_carries_labels_and_remembered_default() {
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod"), account("222", "Staging")])],
+            vec![Ok(vec![role("ReadOnly")])],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![Ok(vec![secret(
+            "s", "arn:s",
+        )])]));
+        // A prior guided pick chose account 222; it should pre-select.
+        let remembered = Mapping {
+            environment: "live".into(),
+            account_id: "222".into(),
+            region: "us-east-1".into(),
+            secret_id: "arn:old".into(),
+            permission_set: "ReadOnly".into(),
+        };
+
+        let mut d = Discovery::new(
+            "staging".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec,
+            api,
+            Some(remembered),
+        );
+
+        let Step::Ask {
+            what,
+            choices,
+            default,
+        } = d.start().await
+        else {
+            panic!("expected Ask");
+        };
+        assert_eq!(what, What::Accounts);
+        assert_eq!(
+            choices,
+            vec!["Prod (111)".to_string(), "Staging (222)".to_string()],
+            "choices are the presenter labels, in list order"
+        );
+        assert_eq!(
+            default,
+            Some(1),
+            "remembered account 222 pre-selects index 1"
+        );
+    }
+
+    #[tokio::test]
     async fn many_accounts_asks_first_without_over_fetching_then_advances_to_done() {
         let cat = Arc::new(FakeAccountCatalog::new(
             vec![Ok(vec![account("111", "Prod"), account("222", "Staging")])],
@@ -329,10 +399,11 @@ mod tests {
         // start() lists accounts, sees >1, and stops at the Ask — it must not
         // have listed roles, minted a credential, or listed secrets yet.
         let step = d.start().await;
-        let Step::AskAccount(items) = step else {
-            panic!("expected AskAccount, got {step:?}");
+        let Step::Ask { what, choices, .. } = step else {
+            panic!("expected Ask, got {step:?}");
         };
-        assert_eq!(items.len(), 2);
+        assert_eq!(what, What::Accounts);
+        assert_eq!(choices.len(), 2);
         assert_eq!(
             cat.role_call_count(),
             0,
@@ -355,6 +426,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_account_then_many_roles_asks_roles_with_remembered_default() {
+        // One account auto-picks; the role step then has many → Ask roles. The
+        // credential must NOT be minted yet (no role chosen).
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Ok(vec![role("ReadOnly"), role("Admin")])],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![Ok(vec![secret(
+            "s", "arn:s",
+        )])]));
+        let remembered = Mapping {
+            environment: "live".into(),
+            account_id: "111".into(),
+            region: "us-east-1".into(),
+            secret_id: "arn:old".into(),
+            permission_set: "Admin".into(),
+        };
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec.clone(),
+            api,
+            Some(remembered),
+        );
+
+        let Step::Ask {
+            what,
+            choices,
+            default,
+        } = d.start().await
+        else {
+            panic!("expected Ask roles");
+        };
+        assert_eq!(what, What::Roles);
+        assert_eq!(choices, vec!["ReadOnly".to_string(), "Admin".to_string()]);
+        assert_eq!(
+            default,
+            Some(1),
+            "remembered role Admin pre-selects index 1"
+        );
+        assert_eq!(
+            rolec.call_count(),
+            0,
+            "must not mint a credential before the role is chosen"
+        );
+
+        // Choosing ReadOnly (not the default) advances through the lone secret.
+        let Step::Done(m) = d.advance(0).await else {
+            panic!("expected Done");
+        };
+        assert_eq!(m.account_id, "111");
+        assert_eq!(m.permission_set, "ReadOnly");
+    }
+
+    #[tokio::test]
+    async fn many_secrets_asks_secrets_and_chosen_secret_arn_lands_in_mapping() {
+        // Singleton account+role auto-pick and the credential is minted; the
+        // secret step then has many → Ask secrets, labelled by friendly name.
+        let cat = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Ok(vec![role("ReadOnly")])],
+        ));
+        let rolec = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let api = Arc::new(FakeSecretsApi::with_lists(vec![Ok(vec![
+            secret("myapp/a", "arn:a"),
+            secret("myapp/b", "arn:b"),
+        ])]));
+        let remembered = Mapping {
+            environment: "live".into(),
+            account_id: "111".into(),
+            region: "us-east-1".into(),
+            secret_id: "arn:b".into(),
+            permission_set: "ReadOnly".into(),
+        };
+        let mut d = Discovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            cat,
+            rolec.clone(),
+            api,
+            Some(remembered),
+        );
+
+        let Step::Ask {
+            what,
+            choices,
+            default,
+        } = d.start().await
+        else {
+            panic!("expected Ask secrets");
+        };
+        assert_eq!(what, What::Secrets);
+        assert_eq!(
+            choices,
+            vec!["myapp/a".to_string(), "myapp/b".to_string()],
+            "secrets are labelled by friendly name, not ARN"
+        );
+        assert_eq!(
+            default,
+            Some(1),
+            "remembered secret arn:b pre-selects index 1"
+        );
+        assert_eq!(
+            rolec.call_count(),
+            1,
+            "credential minted once to list secrets"
+        );
+
+        // Choosing index 0 → the Done mapping carries that secret's ARN.
+        let Step::Done(m) = d.advance(0).await else {
+            panic!("expected Done");
+        };
+        assert_eq!(
+            m.secret_id, "arn:a",
+            "chosen secret's ARN lands in the Mapping"
+        );
+    }
+
+    #[tokio::test]
     async fn advance_clamps_out_of_range_choice() {
         let cat = Arc::new(FakeAccountCatalog::new(
             vec![Ok(vec![account("111", "Prod"), account("222", "Staging")])],
@@ -374,7 +568,7 @@ mod tests {
             api,
             None,
         );
-        assert!(matches!(d.start().await, Step::AskAccount(_)));
+        assert!(matches!(d.start().await, Step::Ask { .. }));
         let Step::Done(m) = d.advance(99).await else {
             panic!("expected Done");
         };

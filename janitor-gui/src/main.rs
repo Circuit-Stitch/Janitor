@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
+use janitor_aws::discovery::What;
 use janitor_aws::session::AppError;
 use janitor_core::compare::{Comparison, EntryState};
 use janitor_core::config::{Application, Config, Mapping};
@@ -26,11 +27,22 @@ enum Backend {
     /// Real AWS via the worker thread.
     Real(Sender<Command>),
     /// Offline: MockSource, served synchronously on the UI thread. Holds the
-    /// last-loaded Sets so reveal works without a worker.
+    /// last-loaded Sets so reveal works without a worker, and any guided walk
+    /// paused on a choice so the picker can be exercised without a browser.
     Mock {
         source: MockSource,
         cached: RefCell<Vec<(String, SecretShape)>>,
+        pending: RefCell<Option<MockWalk>>,
     },
+}
+
+/// A mock guided walk paused on the account choice, so `JANITOR_MOCK` can drive
+/// the picker offline. `AdvanceDiscovery` finishes it into a `Mapping`.
+struct MockWalk {
+    environment: String,
+    region: String,
+    /// Candidate accounts as `(name, id)`, in label order.
+    accounts: Vec<(String, String)>,
 }
 
 // The UI-thread-owned shared state. The worker bridge cannot capture an `Rc`
@@ -249,7 +261,7 @@ fn dispatch(ui: &MainWindow, state: &Rc<RefCell<AppState>>, cmd: Command) {
             Command::LoadApp(app) => {
                 let view = {
                     let st = state.borrow();
-                    let Backend::Mock { source, cached } = &st.backend else {
+                    let Backend::Mock { source, cached, .. } = &st.backend else {
                         unreachable!()
                     };
                     let sets: Vec<(String, SecretShape)> = app
@@ -286,24 +298,68 @@ fn dispatch(ui: &MainWindow, state: &Rc<RefCell<AppState>>, cmd: Command) {
                 };
                 apply_event(ui, state, ev);
             }
-            // Offline discovery: no AWS, so fabricate the auto-pick outcome a
-            // single-account/role/secret org would yield. Lets the Manage flow
-            // be exercised under JANITOR_MOCK without a browser.
+            // Offline discovery: no AWS, so fabricate a small multi-account org
+            // and ask, exercising the picker (and remembered default) under
+            // JANITOR_MOCK without a browser. Role + secret then auto-pick.
             Command::BeginDiscovery {
                 environment,
                 region,
-                ..
+                remembered,
             } => {
-                let mapping = Mapping {
-                    environment: environment.clone(),
-                    account_id: "000000000000".into(),
-                    region,
-                    secret_id: format!("discovered/{environment}"),
-                    permission_set: "ReadOnly".into(),
-                };
-                apply_event(ui, state, Event::EnvDiscovered(mapping));
+                let accounts = vec![
+                    ("Prod".to_string(), "000000000001".to_string()),
+                    ("Staging".to_string(), "000000000002".to_string()),
+                ];
+                let default = remembered
+                    .as_ref()
+                    .and_then(|m| accounts.iter().position(|(_, id)| *id == m.account_id));
+                let labels = accounts
+                    .iter()
+                    .map(|(name, id)| format!("{name} ({id})"))
+                    .collect();
+                {
+                    let st = state.borrow();
+                    let Backend::Mock { pending, .. } = &st.backend else {
+                        unreachable!()
+                    };
+                    *pending.borrow_mut() = Some(MockWalk {
+                        environment,
+                        region,
+                        accounts,
+                    });
+                }
+                apply_event(
+                    ui,
+                    state,
+                    Event::DiscoveryChoice {
+                        what: What::Accounts,
+                        labels,
+                        default,
+                    },
+                );
             }
-            Command::AdvanceDiscovery { .. } => { /* mock never asks */ }
+            Command::AdvanceDiscovery { choice } => {
+                let walk = {
+                    let st = state.borrow();
+                    let Backend::Mock { pending, .. } = &st.backend else {
+                        unreachable!()
+                    };
+                    let taken = pending.borrow_mut().take();
+                    taken
+                };
+                if let Some(walk) = walk {
+                    let i = choice.min(walk.accounts.len() - 1);
+                    let (_, account_id) = &walk.accounts[i];
+                    let mapping = Mapping {
+                        environment: walk.environment.clone(),
+                        account_id: account_id.clone(),
+                        region: walk.region,
+                        secret_id: format!("discovered/{}", walk.environment),
+                        permission_set: "ReadOnly".into(),
+                    };
+                    apply_event(ui, state, Event::EnvDiscovered(mapping));
+                }
+            }
             Command::Shutdown => {}
         }
     } else if let Backend::Real(tx) = &state.borrow().backend {
@@ -346,12 +402,19 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             schedule_auto_hide(ui, state);
         }
         Event::RevealUnavailable => { /* leave masked */ }
-        Event::EnvDiscovered(mapping) => on_env_discovered(ui, state, mapping),
-        Event::DiscoveryNeedsChoice => {
-            // The picker UI lands in #2; for this slice say so plainly.
-            set_manage_status("Multiple matches — guided selection is coming soon.");
+        Event::EnvDiscovered(mapping) => {
+            clear_manage_choice();
+            on_env_discovered(ui, state, mapping)
         }
-        Event::DiscoveryFailed(msg) => set_manage_status(&format!("Could not add: {msg}")),
+        Event::DiscoveryChoice {
+            what,
+            labels,
+            default,
+        } => set_manage_choice(what, labels, default),
+        Event::DiscoveryFailed(msg) => {
+            clear_manage_choice();
+            set_manage_status(&format!("Could not add: {msg}"))
+        }
     }
 }
 
@@ -434,6 +497,10 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
     }
     {
         let state = state.clone();
+        win.on_pick_choice(move |index| advance_discovery(&state, index as usize));
+    }
+    {
+        let state = state.clone();
         win.on_remove_env(move |index| remove_bound_env(&state, index as usize));
     }
     {
@@ -468,10 +535,20 @@ fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String) {
             remembered: st.config.last_pick.clone(),
         }
     };
+    clear_manage_choice();
     set_manage_status("Discovering…");
     // Dispatch needs a MainWindow handle for the mock inline path; reach it via
     // the live STATE/event loop the same way worker events do.
     dispatch_via_state(state, cmd);
+}
+
+/// Feed the user's picked index back into the in-progress walk. Clears the picker
+/// while the next step resolves (a fresh `DiscoveryChoice` or terminal Step
+/// re-renders it).
+fn advance_discovery(state: &Rc<RefCell<AppState>>, choice: usize) {
+    clear_manage_choice();
+    set_manage_status("Discovering…");
+    dispatch_via_state(state, Command::AdvanceDiscovery { choice });
 }
 
 /// Remove an Environment from the **bound** Application, persist, refresh.
@@ -514,6 +591,37 @@ fn set_manage_status(msg: &str) {
     MANAGE.with(|m| {
         if let Some(win) = m.borrow().as_ref() {
             win.set_discovery_status(msg.into());
+        }
+    });
+}
+
+/// Render a pending guided choice as the picker: a titled, selectable list with
+/// the remembered default pre-selected. `labels` are presenter lines only
+/// (account `name (id)`, role, secret name) — never secret Values (THREAT-MODEL).
+fn set_manage_choice(what: What, labels: Vec<String>, default: Option<usize>) {
+    let prompt = match what {
+        What::Accounts => "Choose an account:",
+        What::Roles => "Choose a role:",
+        What::Secrets => "Choose a secret:",
+    };
+    let rows: Vec<SharedString> = labels.into_iter().map(Into::into).collect();
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            win.set_discovery_status("".into());
+            win.set_choice_prompt(prompt.into());
+            win.set_choices(ModelRc::from(Rc::new(VecModel::from(rows))));
+            win.set_choice_default(default.map(|i| i as i32).unwrap_or(-1));
+        }
+    });
+}
+
+/// Hide the picker (a terminal Step arrived, or a new walk began).
+fn clear_manage_choice() {
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            win.set_choice_prompt("".into());
+            win.set_choices(ModelRc::from(Rc::new(VecModel::<SharedString>::default())));
+            win.set_choice_default(-1);
         }
     });
 }
@@ -629,6 +737,7 @@ fn main() -> Result<(), slint::PlatformError> {
         backend: Backend::Mock {
             source: MockSource::new(),
             cached: RefCell::new(Vec::new()),
+            pending: RefCell::new(None),
         },
         config: config.clone(),
         selected: 0,

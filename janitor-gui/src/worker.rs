@@ -31,9 +31,8 @@ pub enum Command {
         region: String,
         remembered: Option<Mapping>,
     },
-    /// Feed the user's chosen index back into the in-progress walk. Handled by
-    /// the worker now; the `Ask` picker UI that *sends* it lands in #2.
-    #[allow(dead_code)]
+    /// Feed the user's chosen index back into the in-progress walk (sent by the
+    /// Manage window's picker when the user selects a row).
     AdvanceDiscovery {
         choice: usize,
     },
@@ -57,9 +56,15 @@ pub enum Event {
     /// A guided walk reached `Done`: this Mapping is ready to append to the
     /// Application the Manage window is bound to (THREAT-MODEL: locations only).
     EnvDiscovered(Mapping),
-    /// A walk hit a `many` choice. The full picker UI lands in #2; for this
-    /// slice the GUI surfaces this as a masked notice.
-    DiscoveryNeedsChoice,
+    /// A walk hit a `many` choice: render `labels` (presenter lines — account
+    /// `name (id)`, role, secret name; never secret Values) as a selectable list
+    /// for `what`, with `default` pre-selected. The pick returns via
+    /// `Command::AdvanceDiscovery`.
+    DiscoveryChoice {
+        what: What,
+        labels: Vec<String>,
+        default: Option<usize>,
+    },
     /// A walk could not complete (no choices, session error). Masked text only.
     DiscoveryFailed(String),
 }
@@ -107,13 +112,22 @@ async fn build_session(config: &Config) -> Session {
     )
 }
 
-/// Map a `Discovery` `Step` to the UI Event the worker relays. `Ask*` collapses
-/// to `DiscoveryNeedsChoice` (the picker UI is #2); `Empty`/`Failed` carry only
-/// masked, tested phrases — never SDK text (THREAT-MODEL).
+/// Map a `Discovery` `Step` to the UI Event the worker relays. `Ask` carries the
+/// presenter labels + remembered default straight through to the picker;
+/// `Empty`/`Failed` carry only masked, tested phrases — never SDK text
+/// (THREAT-MODEL).
 fn discovery_event(step: Step) -> Event {
     match step {
         Step::Done(mapping) => Event::EnvDiscovered(mapping),
-        Step::AskAccount(_) | Step::AskRole(_) | Step::AskSecret(_) => Event::DiscoveryNeedsChoice,
+        Step::Ask {
+            what,
+            choices,
+            default,
+        } => Event::DiscoveryChoice {
+            what,
+            labels: choices,
+            default,
+        },
         Step::Empty(what) => Event::DiscoveryFailed(
             match what {
                 What::Accounts => "no accounts you can access",
@@ -173,5 +187,38 @@ async fn run_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ask_step_becomes_discovery_choice_preserving_what_labels_and_default() {
+        let step = Step::Ask {
+            what: What::Accounts,
+            choices: vec!["Prod (111)".into(), "Staging (222)".into()],
+            default: Some(1),
+        };
+        let Event::DiscoveryChoice {
+            what,
+            labels,
+            default,
+        } = discovery_event(step)
+        else {
+            panic!("Ask must surface as DiscoveryChoice");
+        };
+        assert_eq!(what, What::Accounts);
+        assert_eq!(labels, vec!["Prod (111)", "Staging (222)"]);
+        assert_eq!(default, Some(1));
+    }
+
+    #[test]
+    fn empty_step_is_masked_failure_not_a_choice() {
+        let Event::DiscoveryFailed(msg) = discovery_event(Step::Empty(What::Secrets)) else {
+            panic!("Empty must surface as a masked DiscoveryFailed");
+        };
+        assert_eq!(msg, "no secrets you can access");
     }
 }
