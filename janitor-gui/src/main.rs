@@ -221,6 +221,10 @@ struct AppState {
 
 /// Rebuild the matrix for the currently-selected Application and push all models.
 fn render(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    // Any in-flight reveal is stale once the matrix is rebuilt — clear it (ADR 0003).
+    ui.set_revealed_row(-1);
+    ui.set_revealed_col(-1);
+    ui.set_revealed_text(SharedString::new());
     let mut st = state.borrow_mut();
     let selected = st.selected;
     let app = st.config.applications[selected].clone();
