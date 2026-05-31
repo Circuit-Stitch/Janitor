@@ -37,6 +37,39 @@ pub struct Application {
     pub environments: Vec<Mapping>,
 }
 
+/// Rejected attempt to add an Environment whose name already exists in the
+/// Application. Surfaced (not silently applied) because a Mapping is what stops
+/// Janitor guessing which Secret Set an Environment means — overwriting one
+/// would silently retarget a compare column (ADR 0013).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("environment \"{0}\" already exists")]
+pub struct DuplicateEnvironment(pub String);
+
+impl Application {
+    /// Append a new Environment Mapping, refusing to overwrite an existing one.
+    /// Returns [`DuplicateEnvironment`] (leaving the list untouched) when an
+    /// Environment of the same name is already present — never a silent stomp.
+    pub fn add_environment(&mut self, mapping: Mapping) -> Result<(), DuplicateEnvironment> {
+        if self
+            .environments
+            .iter()
+            .any(|m| m.environment == mapping.environment)
+        {
+            return Err(DuplicateEnvironment(mapping.environment));
+        }
+        self.environments.push(mapping);
+        Ok(())
+    }
+
+    /// Remove the Environment Mapping at `index`. An out-of-range index is a
+    /// no-op, so the caller (a GUI list) need not pre-validate.
+    pub fn remove_environment(&mut self, index: usize) {
+        if index < self.environments.len() {
+            self.environments.remove(index);
+        }
+    }
+}
+
 /// Which concrete AWS Secret Set backs one Environment of an Application.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mapping {
@@ -70,6 +103,23 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Rename the Application at `index` to the trimmed `name`. Returns whether
+    /// the rename was applied: an empty/whitespace-only name or an out-of-range
+    /// index is refused (so a stray Enter cannot blank an Application's name).
+    pub fn rename_application(&mut self, index: usize, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        match self.applications.get_mut(index) {
+            Some(app) => {
+                app.name = name.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The default config file path: `<OS config dir>/config.toml`.
     ///
     /// The `(qualifier, organization, application)` triple below is a **stable
@@ -154,6 +204,96 @@ mod tests {
                 ],
             }],
         }
+    }
+
+    fn mapping(env: &str) -> Mapping {
+        Mapping {
+            environment: env.into(),
+            account_id: "111111111111".into(),
+            region: "us-east-1".into(),
+            secret_id: format!("myapp/{env}"),
+            permission_set: "ReadOnly".into(),
+        }
+    }
+
+    #[test]
+    fn add_environment_appends_a_new_mapping() {
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod")],
+        };
+        app.add_environment(mapping("staging")).unwrap();
+        let names: Vec<&str> = app
+            .environments
+            .iter()
+            .map(|m| m.environment.as_str())
+            .collect();
+        assert_eq!(names, ["prod", "staging"]);
+    }
+
+    #[test]
+    fn add_environment_rejects_a_duplicate_name_without_overwriting() {
+        // The no-stomp invariant: re-adding "prod" must not replace its Mapping.
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod")],
+        };
+        let mut intruder = mapping("prod");
+        intruder.secret_id = "someone-elses/prod".into();
+
+        let err = app.add_environment(intruder).unwrap_err();
+
+        assert_eq!(err, DuplicateEnvironment("prod".into()));
+        assert_eq!(app.environments.len(), 1, "no Mapping appended");
+        assert_eq!(
+            app.environments[0].secret_id, "myapp/prod",
+            "existing Mapping left untouched (not overwritten)"
+        );
+    }
+
+    #[test]
+    fn remove_environment_drops_the_mapping_at_index() {
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod"), mapping("staging"), mapping("dev")],
+        };
+        app.remove_environment(1);
+        let names: Vec<&str> = app
+            .environments
+            .iter()
+            .map(|m| m.environment.as_str())
+            .collect();
+        assert_eq!(names, ["prod", "dev"]);
+    }
+
+    #[test]
+    fn remove_environment_out_of_range_is_a_noop() {
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod")],
+        };
+        app.remove_environment(5);
+        assert_eq!(app.environments.len(), 1);
+    }
+
+    #[test]
+    fn rename_application_sets_the_trimmed_name() {
+        let mut config = sample();
+        assert!(config.rename_application(0, "  Renamed App  "));
+        assert_eq!(config.applications[0].name, "Renamed App");
+    }
+
+    #[test]
+    fn rename_application_refuses_a_blank_name() {
+        let mut config = sample();
+        assert!(!config.rename_application(0, "   "));
+        assert_eq!(config.applications[0].name, "myapp", "name left unchanged");
+    }
+
+    #[test]
+    fn rename_application_out_of_range_is_refused() {
+        let mut config = sample();
+        assert!(!config.rename_application(9, "Whatever"));
     }
 
     #[test]
