@@ -23,7 +23,9 @@ async fn main() {
     println!("opening browser at fake authorize redirect: {fake_redirect}");
     open_browser(&fake_redirect).expect("open browser");
 
-    let query = wait_for_redirect(listener, Duration::from_secs(60)).await.expect("redirect");
+    let query = wait_for_redirect(listener, Duration::from_secs(60))
+        .await
+        .expect("redirect");
     println!("got query: {query}");
     println!("code  = {:?}", query_param(&query, "code"));
     println!("state = {:?}", query_param(&query, "state"));

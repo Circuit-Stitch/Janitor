@@ -28,7 +28,9 @@ impl AwsOidcClient {
             .no_credentials()
             .load()
             .await;
-        AwsOidcClient { inner: aws_sdk_ssooidc::Client::new(&conf) }
+        AwsOidcClient {
+            inner: aws_sdk_ssooidc::Client::new(&conf),
+        }
     }
 }
 
@@ -49,10 +51,9 @@ impl OidcClient for AwsOidcClient {
         for uri in redirect_uris {
             req = req.redirect_uris(uri.clone());
         }
-        let out = req
-            .send()
-            .await
-            .map_err(|_| SignInError::Sdk { context: "RegisterClient".into() })?;
+        let out = req.send().await.map_err(|_| SignInError::Sdk {
+            context: "RegisterClient".into(),
+        })?;
         Ok(ClientRegistration {
             client_id: out.client_id().unwrap_or_default().to_string(),
             client_secret: out.client_secret().unwrap_or_default().to_string(),
@@ -72,7 +73,10 @@ impl OidcClient for AwsOidcClient {
             .send()
             .await
             .map_err(|_| SignInError::TokenEndpoint)?;
-        let access = out.access_token().ok_or(SignInError::TokenEndpoint)?.to_string();
+        let access = out
+            .access_token()
+            .ok_or(SignInError::TokenEndpoint)?
+            .to_string();
         let expires_in = out.expires_in();
         let expires_at = SystemTime::now() + Duration::from_secs(expires_in.max(0) as u64);
         Ok(SsoToken::new(access, expires_at))
@@ -90,7 +94,9 @@ impl AwsRoleClient {
             .no_credentials()
             .load()
             .await;
-        AwsRoleClient { inner: aws_sdk_sso::Client::new(&conf) }
+        AwsRoleClient {
+            inner: aws_sdk_sso::Client::new(&conf),
+        }
     }
 }
 #[async_trait]
@@ -111,10 +117,11 @@ impl RoleCredentialClient for AwsRoleClient {
             .send()
             .await
             .map_err(map_role_err)?;
-        let rc = out
-            .role_credentials()
-            .ok_or(SessionError::Sdk { context: "GetRoleCredentials(empty)".into() })?;
-        let expiration = SystemTime::UNIX_EPOCH + Duration::from_millis(rc.expiration().max(0) as u64);
+        let rc = out.role_credentials().ok_or(SessionError::Sdk {
+            context: "GetRoleCredentials(empty)".into(),
+        })?;
+        let expiration =
+            SystemTime::UNIX_EPOCH + Duration::from_millis(rc.expiration().max(0) as u64);
         Ok(Credential::new(
             rc.access_key_id().unwrap_or_default().to_string(),
             rc.secret_access_key().unwrap_or_default().to_string(),
@@ -131,7 +138,9 @@ fn map_role_err<E: std::fmt::Debug, R: std::fmt::Debug>(
     e: aws_smithy_runtime_api::client::result::SdkError<E, R>,
 ) -> SessionError {
     let label = format!("{:?}", std::mem::discriminant(&e));
-    SessionError::Sdk { context: format!("GetRoleCredentials:{label}") }
+    SessionError::Sdk {
+        context: format!("GetRoleCredentials:{label}"),
+    }
 }
 
 /// Real Secrets Manager client (`GetSecretValue`) using the injected Credential.
@@ -163,7 +172,9 @@ impl SecretsApi for AwsSecretsApi {
         );
         let conf = aws_sdk_secretsmanager::config::Builder::new()
             .behavior_version(BehaviorVersion::latest())
-            .region(aws_sdk_secretsmanager::config::Region::new(region.to_string()))
+            .region(aws_sdk_secretsmanager::config::Region::new(
+                region.to_string(),
+            ))
             .credentials_provider(creds)
             .build();
         let client = aws_sdk_secretsmanager::Client::from_conf(conf);
@@ -186,5 +197,7 @@ fn map_secret_err<E: std::fmt::Debug, R: std::fmt::Debug>(
     e: aws_smithy_runtime_api::client::result::SdkError<E, R>,
 ) -> SessionError {
     let label = format!("{:?}", std::mem::discriminant(&e));
-    SessionError::Sdk { context: format!("GetSecretValue:{label}") }
+    SessionError::Sdk {
+        context: format!("GetSecretValue:{label}"),
+    }
 }

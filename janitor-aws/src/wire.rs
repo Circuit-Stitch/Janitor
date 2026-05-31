@@ -100,7 +100,10 @@ pub mod fakes {
 
     impl FakeRoleClient {
         pub fn new(outcomes: Vec<Result<CredSpec, SessionError>>) -> Self {
-            FakeRoleClient { outcomes: Mutex::new(outcomes), calls: Mutex::new(0) }
+            FakeRoleClient {
+                outcomes: Mutex::new(outcomes),
+                calls: Mutex::new(0),
+            }
         }
         pub fn call_count(&self) -> u32 {
             *self.calls.lock().unwrap()
@@ -145,7 +148,10 @@ pub mod fakes {
     }
     impl FakeSecretsApi {
         pub fn new(outcomes: Vec<Result<RawSecret, SessionError>>) -> Self {
-            FakeSecretsApi { outcomes: Mutex::new(outcomes), calls: Mutex::new(0) }
+            FakeSecretsApi {
+                outcomes: Mutex::new(outcomes),
+                calls: Mutex::new(0),
+            }
         }
         pub fn call_count(&self) -> u32 {
             *self.calls.lock().unwrap()
@@ -192,16 +198,28 @@ pub mod fakes {
     #[test]
     fn fake_role_client_counts_calls_and_scripts_outcomes() {
         // A tiny self-test of the fake itself, so later tasks can trust it.
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let fake = FakeRoleClient::new(vec![
-            Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "first" }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "first",
+            }),
             Err(SessionError::ReauthRequired),
         ]);
         let token = SsoToken::new("t".into(), SystemTime::UNIX_EPOCH);
         rt.block_on(async {
-            let c = fake.get_role_credentials(&token, "acct", "ps", "us-east-1").await.unwrap();
+            let c = fake
+                .get_role_credentials(&token, "acct", "ps", "us-east-1")
+                .await
+                .unwrap();
             assert_eq!(c.access_key_id(), "AKIA-first");
-            let e = fake.get_role_credentials(&token, "acct", "ps", "us-east-1").await.unwrap_err();
+            let e = fake
+                .get_role_credentials(&token, "acct", "ps", "us-east-1")
+                .await
+                .unwrap_err();
             assert!(matches!(e, SessionError::ReauthRequired));
         });
         assert_eq!(fake.call_count(), 2);

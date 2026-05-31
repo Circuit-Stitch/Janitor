@@ -58,7 +58,9 @@ mod tests {
         // for response bodies. We assert a representative secret string never
         // appears, documenting the contract (the producer in aws_impl.rs is
         // responsible for never putting secrets in `context`).
-        let e = SessionError::Sdk { context: "GetSecretValue".into() };
+        let e = SessionError::Sdk {
+            context: "GetSecretValue".into(),
+        };
         let shown = format!("{e} | {e:?}");
         assert!(shown.contains("GetSecretValue"));
         assert!(!shown.contains("hunter2"), "no secret leaked");
@@ -68,7 +70,13 @@ mod tests {
     fn reauth_is_distinct_from_access_denied() {
         // The two are handled differently by the facade; they must not be the
         // same variant.
-        assert!(matches!(SessionError::ReauthRequired, SessionError::ReauthRequired));
-        assert!(matches!(SessionError::AccessDenied, SessionError::AccessDenied));
+        assert!(matches!(
+            SessionError::ReauthRequired,
+            SessionError::ReauthRequired
+        ));
+        assert!(matches!(
+            SessionError::AccessDenied,
+            SessionError::AccessDenied
+        ));
     }
 }

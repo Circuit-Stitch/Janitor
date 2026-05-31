@@ -31,7 +31,12 @@ impl CredentialBroker {
         role_client: Arc<dyn RoleCredentialClient>,
         clock: Arc<dyn Clock>,
     ) -> Self {
-        CredentialBroker { token, role_client, clock, cache: Mutex::new(HashMap::new()) }
+        CredentialBroker {
+            token,
+            role_client,
+            clock,
+            cache: Mutex::new(HashMap::new()),
+        }
     }
 
     fn cache_key(m: &Mapping) -> String {
@@ -41,7 +46,10 @@ impl CredentialBroker {
     /// Return a currently-valid Credential for `mapping`, minting or re-minting
     /// via `GetRoleCredentials` when the cache is empty or the cached Credential
     /// is within `REFRESH_SKEW` of expiry. `&self`: the cache is interior.
-    pub async fn credentials_for(&self, mapping: &Mapping) -> Result<Arc<Credential>, SessionError> {
+    pub async fn credentials_for(
+        &self,
+        mapping: &Mapping,
+    ) -> Result<Arc<Credential>, SessionError> {
         let key = Self::cache_key(mapping);
         let now = self.clock.now();
         {
@@ -55,7 +63,12 @@ impl CredentialBroker {
         // Stale or absent → mint. (A dead token returns ReauthRequired here.)
         let fresh = self
             .role_client
-            .get_role_credentials(&self.token, &mapping.account_id, &mapping.permission_set, &mapping.region)
+            .get_role_credentials(
+                &self.token,
+                &mapping.account_id,
+                &mapping.permission_set,
+                &mapping.region,
+            )
             .await?;
         let fresh = Arc::new(fresh);
         self.cache.lock().await.insert(key, Arc::clone(&fresh));
@@ -67,10 +80,18 @@ impl CredentialBroker {
     pub async fn force_refresh(&self, mapping: &Mapping) -> Result<Arc<Credential>, SessionError> {
         let fresh = Arc::new(
             self.role_client
-                .get_role_credentials(&self.token, &mapping.account_id, &mapping.permission_set, &mapping.region)
+                .get_role_credentials(
+                    &self.token,
+                    &mapping.account_id,
+                    &mapping.permission_set,
+                    &mapping.region,
+                )
                 .await?,
         );
-        self.cache.lock().await.insert(Self::cache_key(mapping), Arc::clone(&fresh));
+        self.cache
+            .lock()
+            .await
+            .insert(Self::cache_key(mapping), Arc::clone(&fresh));
         Ok(fresh)
     }
 }
@@ -98,7 +119,10 @@ mod tests {
         })]));
         let clock = Arc::new(FakeClock::at(0));
         let broker = CredentialBroker::new(
-            SsoToken::new("token".into(), std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(28800)),
+            SsoToken::new(
+                "token".into(),
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
+            ),
             role.clone(),
             clock,
         );
@@ -106,18 +130,31 @@ mod tests {
         let c2 = broker.credentials_for(&mapping()).await.unwrap();
         assert_eq!(c1.access_key_id(), "AKIA-first");
         assert_eq!(c2.access_key_id(), "AKIA-first");
-        assert_eq!(role.call_count(), 1, "second call must hit cache, not re-mint");
+        assert_eq!(
+            role.call_count(),
+            1,
+            "second call must hit cache, not re-mint"
+        );
     }
 
     #[tokio::test]
     async fn near_expiry_triggers_remint() {
         let role = Arc::new(FakeRoleClient::new(vec![
-            Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "first" }),
-            Ok(CredSpec { expires_in: Duration::from_secs(7200), tag: "second" }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "first",
+            }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(7200),
+                tag: "second",
+            }),
         ]));
         let clock = Arc::new(FakeClock::at(0));
         let broker = CredentialBroker::new(
-            SsoToken::new("token".into(), std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(28800)),
+            SsoToken::new(
+                "token".into(),
+                std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
+            ),
             role.clone(),
             clock.clone(),
         );

@@ -39,7 +39,13 @@ impl AuthenticatedSource {
         role_client: Arc<dyn RoleCredentialClient>,
         clock: Arc<dyn Clock>,
     ) -> Self {
-        AuthenticatedSource { broker, secrets, reauth, role_client, clock }
+        AuthenticatedSource {
+            broker,
+            secrets,
+            reauth,
+            role_client,
+            clock,
+        }
     }
 
     /// Fetch and shape the Set for `mapping`, handling the two refreshes with
@@ -57,8 +63,16 @@ impl AuthenticatedSource {
             Ok(shape) => Ok(shape),
             Err(SessionError::ReauthRequired) => {
                 // One re-Sign-in, rebuild broker on the fresh token, one retry.
-                let token = self.reauth.sign_in().await.map_err(|_| SessionError::ReauthRequired)?;
-                self.broker = CredentialBroker::new(token, Arc::clone(&self.role_client), Arc::clone(&self.clock));
+                let token = self
+                    .reauth
+                    .sign_in()
+                    .await
+                    .map_err(|_| SessionError::ReauthRequired)?;
+                self.broker = CredentialBroker::new(
+                    token,
+                    Arc::clone(&self.role_client),
+                    Arc::clone(&self.clock),
+                );
                 match self.try_once(mapping).await {
                     Ok(shape) => Ok(shape),
                     // Still unauthorized even after a fresh Sign-in → fatal.
@@ -118,8 +132,15 @@ mod tests {
         fail: bool,
     }
     impl FakeReauth {
-        fn ok() -> Self { FakeReauth { calls: Mutex::new(0), fail: false } }
-        fn count(&self) -> u32 { *self.calls.lock().unwrap() }
+        fn ok() -> Self {
+            FakeReauth {
+                calls: Mutex::new(0),
+                fail: false,
+            }
+        }
+        fn count(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
     }
     #[async_trait]
     impl Reauth for FakeReauth {
@@ -128,7 +149,10 @@ mod tests {
             if self.fail {
                 Err(SignInError::TokenEndpoint)
             } else {
-                Ok(SsoToken::new("fresh-token".into(), SystemTime::UNIX_EPOCH + Duration::from_secs(28800)))
+                Ok(SsoToken::new(
+                    "fresh-token".into(),
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
+                ))
             }
         }
     }
@@ -139,7 +163,10 @@ mod tests {
         reauth: Arc<FakeReauth>,
     ) -> AuthenticatedSource {
         let clock = Arc::new(FakeClock::at(0));
-        let token = SsoToken::new("t0".into(), SystemTime::UNIX_EPOCH + Duration::from_secs(28800));
+        let token = SsoToken::new(
+            "t0".into(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
+        );
         let broker = CredentialBroker::new(token, role.clone(), clock.clone());
         let secrets = SecretsClient::new(api);
         AuthenticatedSource::new(broker, secrets, reauth, role, clock)
@@ -147,8 +174,14 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_fetches_without_refresh_or_reauth() {
-        let role = Arc::new(FakeRoleClient::new(vec![Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "a" })]));
-        let api = Arc::new(FakeSecretsApi::new(vec![Ok(RawSecret { secret_string: Some(r#"{"A":"1"}"#.into()), secret_binary: None })]));
+        let role = Arc::new(FakeRoleClient::new(vec![Ok(CredSpec {
+            expires_in: Duration::from_secs(3600),
+            tag: "a",
+        })]));
+        let api = Arc::new(FakeSecretsApi::new(vec![Ok(RawSecret {
+            secret_string: Some(r#"{"A":"1"}"#.into()),
+            secret_binary: None,
+        })]));
         let reauth = Arc::new(FakeReauth::ok());
         let mut src = build(role.clone(), api.clone(), reauth.clone());
         let shape = src.fetch(&mapping()).await.unwrap();
@@ -163,12 +196,21 @@ mod tests {
         // First GetSecretValue → AccessDenied (stale cred); force_refresh mints a
         // second credential; retry succeeds.
         let role = Arc::new(FakeRoleClient::new(vec![
-            Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "stale" }),
-            Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "fresh" }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "stale",
+            }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "fresh",
+            }),
         ]));
         let api = Arc::new(FakeSecretsApi::new(vec![
             Err(SessionError::AccessDenied),
-            Ok(RawSecret { secret_string: Some(r#"{"A":"1"}"#.into()), secret_binary: None }),
+            Ok(RawSecret {
+                secret_string: Some(r#"{"A":"1"}"#.into()),
+                secret_binary: None,
+            }),
         ]));
         let reauth = Arc::new(FakeReauth::ok());
         let mut src = build(role.clone(), api.clone(), reauth.clone());
@@ -182,8 +224,14 @@ mod tests {
     #[tokio::test]
     async fn true_denial_force_refreshes_once_then_gives_access_denied() {
         let role = Arc::new(FakeRoleClient::new(vec![
-            Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "a" }),
-            Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "b" }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "a",
+            }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "b",
+            }),
         ]));
         let api = Arc::new(FakeSecretsApi::new(vec![
             Err(SessionError::AccessDenied),
@@ -204,11 +252,15 @@ mod tests {
         // the rebuilt broker mints OK and the fetch succeeds.
         let role = Arc::new(FakeRoleClient::new(vec![
             Err(SessionError::ReauthRequired),
-            Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "after-reauth" }),
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "after-reauth",
+            }),
         ]));
-        let api = Arc::new(FakeSecretsApi::new(vec![
-            Ok(RawSecret { secret_string: Some(r#"{"A":"1"}"#.into()), secret_binary: None }),
-        ]));
+        let api = Arc::new(FakeSecretsApi::new(vec![Ok(RawSecret {
+            secret_string: Some(r#"{"A":"1"}"#.into()),
+            secret_binary: None,
+        })]));
         let reauth = Arc::new(FakeReauth::ok());
         let mut src = build(role.clone(), api.clone(), reauth.clone());
         let shape = src.fetch(&mapping()).await.unwrap();
@@ -229,7 +281,10 @@ mod tests {
         let reauth = Arc::new(FakeReauth::ok());
         let mut src = build(role.clone(), api.clone(), reauth.clone());
         let err = src.fetch(&mapping()).await.unwrap_err();
-        assert!(matches!(err, SessionError::AccessDenied), "fatal, not another browser");
+        assert!(
+            matches!(err, SessionError::AccessDenied),
+            "fatal, not another browser"
+        );
         assert_eq!(reauth.count(), 1, "browser opened at most once");
     }
 }

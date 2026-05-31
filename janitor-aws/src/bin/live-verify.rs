@@ -25,7 +25,10 @@ use janitor_core::view::project;
 
 fn arg(flag: &str) -> Option<String> {
     let args: Vec<String> = env::args().collect();
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 #[tokio::main]

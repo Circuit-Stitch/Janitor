@@ -18,7 +18,10 @@ pub struct SsoToken {
 
 impl SsoToken {
     pub fn new(access_token: String, expires_at: SystemTime) -> Self {
-        SsoToken { access_token: SecretString::from(access_token), expires_at }
+        SsoToken {
+            access_token: SecretString::from(access_token),
+            expires_at,
+        }
     }
     /// Expose the token for a `GetRoleCredentials` call. Callers must not retain.
     pub fn expose(&self) -> &str {
@@ -28,7 +31,9 @@ impl SsoToken {
 
 impl std::fmt::Debug for SsoToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SsoToken").field("expires_at", &self.expires_at).finish()
+        f.debug_struct("SsoToken")
+            .field("expires_at", &self.expires_at)
+            .finish()
     }
 }
 
@@ -56,9 +61,15 @@ impl Credential {
             expiration,
         }
     }
-    pub fn access_key_id(&self) -> &str { self.access_key_id.expose_secret() }
-    pub fn secret_access_key(&self) -> &str { self.secret_access_key.expose_secret() }
-    pub fn session_token(&self) -> &str { self.session_token.expose_secret() }
+    pub fn access_key_id(&self) -> &str {
+        self.access_key_id.expose_secret()
+    }
+    pub fn secret_access_key(&self) -> &str {
+        self.secret_access_key.expose_secret()
+    }
+    pub fn session_token(&self) -> &str {
+        self.session_token.expose_secret()
+    }
 
     /// True when this Credential is within `skew` of expiry (or already past),
     /// per the clock — i.e. it should be re-minted before use.
@@ -72,7 +83,9 @@ impl Credential {
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Credential").field("expiration", &self.expiration).finish()
+        f.debug_struct("Credential")
+            .field("expiration", &self.expiration)
+            .finish()
     }
 }
 
@@ -84,7 +97,9 @@ pub trait Clock: Send + Sync {
 /// Production clock.
 pub struct SystemClock;
 impl Clock for SystemClock {
-    fn now(&self) -> SystemTime { SystemTime::now() }
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
 }
 
 #[cfg(test)]
@@ -97,7 +112,10 @@ mod tests {
         assert!(!format!("{t:?}").contains("super-secret-token"));
 
         let c = Credential::new(
-            "AKIA".into(), "wJalr-secret".into(), "sess".into(), SystemTime::UNIX_EPOCH,
+            "AKIA".into(),
+            "wJalr-secret".into(),
+            "sess".into(),
+            SystemTime::UNIX_EPOCH,
         );
         let shown = format!("{c:?}");
         assert!(!shown.contains("wJalr-secret"));

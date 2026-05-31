@@ -32,7 +32,10 @@ pub fn generate() -> Pkce {
     rand::thread_rng().fill_bytes(&mut raw);
     let verifier = base64url_no_pad(&raw);
     let challenge = s256_challenge(&verifier);
-    Pkce { verifier, challenge }
+    Pkce {
+        verifier,
+        challenge,
+    }
 }
 
 #[cfg(test)]

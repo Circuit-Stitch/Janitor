@@ -27,6 +27,6 @@ pub mod types;
 pub mod wire;
 
 // Untested shell (real I/O); compiled but not coverage-gated.
-pub mod aws_impl;
 pub mod authenticator;
+pub mod aws_impl;
 pub mod loopback;

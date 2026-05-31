@@ -27,7 +27,10 @@ impl SecretsClient {
         cred: &Credential,
         mapping: &Mapping,
     ) -> Result<SecretShape, SessionError> {
-        let raw = self.api.get_secret_value(cred, &mapping.secret_id, &mapping.region).await?;
+        let raw = self
+            .api
+            .get_secret_value(cred, &mapping.secret_id, &mapping.region)
+            .await?;
         match (raw.secret_string, raw.secret_binary) {
             (Some(s), _) => Ok(SecretShape::from_secret_string(&s)),
             (None, Some(b)) => Ok(SecretShape::from_secret_binary(b)),
@@ -62,7 +65,10 @@ mod tests {
             secret_string: Some(r#"{"A":"1"}"#.into()),
             secret_binary: None,
         })]));
-        let shape = SecretsClient::new(api).fetch(&cred(), &mapping()).await.unwrap();
+        let shape = SecretsClient::new(api)
+            .fetch(&cred(), &mapping())
+            .await
+            .unwrap();
         assert!(matches!(shape, SecretShape::Json(_)));
     }
 
@@ -72,7 +78,10 @@ mod tests {
             secret_string: Some("just-a-token".into()),
             secret_binary: None,
         })]));
-        let shape = SecretsClient::new(api).fetch(&cred(), &mapping()).await.unwrap();
+        let shape = SecretsClient::new(api)
+            .fetch(&cred(), &mapping())
+            .await
+            .unwrap();
         assert!(matches!(shape, SecretShape::Raw(_)));
     }
 
@@ -82,7 +91,10 @@ mod tests {
             secret_string: None,
             secret_binary: Some(vec![1, 2, 3, 4]),
         })]));
-        let shape = SecretsClient::new(api).fetch(&cred(), &mapping()).await.unwrap();
+        let shape = SecretsClient::new(api)
+            .fetch(&cred(), &mapping())
+            .await
+            .unwrap();
         match shape {
             SecretShape::Binary(b) => assert_eq!(b.len(), 4),
             other => panic!("expected Binary, got {other:?}"),
@@ -95,14 +107,20 @@ mod tests {
             secret_string: None,
             secret_binary: None,
         })]));
-        let err = SecretsClient::new(api).fetch(&cred(), &mapping()).await.unwrap_err();
+        let err = SecretsClient::new(api)
+            .fetch(&cred(), &mapping())
+            .await
+            .unwrap_err();
         assert!(matches!(err, SessionError::NotFound));
     }
 
     #[tokio::test]
     async fn propagates_access_denied() {
         let api = Arc::new(FakeSecretsApi::new(vec![Err(SessionError::AccessDenied)]));
-        let err = SecretsClient::new(api).fetch(&cred(), &mapping()).await.unwrap_err();
+        let err = SecretsClient::new(api)
+            .fetch(&cred(), &mapping())
+            .await
+            .unwrap_err();
         assert!(matches!(err, SessionError::AccessDenied));
     }
 }

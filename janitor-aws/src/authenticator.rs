@@ -8,7 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::error::SignInError;
-use crate::loopback::{bind_first_free, open_browser, query_param, redirect_uris, wait_for_redirect};
+use crate::loopback::{
+    bind_first_free, open_browser, query_param, redirect_uris, wait_for_redirect,
+};
 use crate::pkce;
 use crate::source::Reauth;
 use crate::state;
@@ -28,7 +30,10 @@ pub struct Authenticator {
 
 impl Authenticator {
     pub fn new(oidc: Arc<dyn OidcClient>, authorize_endpoint: String) -> Self {
-        Authenticator { oidc, authorize_endpoint }
+        Authenticator {
+            oidc,
+            authorize_endpoint,
+        }
     }
 
     /// Run the flow once, returning a fresh SSO token.
@@ -86,7 +91,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
