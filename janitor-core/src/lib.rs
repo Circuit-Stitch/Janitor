@@ -15,7 +15,7 @@
 
 pub mod compare;
 pub mod config;
-pub mod secret;
 pub mod mock;
+pub mod secret;
 pub mod source;
 pub mod view;

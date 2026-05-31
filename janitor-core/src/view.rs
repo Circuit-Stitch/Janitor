@@ -118,7 +118,11 @@ pub fn sort_rows(view: &mut MatrixView, sort: SortKey) {
 /// flavor only — the equality mechanism is the group id.
 fn hex_tag(name: &str, group: u32) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in name.bytes().chain(std::iter::once(b':')).chain(group.to_le_bytes()) {
+    for b in name
+        .bytes()
+        .chain(std::iter::once(b':'))
+        .chain(group.to_le_bytes())
+    {
         h ^= b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -155,8 +159,12 @@ mod tests {
         assert_eq!(r.state, EntryState::Aligned);
         match (&r.cells[0], &r.cells[1]) {
             (
-                MatrixCell::Present { group: g0, hex: h0, .. },
-                MatrixCell::Present { group: g1, hex: h1, .. },
+                MatrixCell::Present {
+                    group: g0, hex: h0, ..
+                },
+                MatrixCell::Present {
+                    group: g1, hex: h1, ..
+                },
             ) => {
                 assert_eq!(g0, g1, "aligned → same group");
                 assert_eq!(h0, h1, "same group in a row → same cosmetic hex");
@@ -181,7 +189,10 @@ mod tests {
 
     #[test]
     fn gap_row_has_absent_cell_and_len_is_byte_length() {
-        let sets = [env("prod", r#"{"A":"hello"}"#), env("staging", r#"{"B":"x"}"#)];
+        let sets = [
+            env("prod", r#"{"A":"hello"}"#),
+            env("staging", r#"{"B":"x"}"#),
+        ];
         let view = project(&Comparison::build(&sets));
         let a = find(&view, "A");
         assert_eq!(a.state, EntryState::Gap);
@@ -200,12 +211,21 @@ mod tests {
 
         // Binary sets → WholeSet row, masked length only (never a Value).
         let bin = [
-            ("prod".to_string(), SecretShape::from_secret_binary(vec![1, 2, 3, 4])),
-            ("staging".to_string(), SecretShape::from_secret_binary(vec![1, 2, 3, 9])),
+            (
+                "prod".to_string(),
+                SecretShape::from_secret_binary(vec![1, 2, 3, 4]),
+            ),
+            (
+                "staging".to_string(),
+                SecretShape::from_secret_binary(vec![1, 2, 3, 9]),
+            ),
         ];
         let bv = project(&Comparison::build(&bin));
         assert_eq!(bv.rows[0].name, "(whole set)");
-        assert!(matches!(bv.rows[0].cells[0], MatrixCell::Present { len: 4, .. }));
+        assert!(matches!(
+            bv.rows[0].cells[0],
+            MatrixCell::Present { len: 4, .. }
+        ));
     }
 
     use crate::compare::RowKey;
@@ -222,7 +242,10 @@ mod tests {
             reveal_value(&sets, &entry_key("A"), 0).map(|v| v.expose()),
             Some("secret")
         );
-        let raw = [("prod".to_string(), SecretShape::from_secret_string("raw-token"))];
+        let raw = [(
+            "prod".to_string(),
+            SecretShape::from_secret_string("raw-token"),
+        )];
         assert_eq!(
             reveal_value(&raw, &RowKey::WholeSet, 0).map(|v| v.expose()),
             Some("raw-token")
@@ -233,11 +256,20 @@ mod tests {
     fn reveal_is_none_for_absent_oob_and_binary() {
         let sets = [
             env("prod", r#"{"A":"x"}"#),
-            ("bin".to_string(), SecretShape::from_secret_binary(vec![1, 2, 3])),
+            (
+                "bin".to_string(),
+                SecretShape::from_secret_binary(vec![1, 2, 3]),
+            ),
         ];
         assert!(reveal_value(&sets, &entry_key("MISSING"), 0).is_none());
-        assert!(reveal_value(&sets, &entry_key("A"), 9).is_none(), "col out of range");
-        assert!(reveal_value(&sets, &RowKey::WholeSet, 1).is_none(), "binary never reveals");
+        assert!(
+            reveal_value(&sets, &entry_key("A"), 9).is_none(),
+            "col out of range"
+        );
+        assert!(
+            reveal_value(&sets, &RowKey::WholeSet, 1).is_none(),
+            "binary never reveals"
+        );
     }
 
     #[test]
@@ -250,7 +282,11 @@ mod tests {
         let mut view = project(&Comparison::build(&sets));
         sort_rows(&mut view, SortKey::GapFirst);
         let order: Vec<&str> = view.rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(order, vec!["ccc", "aaa", "bbb"], "Gap, then Drift, then Aligned");
+        assert_eq!(
+            order,
+            vec!["ccc", "aaa", "bbb"],
+            "Gap, then Drift, then Aligned"
+        );
     }
 
     #[test]

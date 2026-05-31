@@ -11,7 +11,9 @@ use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::mock::MockSource;
 use janitor_core::secret::SecretShape;
 use janitor_core::source::SecretSource;
-use janitor_core::view::{project, reveal_value, sort_rows, MatrixCell, MatrixRow, MatrixView, SortKey};
+use janitor_core::view::{
+    project, reveal_value, sort_rows, MatrixCell, MatrixRow, MatrixView, SortKey,
+};
 
 /// A few seeded Applications. Payments is hand-seeded in MockSource; the others
 /// fall back to deterministic fabrication, and some have >2 Environments to show
@@ -34,25 +36,41 @@ fn seeded_config() -> Config {
         sso_start_url: "https://acme.awsapps.com/start".into(),
         sso_region: "us-east-1".into(),
         applications: vec![
-            app("Payments API", "payments", &[
-                ("prod", "914xxxxxx021", "us-east-1"),
-                ("staging", "550xxxxxx118", "us-west-2"),
-            ]),
-            app("Auth Service", "auth", &[
-                ("prod", "914xxxxxx021", "us-east-1"),
-                ("staging", "550xxxxxx118", "us-west-2"),
-                ("dev", "330xxxxxx777", "us-west-2"),
-            ]),
-            app("Billing Worker", "billing", &[
-                ("prod", "914xxxxxx021", "us-east-1"),
-                ("staging", "550xxxxxx118", "us-west-2"),
-            ]),
-            app("Notifications", "notif", &[
-                ("prod", "914xxxxxx021", "us-east-1"),
-                ("staging", "550xxxxxx118", "us-west-2"),
-                ("dev", "330xxxxxx777", "us-west-2"),
-                ("qa", "330xxxxxx777", "us-west-2"),
-            ]),
+            app(
+                "Payments API",
+                "payments",
+                &[
+                    ("prod", "914xxxxxx021", "us-east-1"),
+                    ("staging", "550xxxxxx118", "us-west-2"),
+                ],
+            ),
+            app(
+                "Auth Service",
+                "auth",
+                &[
+                    ("prod", "914xxxxxx021", "us-east-1"),
+                    ("staging", "550xxxxxx118", "us-west-2"),
+                    ("dev", "330xxxxxx777", "us-west-2"),
+                ],
+            ),
+            app(
+                "Billing Worker",
+                "billing",
+                &[
+                    ("prod", "914xxxxxx021", "us-east-1"),
+                    ("staging", "550xxxxxx118", "us-west-2"),
+                ],
+            ),
+            app(
+                "Notifications",
+                "notif",
+                &[
+                    ("prod", "914xxxxxx021", "us-east-1"),
+                    ("staging", "550xxxxxx118", "us-west-2"),
+                    ("dev", "330xxxxxx777", "us-west-2"),
+                    ("qa", "330xxxxxx777", "us-west-2"),
+                ],
+            ),
         ],
     }
 }
@@ -61,7 +79,12 @@ fn seeded_config() -> Config {
 fn fetch_sets(source: &dyn SecretSource, mappings: &[Mapping]) -> Vec<(String, SecretShape)> {
     mappings
         .iter()
-        .map(|m| (m.environment.clone(), source.fetch(m).expect("mock never fails")))
+        .map(|m| {
+            (
+                m.environment.clone(),
+                source.fetch(m).expect("mock never fails"),
+            )
+        })
         .collect()
 }
 
@@ -148,7 +171,11 @@ fn state_label(state: EntryState) -> &'static str {
 }
 
 fn env_models(view: &MatrixView) -> ModelRc<SharedString> {
-    let envs: Vec<SharedString> = view.environments.iter().map(|e| e.as_str().into()).collect();
+    let envs: Vec<SharedString> = view
+        .environments
+        .iter()
+        .map(|e| e.as_str().into())
+        .collect();
     ModelRc::from(Rc::new(VecModel::from(envs)))
 }
 
@@ -214,7 +241,11 @@ fn main() -> Result<(), slint::PlatformError> {
         source: MockSource::new(),
         config,
         selected: 0,
-        prefs: Preferences { sort: SortKey::Name, auto_hide_secs: 5, dark: true },
+        prefs: Preferences {
+            sort: SortKey::Name,
+            auto_hide_secs: 5,
+            dark: true,
+        },
         sets: Vec::new(),
         view: MatrixView {
             environments: Vec::new(),
@@ -250,7 +281,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     .and_then(|r| reveal_value(&st.sets, &r.key, col as usize))
                     .map(|v| SharedString::from(v.expose()))
             };
-            let Some(text) = revealed else { return; };
+            let Some(text) = revealed else {
+                return;
+            };
 
             ui.set_revealed_row(row);
             ui.set_revealed_col(col);
@@ -374,7 +407,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state = state.clone();
         ui.on_set_sort(move |index| {
-            state.borrow_mut().prefs.sort = if index == 1 { SortKey::GapFirst } else { SortKey::Name };
+            state.borrow_mut().prefs.sort = if index == 1 {
+                SortKey::GapFirst
+            } else {
+                SortKey::Name
+            };
             let ui = ui_weak.unwrap();
             render(&ui, &state);
         });

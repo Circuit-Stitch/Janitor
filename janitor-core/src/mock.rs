@@ -74,8 +74,7 @@ fn fallback(secret_id: &str, environment: &str) -> SecretShape {
         "DATABASE_URL": format!("postgres://{service}-{}/{service}", fake_hex(secret_id)),
     });
     if environment == "prod" {
-        obj["LEGACY_TOKEN"] =
-            serde_json::Value::String(fake_hex(&format!("{secret_id}:LEGACY")));
+        obj["LEGACY_TOKEN"] = serde_json::Value::String(fake_hex(&format!("{secret_id}:LEGACY")));
     }
     SecretShape::from_secret_string(&obj.to_string())
 }
@@ -128,7 +127,9 @@ mod tests {
 
     #[test]
     fn seeded_payments_has_the_mockup_entries() {
-        let prod = MockSource::new().fetch(&map("payments/prod", "prod")).unwrap();
+        let prod = MockSource::new()
+            .fetch(&map("payments/prod", "prod"))
+            .unwrap();
         let names: Vec<String> = entries(&prod).into_iter().map(|(n, _, _)| n).collect();
         assert!(names.contains(&"database.primary.url".to_string()));
         assert!(names.contains(&"database.replica.url".to_string()));
@@ -137,8 +138,12 @@ mod tests {
 
     #[test]
     fn seeded_github_app_id_aligned_replica_is_gap_stripe_drifts() {
-        let prod = MockSource::new().fetch(&map("payments/prod", "prod")).unwrap();
-        let stg = MockSource::new().fetch(&map("payments/staging", "staging")).unwrap();
+        let prod = MockSource::new()
+            .fetch(&map("payments/prod", "prod"))
+            .unwrap();
+        let stg = MockSource::new()
+            .fetch(&map("payments/staging", "staging"))
+            .unwrap();
         assert_eq!(
             value_of(&prod, "GITHUB_APP_ID"),
             value_of(&stg, "GITHUB_APP_ID"),
@@ -162,7 +167,9 @@ mod tests {
         assert_eq!(entries(&a), entries(&b), "same input → same shape");
 
         let prod = MockSource::new().fetch(&map("auth/prod", "prod")).unwrap();
-        let stg = MockSource::new().fetch(&map("auth/staging", "staging")).unwrap();
+        let stg = MockSource::new()
+            .fetch(&map("auth/staging", "staging"))
+            .unwrap();
         assert_eq!(
             value_of(&prod, "SERVICE_NAME"),
             value_of(&stg, "SERVICE_NAME"),
