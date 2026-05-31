@@ -71,10 +71,10 @@ impl AppError {
 use std::sync::Arc;
 
 use janitor_core::compare::Comparison;
+use janitor_core::compare::RowKey;
 use janitor_core::config::Application;
 use janitor_core::secret::SecretShape;
-use janitor_core::view::{project, MatrixView, reveal_value};
-use janitor_core::compare::RowKey;
+use janitor_core::view::{project, reveal_value, MatrixView};
 
 use crate::broker::CredentialBroker;
 use crate::secrets::SecretsClient;
@@ -126,8 +126,11 @@ impl Session {
             return Ok(());
         }
         let token = self.reauth.sign_in().await?;
-        let broker =
-            CredentialBroker::new(token, Arc::clone(&self.role_client), Arc::clone(&self.clock));
+        let broker = CredentialBroker::new(
+            token,
+            Arc::clone(&self.role_client),
+            Arc::clone(&self.clock),
+        );
         let secrets = SecretsClient::new(Arc::clone(&self.secrets_api));
         self.facade = Some(AuthenticatedSource::new(
             broker,
@@ -144,7 +147,9 @@ impl Session {
     /// (spec Decision 8). On full success, cache the Sets and return the masked
     /// view. The Sets (plaintext) never leave `self.cached`.
     pub async fn load(&mut self, app: &Application) -> Result<MatrixView, AppError> {
-        self.sign_in().await.map_err(|_| AppError::needs_sign_in())?;
+        self.sign_in()
+            .await
+            .map_err(|_| AppError::needs_sign_in())?;
         let facade = self.facade.as_mut().expect("facade exists after sign_in");
 
         let mut sets: Vec<(String, SecretShape)> = Vec::new();
@@ -177,8 +182,8 @@ mod tests {
     use super::*;
     use crate::wire::fakes::{CredSpec, FakeClock, FakeReauth, FakeRoleClient, FakeSecretsApi};
     use crate::wire::RawSecret;
-    use janitor_core::config::{Application, Mapping};
     use janitor_core::compare::{EntryState, RowKey};
+    use janitor_core::config::{Application, Mapping};
     use janitor_core::secret::EntryName;
     use std::sync::Arc;
     use std::time::Duration;
@@ -193,10 +198,16 @@ mod tests {
         }
     }
     fn cred_ok() -> Result<CredSpec, SessionError> {
-        Ok(CredSpec { expires_in: Duration::from_secs(3600), tag: "t" })
+        Ok(CredSpec {
+            expires_in: Duration::from_secs(3600),
+            tag: "t",
+        })
     }
     fn secret_json(json: &str) -> Result<RawSecret, SessionError> {
-        Ok(RawSecret { secret_string: Some(json.into()), secret_binary: None })
+        Ok(RawSecret {
+            secret_string: Some(json.into()),
+            secret_binary: None,
+        })
     }
     fn session(
         reauth: Arc<FakeReauth>,
@@ -229,7 +240,9 @@ mod tests {
             FetchFailReason::Unsupported
         );
         assert_eq!(
-            FetchFailReason::from(&SessionError::Sdk { context: "GetSecretValue".into() }),
+            FetchFailReason::from(&SessionError::Sdk {
+                context: "GetSecretValue".into()
+            }),
             FetchFailReason::Other
         );
     }
@@ -237,7 +250,9 @@ mod tests {
     #[test]
     fn describe_never_leaks_sdk_text() {
         // The Sdk catch-all carries a context string; describe() must not surface it.
-        let r = FetchFailReason::from(&SessionError::Sdk { context: "hunter2".into() });
+        let r = FetchFailReason::from(&SessionError::Sdk {
+            context: "hunter2".into(),
+        });
         assert!(!r.describe().contains("hunter2"));
         assert_eq!(r.describe(), "AWS error");
     }
@@ -273,7 +288,10 @@ mod tests {
         let mut s = session(reauth, role, api);
         let app = Application {
             name: "app".into(),
-            environments: vec![mapping("prod", "app/prod"), mapping("staging", "app/staging")],
+            environments: vec![
+                mapping("prod", "app/prod"),
+                mapping("staging", "app/staging"),
+            ],
         };
         let view = s.load(&app).await.unwrap();
         assert_eq!(view.environments, vec!["prod", "staging"]);
@@ -295,7 +313,10 @@ mod tests {
         let mut s = session(reauth, role, api);
         let app = Application {
             name: "app".into(),
-            environments: vec![mapping("prod", "app/prod"), mapping("staging", "app/staging")],
+            environments: vec![
+                mapping("prod", "app/prod"),
+                mapping("staging", "app/staging"),
+            ],
         };
         let err = s.load(&app).await.unwrap_err();
         assert_eq!(err.failures.len(), 1);
@@ -309,7 +330,10 @@ mod tests {
         let role = Arc::new(FakeRoleClient::new(vec![]));
         let api = Arc::new(FakeSecretsApi::new(vec![]));
         let mut s = session(reauth, role, api);
-        let app = Application { name: "a".into(), environments: vec![mapping("prod", "a/prod")] };
+        let app = Application {
+            name: "a".into(),
+            environments: vec![mapping("prod", "a/prod")],
+        };
         let err = s.load(&app).await.unwrap_err();
         assert_eq!(err.failures[0].1, FetchFailReason::NeedsSignIn);
     }

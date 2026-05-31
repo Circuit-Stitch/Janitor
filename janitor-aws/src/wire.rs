@@ -300,10 +300,16 @@ pub mod fakes {
     }
     impl FakeReauth {
         pub fn ok() -> Self {
-            FakeReauth { calls: Mutex::new(0), fail: false }
+            FakeReauth {
+                calls: Mutex::new(0),
+                fail: false,
+            }
         }
         pub fn failing() -> Self {
-            FakeReauth { calls: Mutex::new(0), fail: true }
+            FakeReauth {
+                calls: Mutex::new(0),
+                fail: true,
+            }
         }
         pub fn count(&self) -> u32 {
             *self.calls.lock().unwrap()
