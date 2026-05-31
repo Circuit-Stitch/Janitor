@@ -315,7 +315,13 @@ export component ManageWindow inherits Window {
     in property <[EnvRow]> envs;
     // Progress / masked result of the in-flight discovery ("" hides it).
     in property <string> discovery-status;
+    // Pending guided choice (ADR 0013): prompt ("" hides the picker), the
+    // selectable presenter labels, and the index to pre-select (-1 = none).
+    in property <string> choice-prompt;
+    in property <[string]> choices;
+    in property <int> choice-default;
     callback add-env-discover(string); // env name only → Discovery fills the rest
+    callback pick-choice(int);         // chosen index → AdvanceDiscovery
     callback remove-env(int);
     callback close-window();
 
@@ -358,6 +364,17 @@ export component ManageWindow inherits Window {
             text: root.discovery-status;
             color: #a3c0e0;
             wrap: word-wrap;
+        }
+
+        // Guided choice menu: one clickable row per label, the remembered
+        // default marked. Clicking advances the walk (sends the index back).
+        if root.choice-prompt != "" : VerticalLayout {
+            spacing: 4px;
+            Text { text: root.choice-prompt; color: #cdd3db; }
+            for label[i] in root.choices : Button {
+                text: (i == root.choice-default ? "● " : "○ ") + label;
+                clicked => { root.pick-choice(i); }
+            }
         }
 
         Rectangle { vertical-stretch: 1; }
