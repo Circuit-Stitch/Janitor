@@ -59,8 +59,11 @@ writing a secret to disk.
   (published before the worker is spawned, and only ever touched on the UI
   thread). The outer closure captures only the `Send` `Weak<MainWindow>`.
 - **Graceful shutdown.** The UI sends `Command::Shutdown` to the worker when
-  `ui.run()` returns, ending the worker loop and dropping the `Session` (and its
-  cached secrets) deterministically rather than only at process teardown.
+  `ui.run()` returns, ending the worker loop so the `Session` (and its cached
+  secrets) is dropped on close ahead of process teardown. This is best-effort —
+  the worker thread is not joined — but the invariant holds either way: if the
+  drop runs, the zeroizing cache is cleared; if the process exits first, nothing
+  was ever written to disk.
 - Live re-verification (browser + real org) is human-gated, like `live-verify`,
   and deferred to a hands-on session. The mock path is verified by launching it
   (`JANITOR_MOCK=1`).
