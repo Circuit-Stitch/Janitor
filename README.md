@@ -1,5 +1,7 @@
 # Janitor
 
+[![CI](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml)
+
 > An ephemeral desktop client onto **AWS Secrets Manager**. It stores no secrets
 > and no credentials of its own — it borrows them on demand and forgets them.
 > The name is the thesis: the janitor holds the most keys, yet keeps none.
