@@ -99,6 +99,26 @@ correctness is proven (ADR 0010 §5).
 Standard Cargo across a three-crate workspace (`janitor-core`, `janitor-gui`,
 `janitor-aws`).
 
+### Linux system dependencies
+
+`janitor-gui` uses [Slint](https://slint.dev), whose Linux backend links against
+a few system libraries (`fontconfig`, `freetype`, `libxkbcommon`) via
+`pkg-config`. Without their development packages the build fails in
+`yeslogic-fontconfig-sys` with *"Package fontconfig was not found in the
+pkg-config search path."* Install them before building:
+
+```bash
+# Fedora / RHEL
+sudo dnf install -y fontconfig-devel freetype-devel libxkbcommon-devel
+
+# Debian / Ubuntu
+sudo apt install -y libfontconfig-dev libfreetype-dev libxkbcommon-dev
+```
+
+If a later `*-sys` crate still fails, you may also need the Wayland / X11 / GL
+dev packages — on Fedora: `wayland-devel libxkbcommon-x11-devel
+mesa-libGL-devel mesa-libEGL-devel`. macOS and Windows need no extra packages.
+
 ```bash
 cargo build                          # build the workspace
 cargo test --workspace               # all crates (core + gui + janitor-aws fakes)

@@ -69,7 +69,7 @@ impl AuthenticatedSource {
                     .await
                     .map_err(|_| SessionError::ReauthRequired)?;
                 self.broker = CredentialBroker::new(
-                    token,
+                    Arc::new(token),
                     Arc::clone(&self.role_client),
                     Arc::clone(&self.clock),
                 );
@@ -167,7 +167,7 @@ mod tests {
             "t0".into(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
         );
-        let broker = CredentialBroker::new(token, role.clone(), clock.clone());
+        let broker = CredentialBroker::new(Arc::new(token), role.clone(), clock.clone());
         let secrets = SecretsClient::new(api);
         AuthenticatedSource::new(broker, secrets, reauth, role, clock)
     }

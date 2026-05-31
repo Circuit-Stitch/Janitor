@@ -45,6 +45,10 @@ _Avoid_: token, key (a Credential is not a Secret; the SSO token is the Sign-in 
 The user's saved, non-secret settings: Applications, Mappings, regions, and SSO start URL. The only data Janitor writes to disk (plaintext, OS config dir). Holds locations, never Values.
 _Avoid_: settings, preferences (use Config)
 
+**Discovery**:
+The post-Sign-in process of browsing which AWS accounts, roles (permission sets), and Secret Sets the signed-in user can actually reach, to assemble an Application's Mappings without hand-typing account IDs or ARNs. Walks account → role → Secret Set, auto-selecting whenever there is exactly one choice and asking only when there are several. Yields locations (a Mapping), never Values.
+_Avoid_: scan, import (use Discovery)
+
 ## Comparison states
 
 Across an Application's matrix, each Entry name is in exactly one state. These drive the view's colors, filters, and labels.

@@ -196,7 +196,7 @@ async fn main() {
         secret_id: String::new(), // unused for minting; broker keys on acct|role|region
         permission_set: role.clone(),
     };
-    let broker = CredentialBroker::new(token, role_client.clone(), clock.clone());
+    let broker = CredentialBroker::new(Arc::new(token), role_client.clone(), clock.clone());
     let cred = broker
         .credentials_for(&probe)
         .await

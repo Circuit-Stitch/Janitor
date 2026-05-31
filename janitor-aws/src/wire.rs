@@ -269,6 +269,63 @@ pub mod fakes {
         }
     }
 
+    /// A scripted account catalog: `list_accounts` and `list_account_roles`
+    /// each pop the next scripted outcome (so a discovery walk's account →
+    /// role listing is driven without AWS), panicking if called more often
+    /// than scripted.
+    pub struct FakeAccountCatalog {
+        pub accounts: Mutex<Vec<Result<Vec<AccountSummary>, SessionError>>>,
+        pub roles: Mutex<Vec<Result<Vec<RoleSummary>, SessionError>>>,
+        pub account_calls: Mutex<u32>,
+        pub role_calls: Mutex<u32>,
+    }
+    impl FakeAccountCatalog {
+        pub fn new(
+            accounts: Vec<Result<Vec<AccountSummary>, SessionError>>,
+            roles: Vec<Result<Vec<RoleSummary>, SessionError>>,
+        ) -> Self {
+            FakeAccountCatalog {
+                accounts: Mutex::new(accounts),
+                roles: Mutex::new(roles),
+                account_calls: Mutex::new(0),
+                role_calls: Mutex::new(0),
+            }
+        }
+        pub fn account_call_count(&self) -> u32 {
+            *self.account_calls.lock().unwrap()
+        }
+        pub fn role_call_count(&self) -> u32 {
+            *self.role_calls.lock().unwrap()
+        }
+    }
+    #[async_trait]
+    impl AccountCatalog for FakeAccountCatalog {
+        async fn list_accounts(
+            &self,
+            _token: &SsoToken,
+        ) -> Result<Vec<AccountSummary>, SessionError> {
+            *self.account_calls.lock().unwrap() += 1;
+            let mut v = self.accounts.lock().unwrap();
+            if v.is_empty() {
+                panic!("FakeAccountCatalog::list_accounts called more times than scripted");
+            }
+            v.remove(0)
+        }
+
+        async fn list_account_roles(
+            &self,
+            _token: &SsoToken,
+            _account_id: &str,
+        ) -> Result<Vec<RoleSummary>, SessionError> {
+            *self.role_calls.lock().unwrap() += 1;
+            let mut v = self.roles.lock().unwrap();
+            if v.is_empty() {
+                panic!("FakeAccountCatalog::list_account_roles called more times than scripted");
+            }
+            v.remove(0)
+        }
+    }
+
     /// A controllable clock for broker/facade tests.
     pub struct FakeClock {
         pub now: Mutex<SystemTime>,
@@ -399,6 +456,32 @@ pub mod fakes {
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].name, "n");
         });
+    }
+
+    #[test]
+    fn fake_account_catalog_scripts_accounts_and_roles() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cat = FakeAccountCatalog::new(
+            vec![Ok(vec![AccountSummary {
+                id: "111".into(),
+                name: "Prod".into(),
+            }])],
+            vec![Ok(vec![RoleSummary {
+                name: "ReadOnly".into(),
+            }])],
+        );
+        let token = SsoToken::new("t".into(), SystemTime::UNIX_EPOCH);
+        rt.block_on(async {
+            let accounts = cat.list_accounts(&token).await.unwrap();
+            assert_eq!(accounts[0].id, "111");
+            let roles = cat.list_account_roles(&token, "111").await.unwrap();
+            assert_eq!(roles[0].name, "ReadOnly");
+        });
+        assert_eq!(cat.account_call_count(), 1);
+        assert_eq!(cat.role_call_count(), 1);
     }
 
     #[test]

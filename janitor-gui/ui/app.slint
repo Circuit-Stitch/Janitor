@@ -51,10 +51,6 @@ export component MainWindow inherits Window {
     in property <string> status-message;        // banner text for "error"/"signing"
     callback sign-in();
     callback refresh();
-    // Environments of the currently-selected Application, for the editor.
-    in property <[EnvRow]> selected-envs;
-    callback add-env(string, string, string, string, string); // env, account, region, secret_id, perm
-    callback remove-env(int);
     in-out property <bool> settings-open: false;
     in-out property <string> sso-start-url;
     in-out property <string> sso-region;
@@ -62,6 +58,10 @@ export component MainWindow inherits Window {
     callback save-sso();
     callback add-app(string);
     callback remove-app(int);
+    // Discovery / Manage (ADR 0013): create an Application from the sidebar and
+    // open its non-modal Manage window; open Manage for the selected app.
+    callback new-app-managed(string);
+    callback manage-selected();
 
     in property <bool> dark: true;
     in-out property <int> auto-hide-secs: 5;
@@ -78,6 +78,20 @@ export component MainWindow inherits Window {
                 padding: 12px;
                 spacing: 4px;
                 Text { text: "APPLICATIONS"; color: #6b7280; font-size: 11px; }
+                HorizontalLayout {
+                    spacing: 4px;
+                    new-app-name := LineEdit {
+                        placeholder-text: "New application";
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "+";
+                        clicked => {
+                            root.new-app-managed(new-app-name.text);
+                            new-app-name.text = "";
+                        }
+                    }
+                }
                 for app[i] in apps : Rectangle {
                     height: 48px;
                     background: app.selected ? #1b2330 : (atouch.has-hover ? #161a20 : transparent);
@@ -115,6 +129,10 @@ export component MainWindow inherits Window {
                 if root.status == "loaded" : Button {
                     text: "Refresh";
                     clicked => { root.refresh(); }
+                }
+                Button {
+                    text: "Manage";
+                    clicked => { root.manage-selected(); }
                 }
                 Button {
                     text: root.settings-open ? "Close settings" : "Settings";
@@ -247,29 +265,10 @@ export component MainWindow inherits Window {
                 new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
                 Button { text: "Add application"; clicked => { root.add-app(new-app.text); } }
             }
-
-            Text { text: "Environments of the selected Application"; color: #8a8f98; }
-            for env[i] in selected-envs : HorizontalLayout {
-                spacing: 8px;
-                Text { text: env.environment; color: white; width: 90px; }
-                Text { text: env.account-id; color: #9aa0aa; width: 130px; }
-                Text { text: env.region; color: #9aa0aa; width: 90px; }
-                Text { text: env.secret-id; color: #9aa0aa; horizontal-stretch: 1; overflow: elide; }
-                Button { text: "Remove"; clicked => { root.remove-env(i); } }
-            }
-            HorizontalLayout {
-                spacing: 6px;
-                e-env := LineEdit { placeholder-text: "env (prod)"; width: 90px; }
-                e-acct := LineEdit { placeholder-text: "account id"; width: 130px; }
-                e-region := LineEdit { placeholder-text: "region"; width: 90px; }
-                e-secret := LineEdit { placeholder-text: "secret id / ARN"; horizontal-stretch: 1; }
-                e-perm := LineEdit { placeholder-text: "permission set"; width: 130px; }
-                Button {
-                    text: "Add env";
-                    clicked => {
-                        root.add-env(e-env.text, e-acct.text, e-region.text, e-secret.text, e-perm.text);
-                    }
-                }
+            Text {
+                text: "Add or remove Environments from each Application's Manage window.";
+                color: #6b7280;
+                font-size: 11px;
             }
 
             Text { text: "Preferences"; color: #8a8f98; }
@@ -297,6 +296,74 @@ export component MainWindow inherits Window {
                     edited => { root.set-auto-hide(self.value); }
                 }
             }
+        }
+    }
+}
+
+// Non-modal pop-out (ADR 0013): everything about ONE Application. Bound to the
+// app it opened for — the sidebar selection does not retarget it, so a
+// discovered Environment can never land in the wrong Application. `+ Add env`
+// runs guided Discovery (the user types only the Environment name; account /
+// role / secret are discovered).
+export component ManageWindow inherits Window {
+    title: "Manage Application";
+    preferred-width: 620px;
+    preferred-height: 440px;
+    background: #14161a;
+
+    in property <string> app-name;
+    in property <[EnvRow]> envs;
+    // Progress / masked result of the in-flight discovery ("" hides it).
+    in property <string> discovery-status;
+    callback add-env-discover(string); // env name only → Discovery fills the rest
+    callback remove-env(int);
+    callback close-window();
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 10px;
+
+        Text { text: "Manage · " + root.app-name; color: white; font-size: 18px; }
+
+        Text { text: "ENVIRONMENTS"; color: #8a8f98; font-size: 11px; }
+        if root.envs.length == 0 : Text {
+            text: "No environments yet — add one below.";
+            color: #6b7280;
+        }
+        for env[i] in root.envs : HorizontalLayout {
+            spacing: 8px;
+            Text { text: env.environment; color: white; width: 90px; }
+            Text { text: env.account-id; color: #9aa0aa; width: 130px; }
+            Text { text: env.region; color: #9aa0aa; width: 90px; }
+            Text { text: env.secret-id; color: #9aa0aa; horizontal-stretch: 1; overflow: elide; }
+            Button { text: "Remove"; clicked => { root.remove-env(i); } }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            new-env := LineEdit {
+                placeholder-text: "environment name (e.g. prod)";
+                horizontal-stretch: 1;
+            }
+            Button {
+                text: "+ Add env";
+                clicked => {
+                    root.add-env-discover(new-env.text);
+                    new-env.text = "";
+                }
+            }
+        }
+
+        if root.discovery-status != "" : Text {
+            text: root.discovery-status;
+            color: #a3c0e0;
+            wrap: word-wrap;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+        HorizontalLayout {
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Close"; clicked => { root.close-window(); } }
         }
     }
 }

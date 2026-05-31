@@ -18,6 +18,7 @@
 //! [`aws_impl`] (the browser/listener + real SDK calls) are untested.
 
 pub mod broker;
+pub mod discovery;
 pub mod error;
 pub mod pkce;
 pub mod secrets;
