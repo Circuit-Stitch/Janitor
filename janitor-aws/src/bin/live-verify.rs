@@ -12,6 +12,9 @@
 //!
 //! Optional overrides skip a step: `--start-url`, `--sso-region`,
 //! `--secret-region`, `--account-id`, `--role`, `--secret-id`.
+//!
+//! `--reset-config` deletes the saved Config first (org URL, regions, last
+//! pick), so the next run re-prompts from scratch.
 
 use std::env;
 use std::io::{self, Write};
@@ -35,6 +38,11 @@ fn arg(flag: &str) -> Option<String> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// Whether a bare flag (no value) is present on the command line.
+fn has_flag(flag: &str) -> bool {
+    env::args().any(|a| a == flag)
 }
 
 /// Read a non-empty line of free text for `prompt` from stdin.
@@ -88,6 +96,18 @@ impl Chooser for StdinChooser {
 
 #[tokio::main]
 async fn main() {
+    // 0. `--reset-config`: delete the saved Config so this run starts clean.
+    if has_flag("--reset-config") {
+        let path = Config::config_path().expect("resolve config path");
+        match std::fs::remove_file(&path) {
+            Ok(()) => println!("Removed saved config: {}", path.display()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                println!("No saved config at {} (nothing to reset)", path.display());
+            }
+            Err(e) => panic!("could not remove config {}: {e}", path.display()),
+        }
+    }
+
     // 1. Load Config; prompt+save any missing org fields (flags override).
     let mut config = Config::load().unwrap_or_default();
 

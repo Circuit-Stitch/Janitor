@@ -16,21 +16,41 @@ use crate::wire::{
     RoleCredentialClient, RoleSummary, SecretSummary, SecretsApi, TokenExchange,
 };
 
+/// The browser authorize endpoint for a registration: the value
+/// `RegisterClient` returns when present, otherwise the canonical regional OIDC
+/// endpoint `https://oidc.<region>.amazonaws.com/authorize`.
+///
+/// AWS returns a null `authorizationEndpoint` for at least some Identity Center
+/// instances (verified live against the real `RegisterClient` endpoint —
+/// Milestone B; this contradicts ADR 0011's "read the endpoint from the
+/// response", so the derived fallback is required to build a valid `/authorize`
+/// URL rather than `?response_type=...` with an empty host).
+fn authorize_endpoint(from_response: Option<&str>, region: &str) -> String {
+    match from_response {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => format!("https://oidc.{region}.amazonaws.com/authorize"),
+    }
+}
+
 /// Real OIDC client (`RegisterClient` + `CreateToken`).
 pub struct AwsOidcClient {
     inner: aws_sdk_ssooidc::Client,
+    /// The SSO region, retained to derive the authorize endpoint when AWS
+    /// returns a null `authorizationEndpoint` (see [`authorize_endpoint`]).
+    region: String,
 }
 
 impl AwsOidcClient {
     /// Build with explicit region and NO credentials (ADR 0010 §10).
     pub async fn new(region: String) -> Self {
         let conf = aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_config::Region::new(region))
+            .region(aws_config::Region::new(region.clone()))
             .no_credentials()
             .load()
             .await;
         AwsOidcClient {
             inner: aws_sdk_ssooidc::Client::new(&conf),
+            region,
         }
     }
 }
@@ -54,13 +74,23 @@ impl OidcClient for AwsOidcClient {
         for uri in redirect_uris {
             req = req.redirect_uris(uri.clone());
         }
-        let out = req.send().await.map_err(|_| SignInError::Sdk {
-            context: "RegisterClient".into(),
+        let out = req.send().await.map_err(|e| {
+            // Milestone B diagnostic (ADR 0010 §5/§9): RegisterClient is a
+            // PRE-AUTH call — no SSO token or role credential is in play, so its
+            // error body carries no secret material and is safe to print. This
+            // de-blinds the issuer/registration step during live-verify; the
+            // returned error stays the scrubbed `Sdk` variant.
+            eprintln!("RegisterClient error: {e:?}");
+            SignInError::Sdk {
+                context: "RegisterClient".into(),
+            }
         })?;
         Ok(ClientRegistration {
             client_id: out.client_id().unwrap_or_default().to_string(),
             client_secret: out.client_secret().unwrap_or_default().to_string(),
-            authorization_endpoint: out.authorization_endpoint().unwrap_or_default().to_string(),
+            // AWS returns `authorizationEndpoint: null` for some instances
+            // (Milestone B); derive the regional endpoint when it's absent.
+            authorization_endpoint: authorize_endpoint(out.authorization_endpoint(), &self.region),
         })
     }
 
@@ -76,7 +106,13 @@ impl OidcClient for AwsOidcClient {
             .redirect_uri(ex.redirect_uri)
             .send()
             .await
-            .map_err(|_| SignInError::TokenEndpoint)?;
+            .map_err(|e| {
+                // Milestone B diagnostic (ADR 0010 §5): CreateToken errors are
+                // grant/PKCE validation failures (e.g. invalid_grant); no
+                // success token exists on the error path, so printing is safe.
+                eprintln!("CreateToken error: {e:?}");
+                SignInError::TokenEndpoint
+            })?;
         let access = out
             .access_token()
             .ok_or(SignInError::TokenEndpoint)?
@@ -299,8 +335,46 @@ impl SecretsApi for AwsSecretsApi {
 fn map_secret_err<E: std::fmt::Debug, R: std::fmt::Debug>(
     e: aws_smithy_runtime_api::client::result::SdkError<E, R>,
 ) -> SessionError {
+    // Milestone B diagnostic (ADR 0010 §5): a GetSecretValue ERROR response
+    // never carries the secret value (that appears only on a SUCCESS output),
+    // so its Debug — error code + message + ARN/principal, i.e. locations and
+    // identity, never values — is safe to surface on stderr for the
+    // human-gated live-verify. Lets us see the real code (AccessDenied vs
+    // DecryptionFailure vs NotFound) instead of an opaque discriminant.
+    eprintln!("GetSecretValue error: {e:?}");
     let label = format!("{:?}", std::mem::discriminant(&e));
     SessionError::Sdk {
         context: format!("GetSecretValue:{label}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authorize_endpoint;
+
+    #[test]
+    fn authorize_endpoint_prefers_response_when_present() {
+        // If AWS ever does return the endpoint, honor it verbatim.
+        assert_eq!(
+            authorize_endpoint(
+                Some("https://oidc.eu-west-1.amazonaws.com/authorize"),
+                "us-west-2"
+            ),
+            "https://oidc.eu-west-1.amazonaws.com/authorize"
+        );
+    }
+
+    #[test]
+    fn authorize_endpoint_derives_from_region_when_absent() {
+        // AWS returns null (-> None) for some instances (Milestone B); also
+        // guard the empty-string case. Both derive the regional endpoint.
+        assert_eq!(
+            authorize_endpoint(None, "us-west-2"),
+            "https://oidc.us-west-2.amazonaws.com/authorize"
+        );
+        assert_eq!(
+            authorize_endpoint(Some(""), "us-east-1"),
+            "https://oidc.us-east-1.amazonaws.com/authorize"
+        );
     }
 }

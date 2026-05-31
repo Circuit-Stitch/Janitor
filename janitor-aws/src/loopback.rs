@@ -9,23 +9,38 @@ use tokio::net::TcpListener;
 
 use crate::error::SignInError;
 
-/// The candidate loopback ports we register and try to bind, in order. Must
-/// match the `redirect_uris` passed to RegisterClient (ADR 0010 §7).
+/// The candidate loopback ports we bind, in order. These appear only in the
+/// authorize/token `redirect_uri` (carrying the chosen port, via
+/// [`bind_first_free`]); the value REGISTERED with RegisterClient is port-less
+/// (see [`redirect_uris`]).
 pub const LOOPBACK_PORTS: &[u16] = &[53690, 53691, 53692, 53693];
 
-/// Build the redirect URIs we register for these ports (literal 127.0.0.1).
+/// The loopback redirect URI we REGISTER with `RegisterClient`.
+///
+/// IAM Identity Center requires the loopback redirect PATH to be exactly
+/// `/oauth/callback` for a public client. Any other path (`/callback`, `/`,
+/// `/anything`) is rejected with a misleadingly-worded
+/// `InvalidRedirectUriException` ("Requested client type must use loopback
+/// interface for redirect") — the message blames the interface, but the real
+/// constraint is the path. Verified empirically against the live
+/// `RegisterClient` endpoint (Milestone B, ADR 0011); the AWS CLI's
+/// `AuthCodeFetcher` uses this same `/oauth/callback` path.
+///
+/// We register port-less. Per RFC 8252 §7.3 the authorization server ignores a
+/// loopback redirect's port when matching, so this single registration matches
+/// whichever ephemeral port [`bind_first_free`] binds at authorize/token time
+/// (confirmed: both port-less and port-bearing `/oauth/callback` register OK).
 pub fn redirect_uris() -> Vec<String> {
-    LOOPBACK_PORTS
-        .iter()
-        .map(|p| format!("http://127.0.0.1:{p}/callback"))
-        .collect()
+    vec!["http://127.0.0.1/oauth/callback".to_string()]
 }
 
 /// Bind the first free registered loopback port; return (listener, its URI).
 pub async fn bind_first_free() -> Result<(TcpListener, String), SignInError> {
     for port in LOOPBACK_PORTS {
         if let Ok(l) = TcpListener::bind(("127.0.0.1", *port)).await {
-            return Ok((l, format!("http://127.0.0.1:{port}/callback")));
+            // Path MUST be `/oauth/callback` to match what `redirect_uris`
+            // registers — IAM Identity Center enforces this exact path.
+            return Ok((l, format!("http://127.0.0.1:{port}/oauth/callback")));
         }
     }
     Err(SignInError::NoLoopbackPort)
@@ -132,13 +147,34 @@ mod tests {
     }
 
     #[test]
-    fn redirect_uris_use_literal_loopback_ip() {
-        for uri in redirect_uris() {
-            assert!(
-                uri.starts_with("http://127.0.0.1:"),
-                "must be literal 127.0.0.1"
-            );
-            assert!(uri.ends_with("/callback"));
-        }
+    fn registered_redirect_uri_uses_loopback_and_oauth_callback_path() {
+        // IAM Identity Center requires the registered loopback redirect path to
+        // be EXACTLY `/oauth/callback`; other paths are rejected with a
+        // misleading "must use loopback interface" error (verified live,
+        // Milestone B). We register port-less; the port is added at
+        // authorize/token time by `bind_first_free`.
+        assert_eq!(
+            redirect_uris(),
+            vec!["http://127.0.0.1/oauth/callback".to_string()]
+        );
+    }
+
+    #[test]
+    fn bound_redirect_uri_uses_oauth_callback_path() {
+        // The authorize/token redirect_uri must share the registered path
+        // (`/oauth/callback`) so the loopback match succeeds (RFC 8252 §7.3
+        // ignores only the port, not the path).
+        let (_listener, uri) = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(bind_first_free())
+            .expect("bind a loopback port");
+        assert!(
+            uri.starts_with("http://127.0.0.1:"),
+            "literal loopback host"
+        );
+        assert!(
+            uri.ends_with("/oauth/callback"),
+            "path must be /oauth/callback, got {uri}"
+        );
     }
 }
