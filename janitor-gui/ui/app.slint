@@ -21,6 +21,14 @@ export struct AppItem {
     selected: bool,
 }
 
+export struct EnvRow {
+    environment: string,
+    account_id: string,
+    region: string,
+    secret_id: string,
+    permission_set: string,
+}
+
 export component MainWindow inherits Window {
     title: "Janitor";
     preferred-width: 1100px;
@@ -43,6 +51,10 @@ export component MainWindow inherits Window {
     in property <string> status-message;        // banner text for "error"/"signing"
     callback sign-in();
     callback refresh();
+    // Environments of the currently-selected Application, for the editor.
+    in property <[EnvRow]> selected-envs;
+    callback add-env(string, string, string, string, string); // env, account, region, secret_id, perm
+    callback remove-env(int);
     in-out property <bool> settings-open: false;
     in-out property <string> sso-start-url;
     in-out property <string> sso-region;
@@ -222,14 +234,42 @@ export component MainWindow inherits Window {
             Text { text: "Applications"; color: #8a8f98; }
             for app[i] in apps : HorizontalLayout {
                 spacing: 8px;
-                Text { text: app.name; color: white; horizontal-stretch: 1; }
-                Text { text: app.subtitle; color: #6b7280; }
+                Text {
+                    text: app.name + (app.selected ? "  (selected)" : "");
+                    color: app.selected ? #ffd479 : white;
+                    horizontal-stretch: 1;
+                }
+                Button { text: "Select"; clicked => { root.select-app(i); } }
                 Button { text: "Remove"; clicked => { root.remove-app(i); } }
             }
             HorizontalLayout {
                 spacing: 8px;
                 new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
-                Button { text: "Add"; clicked => { root.add-app(new-app.text); } }
+                Button { text: "Add application"; clicked => { root.add-app(new-app.text); } }
+            }
+
+            Text { text: "Environments of the selected Application"; color: #8a8f98; }
+            for env[i] in selected-envs : HorizontalLayout {
+                spacing: 8px;
+                Text { text: env.environment; color: white; width: 90px; }
+                Text { text: env.account-id; color: #9aa0aa; width: 130px; }
+                Text { text: env.region; color: #9aa0aa; width: 90px; }
+                Text { text: env.secret-id; color: #9aa0aa; horizontal-stretch: 1; overflow: elide; }
+                Button { text: "Remove"; clicked => { root.remove-env(i); } }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                e-env := LineEdit { placeholder-text: "env (prod)"; width: 90px; }
+                e-acct := LineEdit { placeholder-text: "account id"; width: 130px; }
+                e-region := LineEdit { placeholder-text: "region"; width: 90px; }
+                e-secret := LineEdit { placeholder-text: "secret id / ARN"; horizontal-stretch: 1; }
+                e-perm := LineEdit { placeholder-text: "permission set"; width: 130px; }
+                Button {
+                    text: "Add env";
+                    clicked => {
+                        root.add-env(e-env.text, e-acct.text, e-region.text, e-secret.text, e-perm.text);
+                    }
+                }
             }
 
             Text { text: "Preferences"; color: #8a8f98; }
