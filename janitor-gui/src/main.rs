@@ -445,7 +445,13 @@ fn main() -> Result<(), slint::PlatformError> {
     push_matrix(&ui, &state);
     // Mock opens already "signed in" → load the first app immediately.
     if mock {
-        if let Some(app) = state.borrow().config.applications.first().cloned() {
+        // Bind first so the `state.borrow()` temporary DROPS before `dispatch`.
+        // An `if let` scrutinee would hold the shared borrow across the whole
+        // block, and the `AppLoaded` handler's `state.borrow_mut()` would then
+        // panic ("already borrowed") — this matches the let-then-if-let pattern
+        // the other dispatch call sites use.
+        let first_app = state.borrow().config.applications.first().cloned();
+        if let Some(app) = first_app {
             dispatch(&ui, &state, Command::LoadApp(app));
         }
     }
