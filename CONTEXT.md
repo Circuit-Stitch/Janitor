@@ -33,6 +33,10 @@ The saved record, inside an Application, of which concrete AWS secret (account +
 The browser-based AWS IAM Identity Center authentication the user performs when opening Janitor. Yields the ephemeral SSO token, from which per-Environment Credentials are derived. Never cached to disk — every launch requires a fresh Sign-in.
 _Avoid_: login, SSO (use Sign-in)
 
+**Session**:
+The live, authenticated span that begins at a Sign-in and lasts until the SSO token expires. While it lasts, Janitor holds the SSO token in memory and derives a Credential per Environment from it; those Credentials refresh silently as they lapse, but once the SSO token itself expires the Session is over and a fresh Sign-in is required. Memory-only; every launch is a new Session.
+_Avoid_: connection, login session (a Session is an authenticated lifetime, not a network connection)
+
 **Credential**:
 The ephemeral, short-lived AWS role credentials (one per Environment) that let Janitor call AWS. Derived from the SSO token via `GetRoleCredentials` and silently refreshed without a browser; distinct from a Secret (a Credential is how Janitor talks to AWS; a Secret is what the user manages there). Never persisted.
 _Avoid_: token, key (a Credential is not a Secret; the SSO token is the Sign-in artifact, not a Credential)

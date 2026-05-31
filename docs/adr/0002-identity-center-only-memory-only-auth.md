@@ -1,6 +1,6 @@
 # Identity-Center-only, memory-only authentication
 
-**Status:** accepted
+**Status:** accepted — implemented by [ADR 0010](0010-aws-adapter-crate-and-auth-object-model.md) (crate, object model, headless slice)
 
 ## Context
 
