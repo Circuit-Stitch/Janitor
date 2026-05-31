@@ -315,6 +315,10 @@ export component ManageWindow inherits Window {
     in property <[EnvRow]> envs;
     // Progress / masked result of the in-flight discovery ("" hides it).
     in property <string> discovery-status;
+    // True when `discovery-status` is a terminal failure (no choices / session
+    // error / expired) the user can step Back from — false for transient
+    // progress like "Discovering…". Gates the Back button (ADR 0013).
+    in property <bool> discovery-terminal;
     // Pending guided choice (ADR 0013): prompt ("" hides the picker), the
     // selectable presenter labels, and the index to pre-select (-1 = none).
     in property <string> choice-prompt;
@@ -322,6 +326,7 @@ export component ManageWindow inherits Window {
     in property <int> choice-default;
     callback add-env-discover(string); // env name only → Discovery fills the rest
     callback pick-choice(int);         // chosen index → AdvanceDiscovery
+    callback back-discovery();         // dismiss a terminal message to adjust/retry
     callback remove-env(int);
     callback rename-app(string);       // new name → Config::rename_application
     callback close-window();
@@ -374,10 +379,19 @@ export component ManageWindow inherits Window {
             }
         }
 
-        if root.discovery-status != "" : Text {
-            text: root.discovery-status;
-            color: #a3c0e0;
-            wrap: word-wrap;
+        if root.discovery-status != "" : VerticalLayout {
+            spacing: 6px;
+            Text {
+                text: root.discovery-status;
+                color: #a3c0e0;
+                wrap: word-wrap;
+            }
+            // A terminal message (no choices / session error / expired) is
+            // retryable: Back dismisses it so the user can adjust and try again.
+            if root.discovery-terminal : HorizontalLayout {
+                Button { text: "Back"; clicked => { root.back-discovery(); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
         }
 
         // Guided choice menu: one clickable row per label, the remembered
