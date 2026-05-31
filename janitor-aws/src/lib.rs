@@ -21,6 +21,7 @@ pub mod broker;
 pub mod error;
 pub mod pkce;
 pub mod secrets;
+pub mod select;
 pub mod source;
 pub mod state;
 pub mod types;
