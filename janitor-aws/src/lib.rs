@@ -22,6 +22,7 @@ pub mod error;
 pub mod pkce;
 pub mod secrets;
 pub mod select;
+pub mod session;
 pub mod source;
 pub mod state;
 pub mod types;

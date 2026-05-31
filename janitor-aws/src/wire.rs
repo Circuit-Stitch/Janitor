@@ -290,6 +290,46 @@ pub mod fakes {
         }
     }
 
+    /// A scripted re-/sign-in: yields a fresh token (or a failure) and counts
+    /// calls, so the Session's "sign in exactly once" contract is assertable.
+    /// Additive — mirrors the private fake in `source.rs` tests; kept here so
+    /// `session.rs` tests can share it without duplication.
+    pub struct FakeReauth {
+        pub calls: Mutex<u32>,
+        pub fail: bool,
+    }
+    impl FakeReauth {
+        pub fn ok() -> Self {
+            FakeReauth {
+                calls: Mutex::new(0),
+                fail: false,
+            }
+        }
+        pub fn failing() -> Self {
+            FakeReauth {
+                calls: Mutex::new(0),
+                fail: true,
+            }
+        }
+        pub fn count(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+    }
+    #[async_trait]
+    impl crate::source::Reauth for FakeReauth {
+        async fn sign_in(&self) -> Result<SsoToken, crate::error::SignInError> {
+            *self.calls.lock().unwrap() += 1;
+            if self.fail {
+                Err(crate::error::SignInError::TokenEndpoint)
+            } else {
+                Ok(SsoToken::new(
+                    "session-token".into(),
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
+                ))
+            }
+        }
+    }
+
     #[test]
     fn fake_role_client_counts_calls_and_scripts_outcomes() {
         // A tiny self-test of the fake itself, so later tasks can trust it.
@@ -359,5 +399,24 @@ pub mod fakes {
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].name, "n");
         });
+    }
+
+    #[test]
+    fn fake_reauth_counts_and_can_fail() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ok = FakeReauth::ok();
+        rt.block_on(async {
+            assert!(crate::source::Reauth::sign_in(&ok).await.is_ok());
+        });
+        assert_eq!(ok.count(), 1);
+
+        let bad = FakeReauth::failing();
+        rt.block_on(async {
+            assert!(crate::source::Reauth::sign_in(&bad).await.is_err());
+        });
+        assert_eq!(bad.count(), 1);
     }
 }

@@ -23,9 +23,12 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
 /// Drives a full Identity Center browser Sign-in.
 pub struct Authenticator {
     oidc: Arc<dyn OidcClient>,
-    /// The org's IAM Identity Center start/issuer URL (e.g.
-    /// `https://my-org.awsapps.com/start`). Passed to `RegisterClient` as
-    /// `issuerUrl`; the `/authorize` endpoint comes back in the registration.
+    /// The org's IAM Identity Center **SSO start URL** — the *instance* form
+    /// `https://identitycenter.amazonaws.com/ssoins-…` from AWS' Get-credentials
+    /// dialog, NOT the portal `https://<dir>.awsapps.com/start` URL (the portal
+    /// form is rejected by `RegisterClient` as "Invalid start url" — Milestone B,
+    /// ADR 0011). Passed to `RegisterClient` as `issuerUrl`; the `/authorize`
+    /// endpoint comes back in the registration (with a region fallback).
     issuer_url: String,
 }
 

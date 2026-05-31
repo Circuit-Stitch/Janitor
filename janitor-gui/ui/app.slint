@@ -21,6 +21,14 @@ export struct AppItem {
     selected: bool,
 }
 
+export struct EnvRow {
+    environment: string,
+    account_id: string,
+    region: string,
+    secret_id: string,
+    permission_set: string,
+}
+
 export component MainWindow inherits Window {
     title: "Janitor";
     preferred-width: 1100px;
@@ -37,6 +45,16 @@ export component MainWindow inherits Window {
 
     callback reveal-cell(int, int);
     callback select-app(int);
+    // Auth / load state (driven by the worker). status: one of
+    // "unauth" | "signing" | "loading" | "loaded" | "error".
+    in property <string> status: "unauth";
+    in property <string> status-message;        // banner text for "error"/"signing"
+    callback sign-in();
+    callback refresh();
+    // Environments of the currently-selected Application, for the editor.
+    in property <[EnvRow]> selected-envs;
+    callback add-env(string, string, string, string, string); // env, account, region, secret_id, perm
+    callback remove-env(int);
     in-out property <bool> settings-open: false;
     in-out property <string> sso-start-url;
     in-out property <string> sso-region;
@@ -82,63 +100,109 @@ export component MainWindow inherits Window {
             spacing: 6px;
 
             HorizontalLayout {
-                Text { text: "Payments matrix"; color: #c8ccd4; horizontal-stretch: 1; }
-                Button { text: root.settings-open ? "Close settings" : "Settings"; clicked => { root.toggle-settings(); } }
-            }
-
-            HorizontalLayout {
-                spacing: 12px;
-                Text { text: "ENTRY"; color: #8a8f98; width: 320px; }
-                for env in environments : Text {
-                    text: env;
+                Text {
+                    text: root.status == "loaded" ? "Drift matrix"
+                        : root.status == "loading" ? "Loading…"
+                        : root.status == "signing" ? "Signing in…"
+                        : "Not signed in";
                     color: #c8ccd4;
                     horizontal-stretch: 1;
                 }
+                if root.status == "unauth" || root.status == "error" : Button {
+                    text: "Sign in";
+                    clicked => { root.sign-in(); }
+                }
+                if root.status == "loaded" : Button {
+                    text: "Refresh";
+                    clicked => { root.refresh(); }
+                }
+                Button {
+                    text: root.settings-open ? "Close settings" : "Settings";
+                    clicked => { root.toggle-settings(); }
+                }
             }
 
-            ScrollView {
-                VerticalLayout {
-                    spacing: 2px;
-                    for row[i] in rows : HorizontalLayout {
-                        spacing: 12px;
-                        VerticalLayout {
-                            width: 320px;
-                            Text { text: row.name; color: white; overflow: elide; }
-                            Text {
-                                text: row.state + "   " + row.glyph;
-                                color: row.state == "Gap" ? #6b7280
-                                     : row.state == "Drift" ? #e0a356
-                                     : #5db07a;
-                                font-size: 11px;
-                            }
-                        }
-                        for cell[j] in row.cells : Rectangle {
-                            horizontal-stretch: 1;
-                            property <bool> is-revealed:
-                                root.revealed-row == i && root.revealed-col == j;
-                            background: touch.has-hover ? #1b1e24 : transparent;
-                            touch := TouchArea {
-                                clicked => { root.reveal-cell(i, j); }
-                            }
-                            HorizontalLayout {
-                                padding: 6px;
-                                spacing: 8px;
-                                if cell.absent : Text {
-                                    text: "— absent";
-                                    color: #4b5563;
-                                    horizontal-stretch: 1;
+            if root.status == "error" || (root.status == "signing" && root.status-message != "") : Rectangle {
+                height: 28px;
+                background: root.status == "error" ? #3a1d1d : #1d2a3a;
+                HorizontalLayout {
+                    padding: 6px;
+                    Text {
+                        text: root.status-message;
+                        color: root.status == "error" ? #e0a3a3 : #a3c0e0;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            if root.status == "loaded" : VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { text: "ENTRY"; color: #8a8f98; width: 320px; }
+                    for env in environments : Text {
+                        text: env;
+                        color: #c8ccd4;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 2px;
+                        for row[i] in rows : HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                width: 320px;
+                                Text { text: row.name; color: white; overflow: elide; }
+                                Text {
+                                    text: row.state + "   " + row.glyph;
+                                    color: row.state == "Gap" ? #6b7280
+                                         : row.state == "Drift" ? #e0a356
+                                         : #5db07a;
+                                    font-size: 11px;
                                 }
-                                if !cell.absent : Text {
-                                    text: is-revealed ? root.revealed-text : cell.dots;
-                                    color: is-revealed ? #ffd479 : #6b7280;
-                                    overflow: elide;
-                                    horizontal-stretch: 1;
+                            }
+                            for cell[j] in row.cells : Rectangle {
+                                horizontal-stretch: 1;
+                                property <bool> is-revealed:
+                                    root.revealed-row == i && root.revealed-col == j;
+                                background: touch.has-hover ? #1b1e24 : transparent;
+                                touch := TouchArea {
+                                    clicked => { root.reveal-cell(i, j); }
                                 }
-                                if !cell.absent : Text { text: cell.length; color: #6b7280; }
-                                if !cell.absent : Text { text: cell.hex; color: #9aa0aa; }
+                                HorizontalLayout {
+                                    padding: 6px;
+                                    spacing: 8px;
+                                    if cell.absent : Text {
+                                        text: "— absent";
+                                        color: #4b5563;
+                                        horizontal-stretch: 1;
+                                    }
+                                    if !cell.absent : Text {
+                                        text: is-revealed ? root.revealed-text : cell.dots;
+                                        color: is-revealed ? #ffd479 : #6b7280;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    if !cell.absent : Text { text: cell.length; color: #6b7280; }
+                                    if !cell.absent : Text { text: cell.hex; color: #9aa0aa; }
+                                }
                             }
                         }
                     }
+                }
+            }
+            if root.status != "loaded" : Rectangle {
+                vertical-stretch: 1;
+                Text {
+                    text: root.status == "unauth" ? "Sign in to load this Application's secrets."
+                        : root.status == "signing" ? "A browser tab has opened — complete sign-in there."
+                        : root.status == "loading" ? "Fetching secrets…"
+                        : "Could not load. See the message above, then Sign in to retry.";
+                    color: #6b7280;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
         }
@@ -157,7 +221,7 @@ export component MainWindow inherits Window {
             Text { text: "Identity Center"; color: #8a8f98; }
             HorizontalLayout {
                 spacing: 8px;
-                Text { text: "Start URL"; color: #c8ccd4; width: 120px; }
+                Text { text: "SSO start URL"; color: #c8ccd4; width: 120px; }
                 start-url := LineEdit { text <=> root.sso-start-url; horizontal-stretch: 1; }
             }
             HorizontalLayout {
@@ -170,14 +234,42 @@ export component MainWindow inherits Window {
             Text { text: "Applications"; color: #8a8f98; }
             for app[i] in apps : HorizontalLayout {
                 spacing: 8px;
-                Text { text: app.name; color: white; horizontal-stretch: 1; }
-                Text { text: app.subtitle; color: #6b7280; }
+                Text {
+                    text: app.name + (app.selected ? "  (selected)" : "");
+                    color: app.selected ? #ffd479 : white;
+                    horizontal-stretch: 1;
+                }
+                Button { text: "Select"; clicked => { root.select-app(i); } }
                 Button { text: "Remove"; clicked => { root.remove-app(i); } }
             }
             HorizontalLayout {
                 spacing: 8px;
                 new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
-                Button { text: "Add"; clicked => { root.add-app(new-app.text); } }
+                Button { text: "Add application"; clicked => { root.add-app(new-app.text); } }
+            }
+
+            Text { text: "Environments of the selected Application"; color: #8a8f98; }
+            for env[i] in selected-envs : HorizontalLayout {
+                spacing: 8px;
+                Text { text: env.environment; color: white; width: 90px; }
+                Text { text: env.account-id; color: #9aa0aa; width: 130px; }
+                Text { text: env.region; color: #9aa0aa; width: 90px; }
+                Text { text: env.secret-id; color: #9aa0aa; horizontal-stretch: 1; overflow: elide; }
+                Button { text: "Remove"; clicked => { root.remove-env(i); } }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                e-env := LineEdit { placeholder-text: "env (prod)"; width: 90px; }
+                e-acct := LineEdit { placeholder-text: "account id"; width: 130px; }
+                e-region := LineEdit { placeholder-text: "region"; width: 90px; }
+                e-secret := LineEdit { placeholder-text: "secret id / ARN"; horizontal-stretch: 1; }
+                e-perm := LineEdit { placeholder-text: "permission set"; width: 130px; }
+                Button {
+                    text: "Add env";
+                    clicked => {
+                        root.add-env(e-env.text, e-acct.text, e-region.text, e-secret.text, e-perm.text);
+                    }
+                }
             }
 
             Text { text: "Preferences"; color: #8a8f98; }

@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Status: headless Identity Center auth slice landed (Milestone A).** The Cargo
+> **Status: GUI↔AWS bridge landed (ADR 0012) — the matrix now reads real AWS.** The Cargo
 > workspace now holds three crates under a CI lint/test/coverage lane:
 > `janitor-core`'s offline bedrock (secret-shape model, zeroizing `Value`,
 > `Config` load/save, comparison engine); a thin `janitor-gui` (Slint)
@@ -19,14 +19,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 0/1/many+remembered-default `select::resolve`), with the org + last pick
 > remembered in `Config` (ADR 0011). The `--authorize-endpoint` flag is gone —
 > the endpoint is read from `RegisterClient`'s response and `issuerUrl` is passed.
-> **Not yet wired:** the GUI still reads the mock source (no `janitor-aws` ↔ GUI
-> bridge); SDK error mapping is conservative pending **Milestone B** — running
-> `live-verify` against a real org to resolve the ADR 0010/0011 verify lists
-> (incl. whether the start URL is accepted as `issuerUrl`). Design and plan:
-> [`docs/adr/0011-guided-sign-in-and-discovery.md`](docs/adr/0011-guided-sign-in-and-discovery.md)
-> and [`docs/superpowers/plans/2026-05-31-guided-sign-in.md`](docs/superpowers/plans/2026-05-31-guided-sign-in.md).
+> **GUI↔AWS bridge landed (ADR 0012):** the GUI now feeds the masked matrix from
+> **real** AWS via a worker-threaded `janitor-aws::Session` (lazy browser sign-in
+> off the UI thread, one Application at a time; secrets resident only in the
+> worker; reveal is an on-demand round-trip; whole-app error on any env failure);
+> `JANITOR_MOCK=1` runs it offline on `MockSource`. **Still deferred:**
+> discovery-driven column assembly, per-column error rendering, the typed
+> `GetSecretValue` error mapping, and live re-verification (browser + real org)
+> pending **Milestone B** — running `live-verify` against a real org to resolve
+> the ADR 0010/0011 verify lists (incl. whether the start URL is accepted as
+> `issuerUrl`). Design and plan:
+> [`docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md`](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md),
+> [`docs/superpowers/specs/2026-05-31-gui-aws-bridge-design.md`](docs/superpowers/specs/2026-05-31-gui-aws-bridge-design.md),
+> and [`docs/superpowers/plans/2026-05-31-gui-aws-bridge.md`](docs/superpowers/plans/2026-05-31-gui-aws-bridge.md).
 > Domain glossary: [`CONTEXT.md`](CONTEXT.md); decisions: [`docs/adr/`](docs/adr/)
-> (0001–0011); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+> (0001–0012); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 > **Read those first** — this file only summarizes.
 
 ## What this is
@@ -87,7 +94,9 @@ cargo test -- --nocapture         # show test stdout/stderr
 cargo clippy --all-targets        # lint
 cargo fmt                         # format
 cargo llvm-cov -p janitor-core    # coverage (≥80% gate, core only)
-cargo run -p janitor-gui          # tracer-bullet GUI (mock data; no real AWS)
+cargo run -p janitor-gui          # real AWS via the worker bridge (browser sign-in; needs a configured org)
+$env:JANITOR_MOCK=1; cargo run -p janitor-gui   # offline mock — Windows PowerShell
+JANITOR_MOCK=1 cargo run -p janitor-gui         # offline mock — bash
 
 # janitor-aws human-gated binaries (ADR 0010 Milestone B — need a browser):
 # Identity Center org + permission-set setup for these: docs/iam_setup.md
