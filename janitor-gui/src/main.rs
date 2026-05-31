@@ -1,4 +1,5 @@
 slint::include_modules!();
+mod pane;
 mod worker;
 
 use std::cell::RefCell;
@@ -684,6 +685,16 @@ fn set_status(ui: &MainWindow, state: &Rc<RefCell<AppState>>, status: &str, msg:
     state.borrow_mut().status = status.to_string();
     ui.set_status(status.into());
     ui.set_status_message(msg.into());
+    push_pane(ui, state);
+}
+
+/// Recompute the main pane from the current status + whether any Applications
+/// exist, and push the token the `.slint` view switches on. Called whenever
+/// either input changes (status transition or app add/remove).
+fn push_pane(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let st = state.borrow();
+    let has_apps = !st.config.applications.is_empty();
+    ui.set_pane(pane::main_pane(&st.status, has_apps).as_token().into());
 }
 
 /// Push the current view's rows/envs + sidebar into the UI.
@@ -691,10 +702,14 @@ fn push_matrix(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     ui.set_revealed_row(-1);
     ui.set_revealed_col(-1);
     ui.set_revealed_text(SharedString::new());
-    let st = state.borrow();
-    ui.set_environments(env_models(&st.view));
-    ui.set_rows(to_row_models(&st.view));
-    ui.set_apps(app_models(&st.config, st.selected, &st.view, &st.status));
+    {
+        let st = state.borrow();
+        ui.set_environments(env_models(&st.view));
+        ui.set_rows(to_row_models(&st.view));
+        ui.set_apps(app_models(&st.config, st.selected, &st.view, &st.status));
+    }
+    // The app-set may have changed (add/remove), which flips the empty-state.
+    push_pane(ui, state);
 }
 
 /// Sidebar items. Drift badge shows ONLY for the selected, loaded app — never a
