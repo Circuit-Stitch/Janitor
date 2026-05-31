@@ -72,6 +72,10 @@ fn seeded_config() -> Config {
                 ],
             ),
         ],
+        // secret_region / last_pick (ADR 0011) default to ""/None — the mock GUI
+        // seed needs neither. `..Default::default()` keeps this site from
+        // breaking when locations-only Config fields are added.
+        ..Default::default()
     }
 }
 
