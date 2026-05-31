@@ -14,6 +14,12 @@ account.
 > negligible per-call cost). Delete the test secret afterward if you don't want
 > it.
 
+> **Verified:** this whole flow was run end-to-end against a real org
+> (Milestone B, 2026-05-31) — browser sign-in → discovery → masked matrix. The
+> two things that bit during that run, now baked into this guide, were (1) the
+> `kms:Decrypt` permission and (2) entering the **Issuer URL** (not the portal
+> URL). Both are called out below.
+
 ## The one critical choice: organization instance, not account instance
 
 When you enable Identity Center on a standalone account, AWS offers two instance
@@ -61,7 +67,8 @@ attach this **inline policy**:
   "Version": "2012-10-17",
   "Statement": [
     { "Effect": "Allow", "Action": "secretsmanager:ListSecrets", "Resource": "*" },
-    { "Effect": "Allow", "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"], "Resource": "*" }
+    { "Effect": "Allow", "Action": ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"], "Resource": "*" },
+    { "Effect": "Allow", "Action": "kms:Decrypt", "Resource": "*" }
   ]
 }
 ```
@@ -69,6 +76,16 @@ attach this **inline policy**:
 Name it e.g. `JanitorSecretsRead`. The **permission set name is what Janitor
 shows as the "role."**
 
+> **Why `kms:Decrypt` is in the policy (verified, Milestone B):** any secret
+> encrypted with a **customer-managed KMS key** (the common case for real
+> secrets — e.g. the `deferno/*` secrets this was tested against) needs
+> `kms:Decrypt`. Without it, `ListSecrets` still works and the secret is
+> reachable, but `GetSecretValue` fails with
+> `AccessDeniedException: "Access to KMS is not allowed"`. Secrets on the
+> default `aws/secretsmanager` key don't strictly need it, so granting
+> `kms:Decrypt` unconditionally is the safe default. Scope `Resource` to the
+> specific key ARN(s) once you know them; `"*"` is fine to start.
+>
 > **Trap:** the AWS managed `ReadOnlyAccess` job-function policy lets you *list*
 > secrets but **denies `GetSecretValue`** — sign-in would succeed and then the
 > fetch would fail. Use the inline policy above (or the broader managed
@@ -76,9 +93,13 @@ shows as the "role."**
 > [ADR 0004](adr/0004-read-only-v1-scope-and-secret-shapes.md) — so it won't
 > issue writes).
 >
-> If your test secret uses a **customer-managed KMS key**, also grant
-> `kms:Decrypt` on that key. The default `aws/secretsmanager` key needs nothing
-> extra.
+> **KMS key-policy fallback:** if `kms:Decrypt` in the permission set still
+> isn't enough, the CMK's own **key policy** must also permit it. A key with the
+> standard `"Enable IAM User Permissions"` (account-root) statement delegates to
+> IAM, so the permission-set grant suffices. A key locked to specific principals
+> needs the provisioned SSO role
+> (`arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/.../AWSReservedSSO_JanitorSecretsRead_*`,
+> findable in IAM → Roles) added with `kms:Decrypt`.
 
 ### 4. Assign your user to your account
 
@@ -94,14 +115,19 @@ AWS Secrets Manager — in whatever region you want Janitor to browse (the
 secret** → key/value, e.g. `{"FOO":"bar"}`. This gives the tool something to list
 and read.
 
+The **Encryption key** you pick here matters: the default `aws/secretsmanager`
+key works with the policy above as-is, while a **customer-managed key** also
+requires the `kms:Decrypt` grant from step 3 (and possibly a key-policy entry).
+The policy above already includes `kms:Decrypt`, so either kind works.
+
 ### 6. Note your URLs
 
 Identity Center → **Dashboard** → *Settings summary*. Record:
 
+- the **Issuer URL** — `https://identitycenter.amazonaws.com/ssoins-xxxxxxxxxxxx`
+  — **this is the value Janitor wants** (see [the `issuerUrl` note](#issuerurl--use-the-issuer-url-resolved))
 - the **AWS access portal URL** — `https://d-xxxxxxxxxx.awsapps.com/start` (or
-  your custom subdomain)
-- the **Issuer URL** (shown separately) — keep it handy as a fallback (see
-  [the `issuerUrl` note](#issuerurl--the-open-verification-item))
+  your custom subdomain) — note it too; it's what you sign in to in a browser
 
 ## The values Janitor asks for
 
@@ -112,9 +138,12 @@ config dir — on Windows, `%APPDATA%\Janitor\Janitor\config\config.toml`.
 
 | Prompt | Value |
 | --- | --- |
-| `IAM Identity Center start URL` | the **AWS access portal URL** (step 6) |
+| `IAM Identity Center start URL` | the **Issuer URL** — `https://identitycenter.amazonaws.com/ssoins-…` (step 6) |
 | `SSO region` | the region you enabled Identity Center in (step 1) |
 | `Secrets Manager region to browse` | where your test secret lives (step 5) |
+
+> Despite the prompt saying "start URL," enter the **Issuer URL**, not the
+> portal `…/start` URL — see the resolved note below.
 
 ## Running it
 
@@ -132,21 +161,27 @@ remembers your pick for next time.
 Flags skip any discovered step: `--start-url`, `--sso-region`, `--secret-region`,
 `--account-id`, `--role`, `--secret-id`.
 
-### `issuerUrl` — the open verification item
+### `issuerUrl` — use the Issuer URL (resolved)
 
-Janitor passes your **start URL** to `RegisterClient` as `issuerUrl` (reference
-clients such as AWS CLI v2 do the same — see
-[ADR 0011](adr/0011-guided-sign-in-and-discovery.md)). Confirming that AWS
-accepts it is a Milestone B verify item
-([ADR 0010](adr/0010-aws-adapter-crate-and-auth-object-model.md) §2a). Enter the
-**access portal URL** at the prompt first. If sign-in fails immediately at
-`RegisterClient`, re-run with the console's **Issuer URL** instead:
+Janitor passes the value you enter to `RegisterClient` as `issuerUrl`. **Use the
+Issuer URL** (`https://identitycenter.amazonaws.com/ssoins-…`), not the portal
+`…/start` URL — verified end-to-end against a live org under Milestone B
+([ADR 0011](adr/0011-guided-sign-in-and-discovery.md)). The portal URL was
+observed to fail with `InvalidRequestException: "Invalid start url provided"`.
+
+If you already saved the wrong value, reset and re-enter:
 
 ```bash
+cargo run -p janitor-aws --bin live-verify -- --reset-config
+# or override without wiping the rest:
 cargo run -p janitor-aws --bin live-verify -- --start-url <ISSUER_URL>
 ```
 
-Either outcome resolves the ADR checklist item.
+Related Milestone B finding: AWS returns a **null `authorizationEndpoint`** from
+`RegisterClient` for this instance, so Janitor derives the browser endpoint as
+`https://oidc.<sso-region>.amazonaws.com/authorize` (the loopback redirect path
+must be exactly `/oauth/callback`). These are handled in code; nothing for you to
+configure.
 
 ### Cleanup
 

@@ -39,13 +39,16 @@ Design detail lives in
 
 ## Decision
 
-- **Issuer-scoped registration; endpoint from the response.** `RegisterClient` is
-  called with `issuerUrl = Config.sso_start_url`. `ClientRegistration` gains
-  `authorization_endpoint`, read from `RegisterClientOutput`; `Authenticator`
-  takes the issuer URL (not a hardcoded endpoint) and reads the authorize endpoint
-  from the registration. The `--authorize-endpoint` flag and the
-  `authorize_endpoint` constructor arg are removed. This corrects untested shell
-  code that has not yet run live — re-confirmed under Milestone B.
+- **Issuer-scoped registration; endpoint from the response (with a region
+  fallback).** `RegisterClient` is called with `issuerUrl = Config.sso_start_url`.
+  `ClientRegistration` gains `authorization_endpoint`, read from
+  `RegisterClientOutput`; `Authenticator` takes the issuer URL (not a hardcoded
+  endpoint). The `--authorize-endpoint` flag and the `authorize_endpoint`
+  constructor arg are removed. **Milestone B correction:** the live API returns a
+  *null* `authorizationEndpoint`, so reading it from the response is necessary but
+  not sufficient — `authorize_endpoint()` falls back to the canonical
+  `https://oidc.<sso-region>.amazonaws.com/authorize` when the response value is
+  absent/empty. See "Milestone B outcome" below.
 
 - **Post-sign-in discovery behind narrow traits (ADR 0010 §5 seam).** A new
   `AccountCatalog` trait (`list_accounts`, `list_account_roles`, authorized by the
@@ -122,4 +125,48 @@ Design detail lives in
   `issuerUrl` (vs. the dedicated Issuer URL); real `ListAccounts` /
   `ListAccountRoles` / `ListSecrets` error and pagination shapes. These join,
   rather than replace, ADR 0010's still-open `GetRoleCredentials` /
-  `GetSecretValue` error-shape items.
+  `GetSecretValue` error-shape items. **All of the items in this bullet are
+  resolved below.**
+
+## Milestone B outcome (2026-05-31)
+
+Ran `live-verify` end-to-end against a real Identity Center org (single account
+`circuitstitch`, permission set `JanitorSecretsRead`, region `us-west-2`):
+browser PKCE sign-in → SSO token → `GetRoleCredentials` → `ListAccounts` (1) →
+`ListAccountRoles` (1) → `ListSecrets` (8) → menu pick → `GetSecretValue` →
+masked 20-entry matrix. Three design assumptions were **wrong** and are now
+corrected in code (all in `janitor-aws`'s untested SDK/loopback shell):
+
+1. **`issuerUrl` must be the Issuer URL, not the portal `…/start` URL.** The
+   portal URL fails `RegisterClient` with `InvalidRequestException: "Invalid
+   start url provided"`. The Issuer URL
+   (`https://identitycenter.amazonaws.com/ssoins-…`) works. (Resolves the
+   ADR 0010 §2a / this ADR open item — opposite of the original guess that they
+   were interchangeable.)
+2. **`authorizationEndpoint` comes back `null`.** "Read the endpoint from the
+   response" is insufficient; `authorize_endpoint()` derives
+   `https://oidc.<sso-region>.amazonaws.com/authorize` as the fallback. A null
+   endpoint previously produced a malformed `?response_type=…` browser URL.
+3. **The loopback redirect path must be exactly `/oauth/callback`.** Any other
+   path (`/callback`, `/`, …) is rejected — confusingly — as
+   `InvalidRedirectUriException: "Requested client type must use loopback
+   interface for redirect"`. The port is *not* part of the constraint (port-less
+   and port-bearing `/oauth/callback` both register OK; we register port-less per
+   RFC 8252 §7.3 and add the bound port at authorize/token time). Verified by
+   direct probing of the unauthenticated `RegisterClient` endpoint.
+
+Confirmed-correct behaviors: single account and single role **auto-pick** with
+no prompt; multiple secrets show the numbered menu; output discipline holds (only
+the masked matrix prints, never a Value); the last pick is remembered. A real
+`GetSecretValue` **AccessDenied** (`"Access to KMS is not allowed"` — the role
+lacked `kms:Decrypt` on the secret's CMK) surfaced cleanly and **exited without a
+retry loop** — adding `kms:Decrypt` fixed it (now documented in
+[`docs/iam_setup.md`](../iam_setup.md)).
+
+**Still open (deferred to a follow-up):** typed `GetSecretValue` error mapping —
+AWS returns `AccessDenied` as an SDK **`Unhandled`** variant, so the fix must
+read `ProvideErrorMetadata::code()`, not match a modeled variant or the
+`discriminant`. The current mapping stays the scrubbed `Sdk { context }`
+catch-all plus a stderr diagnostic. Also still untested live: token-expiry →
+single re-Sign-in, an explicit `--secret-id` NotFound, and reading the real
+`roleCredentials.expiration`.
