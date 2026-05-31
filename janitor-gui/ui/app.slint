@@ -37,6 +37,12 @@ export component MainWindow inherits Window {
 
     callback reveal-cell(int, int);
     callback select-app(int);
+    // Auth / load state (driven by the worker). status: one of
+    // "unauth" | "signing" | "loading" | "loaded" | "error".
+    in property <string> status: "unauth";
+    in property <string> status-message;        // banner text for "error"/"signing"
+    callback sign-in();
+    callback refresh();
     in-out property <bool> settings-open: false;
     in-out property <string> sso-start-url;
     in-out property <string> sso-region;
@@ -82,63 +88,109 @@ export component MainWindow inherits Window {
             spacing: 6px;
 
             HorizontalLayout {
-                Text { text: "Payments matrix"; color: #c8ccd4; horizontal-stretch: 1; }
-                Button { text: root.settings-open ? "Close settings" : "Settings"; clicked => { root.toggle-settings(); } }
-            }
-
-            HorizontalLayout {
-                spacing: 12px;
-                Text { text: "ENTRY"; color: #8a8f98; width: 320px; }
-                for env in environments : Text {
-                    text: env;
+                Text {
+                    text: root.status == "loaded" ? "Drift matrix"
+                        : root.status == "loading" ? "Loading…"
+                        : root.status == "signing" ? "Signing in…"
+                        : "Not signed in";
                     color: #c8ccd4;
                     horizontal-stretch: 1;
                 }
+                if root.status == "unauth" || root.status == "error" : Button {
+                    text: "Sign in";
+                    clicked => { root.sign-in(); }
+                }
+                if root.status == "loaded" : Button {
+                    text: "Refresh";
+                    clicked => { root.refresh(); }
+                }
+                Button {
+                    text: root.settings-open ? "Close settings" : "Settings";
+                    clicked => { root.toggle-settings(); }
+                }
             }
 
-            ScrollView {
-                VerticalLayout {
-                    spacing: 2px;
-                    for row[i] in rows : HorizontalLayout {
-                        spacing: 12px;
-                        VerticalLayout {
-                            width: 320px;
-                            Text { text: row.name; color: white; overflow: elide; }
-                            Text {
-                                text: row.state + "   " + row.glyph;
-                                color: row.state == "Gap" ? #6b7280
-                                     : row.state == "Drift" ? #e0a356
-                                     : #5db07a;
-                                font-size: 11px;
-                            }
-                        }
-                        for cell[j] in row.cells : Rectangle {
-                            horizontal-stretch: 1;
-                            property <bool> is-revealed:
-                                root.revealed-row == i && root.revealed-col == j;
-                            background: touch.has-hover ? #1b1e24 : transparent;
-                            touch := TouchArea {
-                                clicked => { root.reveal-cell(i, j); }
-                            }
-                            HorizontalLayout {
-                                padding: 6px;
-                                spacing: 8px;
-                                if cell.absent : Text {
-                                    text: "— absent";
-                                    color: #4b5563;
-                                    horizontal-stretch: 1;
+            if root.status == "error" || (root.status == "signing" && root.status-message != "") : Rectangle {
+                height: 28px;
+                background: root.status == "error" ? #3a1d1d : #1d2a3a;
+                HorizontalLayout {
+                    padding: 6px;
+                    Text {
+                        text: root.status-message;
+                        color: root.status == "error" ? #e0a3a3 : #a3c0e0;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            if root.status == "loaded" : VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { text: "ENTRY"; color: #8a8f98; width: 320px; }
+                    for env in environments : Text {
+                        text: env;
+                        color: #c8ccd4;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 2px;
+                        for row[i] in rows : HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                width: 320px;
+                                Text { text: row.name; color: white; overflow: elide; }
+                                Text {
+                                    text: row.state + "   " + row.glyph;
+                                    color: row.state == "Gap" ? #6b7280
+                                         : row.state == "Drift" ? #e0a356
+                                         : #5db07a;
+                                    font-size: 11px;
                                 }
-                                if !cell.absent : Text {
-                                    text: is-revealed ? root.revealed-text : cell.dots;
-                                    color: is-revealed ? #ffd479 : #6b7280;
-                                    overflow: elide;
-                                    horizontal-stretch: 1;
+                            }
+                            for cell[j] in row.cells : Rectangle {
+                                horizontal-stretch: 1;
+                                property <bool> is-revealed:
+                                    root.revealed-row == i && root.revealed-col == j;
+                                background: touch.has-hover ? #1b1e24 : transparent;
+                                touch := TouchArea {
+                                    clicked => { root.reveal-cell(i, j); }
                                 }
-                                if !cell.absent : Text { text: cell.length; color: #6b7280; }
-                                if !cell.absent : Text { text: cell.hex; color: #9aa0aa; }
+                                HorizontalLayout {
+                                    padding: 6px;
+                                    spacing: 8px;
+                                    if cell.absent : Text {
+                                        text: "— absent";
+                                        color: #4b5563;
+                                        horizontal-stretch: 1;
+                                    }
+                                    if !cell.absent : Text {
+                                        text: is-revealed ? root.revealed-text : cell.dots;
+                                        color: is-revealed ? #ffd479 : #6b7280;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    if !cell.absent : Text { text: cell.length; color: #6b7280; }
+                                    if !cell.absent : Text { text: cell.hex; color: #9aa0aa; }
+                                }
                             }
                         }
                     }
+                }
+            }
+            if root.status != "loaded" : Rectangle {
+                vertical-stretch: 1;
+                Text {
+                    text: root.status == "unauth" ? "Sign in to load this Application's secrets."
+                        : root.status == "signing" ? "A browser tab has opened — complete sign-in there."
+                        : root.status == "loading" ? "Fetching secrets…"
+                        : "Could not load. See the message above, then Sign in to retry.";
+                    color: #6b7280;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
         }
@@ -157,7 +209,7 @@ export component MainWindow inherits Window {
             Text { text: "Identity Center"; color: #8a8f98; }
             HorizontalLayout {
                 spacing: 8px;
-                Text { text: "Start URL"; color: #c8ccd4; width: 120px; }
+                Text { text: "SSO start URL"; color: #c8ccd4; width: 120px; }
                 start-url := LineEdit { text <=> root.sso-start-url; horizontal-stretch: 1; }
             }
             HorizontalLayout {
