@@ -130,7 +130,10 @@ async fn main() {
     let account_id = match arg("--account-id") {
         Some(id) => id,
         None => {
-            let accounts = role_client.list_accounts(&token).await.expect("list accounts");
+            let accounts = role_client
+                .list_accounts(&token)
+                .await
+                .expect("list accounts");
             let acct = resolve(
                 accounts,
                 remembered.as_ref().map(|m| m.account_id.as_str()),
@@ -208,8 +211,7 @@ async fn main() {
         permission_set: role,
     };
     let secrets = SecretsClient::new(secrets_api);
-    let mut source =
-        AuthenticatedSource::new(broker, secrets, authenticator, role_client, clock);
+    let mut source = AuthenticatedSource::new(broker, secrets, authenticator, role_client, clock);
     let shape = source.fetch(&mapping).await.expect("fetch");
 
     // 8. Output discipline: project to a MASKED matrix, never print a Value.
@@ -230,7 +232,9 @@ async fn main() {
     println!("\n--- ADR 0010/0011 verify checklist (force these by hand) ---");
     println!("[ ] issuerUrl accepted: confirm the start URL works as RegisterClient issuerUrl (else try the Issuer URL)");
     println!("[ ] endpoint-from-response: confirm sign-in works with NO --authorize-endpoint flag");
-    println!("[ ] single account/role auto-picks; multiple shows a menu with the remembered default");
+    println!(
+        "[ ] single account/role auto-picks; multiple shows a menu with the remembered default"
+    );
     println!("[ ] token-expiry → re-Sign-in: confirm ONE browser reopen, no loop");
     println!("[ ] access-denied: point --secret-id at a denied secret, confirm AccessDenied (not a loop)");
     println!("[ ] not-found: point --secret-id at a missing name, confirm NotFound");
