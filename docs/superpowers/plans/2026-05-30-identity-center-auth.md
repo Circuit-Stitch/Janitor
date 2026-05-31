@@ -2068,6 +2068,21 @@ git commit -m "feat(aws): live-verify harness — masked single-env matrix + ver
 
 ### Task 13: Full workspace green + docs wiring (Milestone A close)
 
+> **STATUS (2026-05-30, resumed session): Steps 1–4 DONE, Step 5 (commit) NOT yet done — awaiting user.**
+> The file edits are written to disk but **not committed** (working tree dirty on
+> `feat/identity-center-auth`). Workspace verified green earlier this session
+> (`cargo test --workspace` ✓, clippy `-D warnings` ✓, fmt ✓, `janitor-core`
+> llvm-cov **98.15%** ≥80% ✓).
+> **Deviation from plan (surfaced to user):** Step 3 as written said to paste a CI
+> *comment* claiming "janitor-aws is exercised by `cargo test --workspace` above" —
+> but no such step existed (`ci.yml` only ran `cargo llvm-cov -p janitor-core`, so
+> janitor-aws tests never ran in CI). Resolved by **adding a real `Test (workspace)`
+> step** running `cargo test --workspace` before the coverage step, plus the
+> core-only-gate comment. This strengthens CI (more tests run); it is not a test
+> regression. README was also more stale than the plan assumed (claimed a single
+> `janitor-core` crate, predating the GUI) and was refreshed to reflect all three
+> crates + ADRs 0009/0010.
+
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 - Modify: `CLAUDE.md` (status blurb)

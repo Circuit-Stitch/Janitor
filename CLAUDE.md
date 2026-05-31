@@ -2,17 +2,25 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Status: GUI tracer-bullet landed.** The Cargo workspace, `janitor-core`'s
-> offline bedrock (secret-shape model, zeroizing `Value`, `Config` load/save,
-> comparison engine), and a thin `janitor-gui` (Slint) tracer-bullet now exist
-> under a CI lint/test/coverage lane. The GUI renders the masked Aligned/Drift/Gap
-> matrix with per-cell momentary reveal, sidebar Application switching, and an
-> in-memory settings/preferences surface — driven entirely by a mock `SecretSource`
-> in `janitor-core`. Real Identity Center auth, Secrets Manager I/O, and `Config`
-> disk persistence remain unbuilt. Design and plan: [`docs/superpowers/specs/2026-05-30-gui-tracer-bullet-design.md`](docs/superpowers/specs/2026-05-30-gui-tracer-bullet-design.md)
-> and [`docs/superpowers/plans/2026-05-30-gui-tracer-bullet.md`](docs/superpowers/plans/2026-05-30-gui-tracer-bullet.md).
+> **Status: headless Identity Center auth slice landed (Milestone A).** The Cargo
+> workspace now holds three crates under a CI lint/test/coverage lane:
+> `janitor-core`'s offline bedrock (secret-shape model, zeroizing `Value`,
+> `Config` load/save, comparison engine); a thin `janitor-gui` (Slint)
+> tracer-bullet rendering the masked Aligned/Drift/Gap matrix (per-cell momentary
+> reveal, sidebar Application switching, in-memory settings) from a mock
+> `SecretSource`; and a new async `janitor-aws` crate implementing real Identity
+> Center Sign-in (browser Auth Code + PKCE → in-memory SSO token →
+> `GetRoleCredentials` → `GetSecretValue` → `SecretShape`) behind a tested
+> `AuthenticatedSource` facade. All of `janitor-aws`'s brokering / orchestration /
+> error logic is unit-tested against fakes; only the browser/loopback/SDK shell is
+> untested by design (ADR 0010 §5). **Not yet wired:** the GUI still reads the mock
+> source (no `janitor-aws` ↔ GUI bridge), `Config` disk persistence is unbuilt, and
+> SDK error mapping is conservative pending **Milestone B** — running
+> `janitor-aws`'s `live-verify` binary against a real org to resolve the ADR 0010
+> verify list. Design and plan: [`docs/adr/0010-aws-adapter-crate-and-auth-object-model.md`](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md)
+> and [`docs/superpowers/plans/2026-05-30-identity-center-auth.md`](docs/superpowers/plans/2026-05-30-identity-center-auth.md).
 > Domain glossary: [`CONTEXT.md`](CONTEXT.md); decisions: [`docs/adr/`](docs/adr/)
-> (0001–0009); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+> (0001–0010); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 > **Read those first** — this file only summarizes.
 
 ## What this is
@@ -66,14 +74,18 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
 > `Cargo.toml` / workspace layout once it exists.
 
 ```bash
-cargo build                       # build
-cargo test                        # all tests
+cargo build                       # build the workspace
+cargo test --workspace            # all crates (core + gui + janitor-aws fakes)
 cargo test -p janitor-core <name> # a single core test (substring match)
 cargo test -- --nocapture         # show test stdout/stderr
 cargo clippy --all-targets        # lint
 cargo fmt                         # format
-cargo llvm-cov -p janitor-core    # coverage (≥80% gate)
+cargo llvm-cov -p janitor-core    # coverage (≥80% gate, core only)
 cargo run -p janitor-gui          # tracer-bullet GUI (mock data; no real AWS)
+
+# janitor-aws human-gated binaries (ADR 0010 Milestone B — need a browser):
+cargo run -p janitor-aws --bin loopback-spike   # browser↔loopback shell, no AWS
+cargo run -p janitor-aws --bin live-verify -- … # live Identity Center round-trip
 ```
 
 ## Working agreements
