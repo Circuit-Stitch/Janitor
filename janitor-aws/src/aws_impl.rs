@@ -12,7 +12,8 @@ use aws_config::BehaviorVersion;
 use crate::error::{SessionError, SignInError};
 use crate::types::{Credential, SsoToken};
 use crate::wire::{
-    ClientRegistration, OidcClient, RawSecret, RoleCredentialClient, SecretsApi, TokenExchange,
+    AccountCatalog, AccountSummary, ClientRegistration, OidcClient, RawSecret,
+    RoleCredentialClient, RoleSummary, SecretSummary, SecretsApi, TokenExchange,
 };
 
 /// Real OIDC client (`RegisterClient` + `CreateToken`).
@@ -131,6 +132,62 @@ impl RoleCredentialClient for AwsRoleClient {
     }
 }
 
+#[async_trait]
+impl AccountCatalog for AwsRoleClient {
+    async fn list_accounts(&self, token: &SsoToken) -> Result<Vec<AccountSummary>, SessionError> {
+        let mut out = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let mut req = self.inner.list_accounts().access_token(token.expose());
+            if let Some(t) = &next {
+                req = req.next_token(t);
+            }
+            let page = req.send().await.map_err(map_role_err)?;
+            for a in page.account_list() {
+                out.push(AccountSummary {
+                    id: a.account_id().unwrap_or_default().to_string(),
+                    name: a.account_name().unwrap_or_default().to_string(),
+                });
+            }
+            match page.next_token() {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    async fn list_account_roles(
+        &self,
+        token: &SsoToken,
+        account_id: &str,
+    ) -> Result<Vec<RoleSummary>, SessionError> {
+        let mut out = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let mut req = self
+                .inner
+                .list_account_roles()
+                .access_token(token.expose())
+                .account_id(account_id);
+            if let Some(t) = &next {
+                req = req.next_token(t);
+            }
+            let page = req.send().await.map_err(map_role_err)?;
+            for r in page.role_list() {
+                out.push(RoleSummary {
+                    name: r.role_name().unwrap_or_default().to_string(),
+                });
+            }
+            match page.next_token() {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Map a GetRoleCredentials SDK error to our taxonomy. Conservative for now:
 /// everything → scrubbed Sdk (live-verify, Task 14, refines this). Uses
 /// `discriminant` to avoid printing any error body.
@@ -188,6 +245,49 @@ impl SecretsApi for AwsSecretsApi {
             secret_string: out.secret_string().map(|s| s.to_string()),
             secret_binary: out.secret_binary().map(|b| b.as_ref().to_vec()),
         })
+    }
+
+    async fn list_secrets(
+        &self,
+        cred: &Credential,
+        region: &str,
+    ) -> Result<Vec<SecretSummary>, SessionError> {
+        let creds = aws_sdk_secretsmanager::config::Credentials::new(
+            cred.access_key_id(),
+            cred.secret_access_key(),
+            Some(cred.session_token().to_string()),
+            None,
+            "janitor",
+        );
+        let conf = aws_sdk_secretsmanager::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .region(aws_sdk_secretsmanager::config::Region::new(
+                region.to_string(),
+            ))
+            .credentials_provider(creds)
+            .build();
+        let client = aws_sdk_secretsmanager::Client::from_conf(conf);
+
+        let mut out = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let mut req = client.list_secrets();
+            if let Some(t) = &next {
+                req = req.next_token(t);
+            }
+            let page = req.send().await.map_err(map_secret_err)?;
+            for s in page.secret_list() {
+                out.push(SecretSummary {
+                    name: s.name().unwrap_or_default().to_string(),
+                    arn: s.arn().unwrap_or_default().to_string(),
+                });
+            }
+            match page.next_token() {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
+        }
+        Ok(out)
     }
 }
 

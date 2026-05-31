@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 
 use crate::error::{SessionError, SignInError};
+use crate::select::Selectable;
 use crate::types::{Credential, SsoToken};
 
 /// A public-client registration from `RegisterClient`. The `client_secret` is a
@@ -61,7 +62,66 @@ pub struct RawSecret {
     pub secret_binary: Option<Vec<u8>>,
 }
 
-/// Wraps `GetSecretValue`.
+/// One account the signed-in user is entitled to (`ListAccounts`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountSummary {
+    pub id: String,
+    pub name: String,
+}
+impl Selectable for AccountSummary {
+    fn key(&self) -> &str {
+        &self.id
+    }
+    fn label(&self) -> String {
+        format!("{} ({})", self.name, self.id)
+    }
+}
+
+/// One permission-set role available in an account (`ListAccountRoles`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoleSummary {
+    pub name: String,
+}
+impl Selectable for RoleSummary {
+    fn key(&self) -> &str {
+        &self.name
+    }
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+}
+
+/// One secret in a region (`ListSecrets`). `arn` is the stable identity; `name`
+/// is the friendly label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecretSummary {
+    pub name: String,
+    pub arn: String,
+}
+impl Selectable for SecretSummary {
+    fn key(&self) -> &str {
+        &self.arn
+    }
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+}
+
+/// Wraps the SSO-token-authorized account/role enumeration ops.
+#[async_trait]
+pub trait AccountCatalog: Send + Sync {
+    /// `ListAccounts` for everything `token` is entitled to.
+    async fn list_accounts(&self, token: &SsoToken) -> Result<Vec<AccountSummary>, SessionError>;
+
+    /// `ListAccountRoles` for one account.
+    async fn list_account_roles(
+        &self,
+        token: &SsoToken,
+        account_id: &str,
+    ) -> Result<Vec<RoleSummary>, SessionError>;
+}
+
+/// Wraps `GetSecretValue` and `ListSecrets`.
 #[async_trait]
 pub trait SecretsApi: Send + Sync {
     /// `GetSecretValue` for `secret_id` in `region`, authorized by `cred`.
@@ -71,6 +131,14 @@ pub trait SecretsApi: Send + Sync {
         secret_id: &str,
         region: &str,
     ) -> Result<RawSecret, SessionError>;
+
+    /// `ListSecrets` in `region`, authorized by `cred`. Returns name+ARN only —
+    /// never a Value.
+    async fn list_secrets(
+        &self,
+        cred: &Credential,
+        region: &str,
+    ) -> Result<Vec<SecretSummary>, SessionError>;
 }
 
 // ----------------------------------------------------------------------------
@@ -144,12 +212,22 @@ pub mod fakes {
     /// A scripted secrets client.
     pub struct FakeSecretsApi {
         pub outcomes: Mutex<Vec<Result<RawSecret, SessionError>>>,
+        pub list_outcomes: Mutex<Vec<Result<Vec<SecretSummary>, SessionError>>>,
         pub calls: Mutex<u32>,
     }
     impl FakeSecretsApi {
         pub fn new(outcomes: Vec<Result<RawSecret, SessionError>>) -> Self {
             FakeSecretsApi {
                 outcomes: Mutex::new(outcomes),
+                list_outcomes: Mutex::new(Vec::new()),
+                calls: Mutex::new(0),
+            }
+        }
+        /// Build a fake whose `list_secrets` returns `lists` (one per call).
+        pub fn with_lists(lists: Vec<Result<Vec<SecretSummary>, SessionError>>) -> Self {
+            FakeSecretsApi {
+                outcomes: Mutex::new(Vec::new()),
+                list_outcomes: Mutex::new(lists),
                 calls: Mutex::new(0),
             }
         }
@@ -169,6 +247,18 @@ pub mod fakes {
             let mut v = self.outcomes.lock().unwrap();
             if v.is_empty() {
                 panic!("FakeSecretsApi called more times than scripted");
+            }
+            v.remove(0)
+        }
+
+        async fn list_secrets(
+            &self,
+            _cred: &Credential,
+            _region: &str,
+        ) -> Result<Vec<SecretSummary>, SessionError> {
+            let mut v = self.list_outcomes.lock().unwrap();
+            if v.is_empty() {
+                panic!("FakeSecretsApi::list_secrets called more times than scripted");
             }
             v.remove(0)
         }
@@ -223,5 +313,46 @@ pub mod fakes {
             assert!(matches!(e, SessionError::ReauthRequired));
         });
         assert_eq!(fake.call_count(), 2);
+    }
+
+    #[test]
+    fn summaries_expose_keys_and_labels() {
+        let a = AccountSummary {
+            id: "111".into(),
+            name: "Prod".into(),
+        };
+        assert_eq!(a.key(), "111");
+        assert_eq!(a.label(), "Prod (111)");
+
+        let r = RoleSummary {
+            name: "ReadOnly".into(),
+        };
+        assert_eq!(r.key(), "ReadOnly");
+        assert_eq!(r.label(), "ReadOnly");
+
+        let s = SecretSummary {
+            name: "myapp/prod".into(),
+            arn: "arn:aws:...:myapp/prod".into(),
+        };
+        assert_eq!(s.key(), "arn:aws:...:myapp/prod");
+        assert_eq!(s.label(), "myapp/prod");
+    }
+
+    #[test]
+    fn fake_secrets_api_scripts_list_outcomes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = FakeSecretsApi::with_lists(vec![Ok(vec![SecretSummary {
+            name: "n".into(),
+            arn: "a".into(),
+        }])]);
+        let cred = Credential::new("a".into(), "b".into(), "c".into(), SystemTime::UNIX_EPOCH);
+        rt.block_on(async {
+            let list = fake.list_secrets(&cred, "us-east-1").await.unwrap();
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].name, "n");
+        });
     }
 }
