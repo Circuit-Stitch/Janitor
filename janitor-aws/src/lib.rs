@@ -21,6 +21,7 @@ pub mod broker;
 pub mod discovery;
 pub mod error;
 pub mod pkce;
+pub mod presenter;
 pub mod secrets;
 pub mod select;
 pub mod session;

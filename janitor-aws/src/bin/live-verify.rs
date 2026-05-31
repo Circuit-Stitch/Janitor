@@ -5,13 +5,16 @@
 //!
 //! First run prompts once for the org (SSO start URL, SSO region, secret region)
 //! and saves them to Config. Then the browser opens; after sign-in the tool
-//! auto-discovers the account, role, and secret (auto-picking when there is only
-//! one, offering the remembered pick as the default otherwise), fetches the
-//! chosen secret, and prints a MASKED single-environment matrix (never a Value).
-//! The chosen account/role/secret is remembered for next time.
+//! runs the shared [`Discovery`] step-machine (ADR 0013) via a stdin presenter
+//! to walk account → role → secret (auto-picking when there is only one,
+//! offering the remembered pick as the default otherwise), fetches the chosen
+//! secret, and prints a MASKED single-environment matrix (never a Value). The
+//! chosen account/role/secret is remembered for next time.
 //!
-//! Optional overrides skip a step: `--start-url`, `--sso-region`,
-//! `--secret-region`, `--account-id`, `--role`, `--secret-id`.
+//! Optional overrides skip a config prompt: `--start-url`, `--sso-region`,
+//! `--secret-region`. (The old per-step `--account-id`/`--role`/`--secret-id`
+//! overrides are gone — the step-machine auto-picks singletons and menus the
+//! rest; issue #11.)
 //!
 //! `--reset-config` deletes the saved Config first (org URL, regions, last
 //! pick), so the next run re-prompts from scratch.
@@ -23,13 +26,13 @@ use std::sync::Arc;
 use janitor_aws::authenticator::Authenticator;
 use janitor_aws::aws_impl::{AwsOidcClient, AwsRoleClient, AwsSecretsApi};
 use janitor_aws::broker::CredentialBroker;
+use janitor_aws::discovery::{Discovery, Step, What};
+use janitor_aws::presenter::drive_discovery;
 use janitor_aws::secrets::SecretsClient;
-use janitor_aws::select::{resolve, Chooser};
 use janitor_aws::source::AuthenticatedSource;
 use janitor_aws::types::SystemClock;
-use janitor_aws::wire::{AccountCatalog, SecretsApi};
 use janitor_core::compare::Comparison;
-use janitor_core::config::{Config, Mapping};
+use janitor_core::config::Config;
 use janitor_core::view::project;
 
 fn arg(flag: &str) -> Option<String> {
@@ -59,38 +62,12 @@ fn prompt_line(prompt: &str) -> String {
     }
 }
 
-/// The real `Chooser`: prints a numbered menu and reads the choice from stdin.
-struct StdinChooser;
-impl Chooser for StdinChooser {
-    fn choose(&self, labels: &[String], default: Option<usize>) -> usize {
-        loop {
-            println!();
-            for (i, label) in labels.iter().enumerate() {
-                let marker = if Some(i) == default { " (default)" } else { "" };
-                println!("  [{}] {label}{marker}", i + 1);
-            }
-            let hint = match default {
-                Some(i) => format!("choose 1-{} [default {}]", labels.len(), i + 1),
-                None => format!("choose 1-{}", labels.len()),
-            };
-            print!("{hint}: ");
-            io::stdout().flush().ok();
-            let mut s = String::new();
-            io::stdin().read_line(&mut s).expect("read stdin");
-            let s = s.trim();
-            if s.is_empty() {
-                if let Some(i) = default {
-                    return i;
-                }
-                continue;
-            }
-            if let Ok(n) = s.parse::<usize>() {
-                if (1..=labels.len()).contains(&n) {
-                    return n - 1;
-                }
-            }
-            println!("  invalid choice, try again");
-        }
+/// Name the thing a `Step::Empty` could not offer, for a masked message.
+fn what_word(what: What) -> &'static str {
+    match what {
+        What::Accounts => "accounts",
+        What::Roles => "roles",
+        What::Secrets => "secrets",
     }
 }
 
@@ -131,9 +108,6 @@ async fn main() {
     }
     config.save().expect("save config");
 
-    let chooser = StdinChooser;
-    let remembered = config.last_pick.clone();
-
     // 2. Build the real adapters (no ambient credentials — ADR 0010 §10).
     let oidc = Arc::new(AwsOidcClient::new(config.sso_region.clone()).await);
     let role_client = Arc::new(AwsRoleClient::new(config.sso_region.clone()).await);
@@ -143,98 +117,61 @@ async fn main() {
 
     // 3. Sign in (opens the browser).
     println!("Signing in (a browser tab will open)...");
-    let token = authenticator.sign_in_once().await.expect("sign-in");
+    let token = Arc::new(authenticator.sign_in_once().await.expect("sign-in"));
     println!("Signed in. SSO token acquired (held in memory only).");
 
-    // 4. Discover account (override flag short-circuits the listing).
-    let account_id = match arg("--account-id") {
-        Some(id) => id,
-        None => {
-            let accounts = role_client
-                .list_accounts(&token)
-                .await
-                .expect("list accounts");
-            let acct = resolve(
-                accounts,
-                remembered.as_ref().map(|m| m.account_id.as_str()),
-                &chooser,
-                "accounts",
-            )
-            .expect("choose account");
-            println!("Account: {} ({})", acct.name, acct.id);
-            acct.id
-        }
-    };
-
-    // 5. Discover role for that account.
-    let role = match arg("--role") {
-        Some(r) => r,
-        None => {
-            let roles = role_client
-                .list_account_roles(&token, &account_id)
-                .await
-                .expect("list roles");
-            let role = resolve(
-                roles,
-                remembered.as_ref().map(|m| m.permission_set.as_str()),
-                &chooser,
-                "roles",
-            )
-            .expect("choose role");
-            println!("Role: {}", role.name);
-            role.name
-        }
-    };
-
-    // 6. Mint a role credential for (account, role, secret-region), then list
-    //    secrets in that region and pick one (override flag short-circuits).
+    // 4. Guided account → role → secret walk: drive the SAME `Discovery`
+    //    step-machine the GUI uses (ADR 0013), presented over stdin. It
+    //    auto-picks singletons and menus the rest, offering the remembered pick
+    //    as the default; the secret region is the browse region.
     let secret_region = config.secret_region.clone();
-    let probe = Mapping {
-        environment: "live".into(),
-        account_id: account_id.clone(),
-        region: secret_region.clone(),
-        secret_id: String::new(), // unused for minting; broker keys on acct|role|region
-        permission_set: role.clone(),
-    };
-    let broker = CredentialBroker::new(Arc::new(token), role_client.clone(), clock.clone());
-    let cred = broker
-        .credentials_for(&probe)
+    let mut discovery = Discovery::new(
+        "live".into(),
+        secret_region.clone(),
+        token.clone(),
+        role_client.clone(), // AccountCatalog
+        role_client.clone(), // RoleCredentialClient
+        secrets_api.clone(), // SecretsApi
+        config.last_pick.clone(),
+    );
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let mut output = io::stdout();
+    let mapping = match drive_discovery(&mut discovery, &mut input, &mut output)
         .await
-        .expect("mint role credential");
-
-    let secret_id = match arg("--secret-id") {
-        Some(s) => s,
-        None => {
-            let secrets = secrets_api
-                .list_secrets(&cred, &secret_region)
-                .await
-                .expect("list secrets");
-            let secret = resolve(
-                secrets,
-                remembered.as_ref().map(|m| m.secret_id.as_str()),
-                &chooser,
-                "secrets",
-            )
-            .expect("choose secret");
-            println!("Secret: {}", secret.name);
-            // Use the ARN as the stable id; GetSecretValue accepts name or ARN.
-            secret.arn
+        .expect("discovery i/o")
+    {
+        Step::Done(m) => {
+            println!(
+                "\nDiscovered: account {} / role {} / secret {}",
+                m.account_id, m.permission_set, m.secret_id
+            );
+            m
         }
+        Step::Empty(what) => {
+            eprintln!("Nothing to verify: no {} you can access.", what_word(what));
+            std::process::exit(1);
+        }
+        Step::Failed(reason) => {
+            eprintln!("Discovery failed: {}.", reason.describe());
+            std::process::exit(1);
+        }
+        Step::Reauth => {
+            eprintln!("Session expired — run again to sign in.");
+            std::process::exit(1);
+        }
+        // `drive_discovery` loops on every `Ask`, so it only ever hands back a
+        // terminal step.
+        Step::Ask { .. } => unreachable!("drive_discovery resolves all Ask steps"),
     };
 
-    // 7. Assemble the full Mapping and fetch through the facade.
-    let mapping = Mapping {
-        environment: "live".into(),
-        account_id,
-        region: secret_region,
-        secret_id,
-        permission_set: role,
-    };
+    // 5. Fetch the chosen Mapping through the facade.
+    let broker = CredentialBroker::new(token.clone(), role_client.clone(), clock.clone());
     let secrets = SecretsClient::new(secrets_api);
     let mut source = AuthenticatedSource::new(broker, secrets, authenticator, role_client, clock);
     let shape = source.fetch(&mapping).await.expect("fetch");
 
-    // 8. Output discipline: project to a MASKED matrix, never print a Value.
+    // 6. Output discipline: project to a MASKED matrix, never print a Value.
     let sets = vec![(mapping.environment.clone(), shape)];
     let comparison = Comparison::build(&sets);
     let view = project(&comparison);
@@ -244,7 +181,7 @@ async fn main() {
         println!("  {} [{:?}] -> {:?}", row.name, row.state, row.cells);
     }
 
-    // 9. Remember this pick for next time.
+    // 7. Remember this pick for next time.
     config.last_pick = Some(mapping);
     config.save().expect("save config");
     println!("\nRemembered this pick (account/role/secret) for next run.");
@@ -255,8 +192,8 @@ async fn main() {
     println!(
         "[ ] single account/role auto-picks; multiple shows a menu with the remembered default"
     );
-    println!("[ ] token-expiry → re-Sign-in: confirm ONE browser reopen, no loop");
-    println!("[ ] access-denied: point --secret-id at a denied secret, confirm AccessDenied (not a loop)");
-    println!("[ ] not-found: point --secret-id at a missing name, confirm NotFound");
+    println!("[ ] token-expiry → re-Sign-in: confirm the walk reports \"Session expired\" (Reauth), no loop");
+    println!("[ ] access-denied: pick a denied secret, confirm \"Discovery failed: access denied\" (not a loop)");
+    println!("[ ] empty step: an account/role/secret with no choices prints \"no … you can access\" and exits");
     println!("[ ] confirm roleCredentials.expiration is read (not a hardcoded 1h)");
 }

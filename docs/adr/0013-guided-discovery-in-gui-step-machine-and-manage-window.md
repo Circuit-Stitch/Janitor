@@ -70,10 +70,12 @@ therefore **supersedes that specific rejection.**
 - **Relayed over the existing `Command`/`Event` channel; the GUI presenter is
   wired now.** Each `Ask` crosses to the UI as an `Event`; the user's pick returns
   as a `Command`; the machine advances. Non-blocking and cancelable (drop the
-  machine). **`live-verify` is not migrated in this slice** — it keeps its
-  procedural walk for now; migrating it onto the step-machine (via a stdin
-  presenter) is a tracked follow-up. The engine is designed for that second
-  consumer from day one, so the migration is a presenter swap, not a rewrite.
+  machine). **`live-verify` was not migrated in this slice** — it kept its
+  procedural walk; migrating it onto the step-machine (via a stdin presenter)
+  was a tracked follow-up. The engine was designed for that second consumer from
+  day one, so the migration was a presenter swap, not a rewrite. **Done (issue
+  #11):** `live-verify` now drives the same `Discovery` via
+  `presenter::drive_discovery`, proving the engine is genuinely generic.
 
 - **On `Done(Mapping)`: append → save → auto-load.** The Mapping is appended to
   the current Application, `Config` is persisted (locations only), and the
@@ -147,8 +149,12 @@ therefore **supersedes that specific rejection.**
   lands in the GUI.
 - **ADR 0011's rejection of a reusable discovery orchestrator is superseded.** Its
   pure `plan_selection`/traits/summaries remain correct and are reused.
-- `live-verify` temporarily duplicates the account→role→secret sequencing until the
-  tracked CLI-migration follow-up lands.
+- ~~`live-verify` temporarily duplicates the account→role→secret sequencing until the
+  tracked CLI-migration follow-up lands.~~ **Repaid (issue #11):** `live-verify`
+  now drives the shared `Discovery` step-machine through a tested stdin presenter
+  (`presenter::drive_discovery`); the parallel sequencing is gone. The per-step
+  `--account-id`/`--role`/`--secret-id` overrides were dropped with it (the
+  machine auto-picks singletons and menus the rest).
 - `CONTEXT.md` gains the **Discovery** term (already added).
 - **Deferred to Slice 2 (a later ADR):** the left/right Environment-dropdown 2-up
   diff (pick 2 of N), switching `load()` to fetch only the two selected
