@@ -1,4 +1,4 @@
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, LineEdit, Button } from "std-widgets.slint";
 
 export struct CellView {
     absent: bool,
@@ -37,6 +37,13 @@ export component MainWindow inherits Window {
 
     callback reveal-cell(int, int);
     callback select-app(int);
+    in-out property <bool> settings-open: false;
+    in-out property <string> sso-start-url;
+    in-out property <string> sso-region;
+    callback toggle-settings();
+    callback save-sso();
+    callback add-app(string);
+    callback remove-app(int);
 
     HorizontalLayout {
         // Sidebar
@@ -67,6 +74,11 @@ export component MainWindow inherits Window {
         VerticalLayout {
             padding: 16px;
             spacing: 6px;
+
+            HorizontalLayout {
+                Text { text: "Payments matrix"; color: #c8ccd4; horizontal-stretch: 1; }
+                Button { text: root.settings-open ? "Close settings" : "Settings"; clicked => { root.toggle-settings(); } }
+            }
 
             HorizontalLayout {
                 spacing: 12px;
@@ -122,6 +134,43 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    if settings-open : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0b0d11;
+        VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+            Text { text: "Settings"; color: white; font-size: 18px; }
+
+            Text { text: "Identity Center"; color: #8a8f98; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Start URL"; color: #c8ccd4; width: 120px; }
+                start-url := LineEdit { text <=> root.sso-start-url; horizontal-stretch: 1; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Region"; color: #c8ccd4; width: 120px; }
+                region := LineEdit { text <=> root.sso-region; horizontal-stretch: 1; }
+            }
+            Button { text: "Save accounts"; clicked => { root.save-sso(); } }
+
+            Text { text: "Applications"; color: #8a8f98; }
+            for app[i] in apps : HorizontalLayout {
+                spacing: 8px;
+                Text { text: app.name; color: white; horizontal-stretch: 1; }
+                Text { text: app.subtitle; color: #6b7280; }
+                Button { text: "Remove"; clicked => { root.remove-app(i); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
+                Button { text: "Add"; clicked => { root.add-app(new-app.text); } }
             }
         }
     }

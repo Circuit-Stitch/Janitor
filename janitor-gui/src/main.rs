@@ -252,5 +252,95 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Initialize the SSO fields from config.
+    {
+        let st = state.borrow();
+        ui.set_sso_start_url(st.config.sso_start_url.as_str().into());
+        ui.set_sso_region(st.config.sso_region.as_str().into());
+    }
+
+    // Toggle settings.
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_toggle_settings(move || {
+            let ui = ui_weak.unwrap();
+            ui.set_settings_open(!ui.get_settings_open());
+        });
+    }
+
+    // Save SSO fields back into the in-memory config.
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_save_sso(move || {
+            let ui = ui_weak.unwrap();
+            let mut st = state.borrow_mut();
+            st.config.sso_start_url = ui.get_sso_start_url().to_string();
+            st.config.sso_region = ui.get_sso_region().to_string();
+        });
+    }
+
+    // Add an Application (auto prod/staging mappings derived from a slug).
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_add_app(move |name| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let slug: String = name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                .collect();
+            let new_app = Application {
+                name,
+                environments: vec![
+                    Mapping {
+                        environment: "prod".into(),
+                        account_id: "000000000000".into(),
+                        region: "us-east-1".into(),
+                        secret_id: format!("{slug}/prod"),
+                        permission_set: "ReadOnly".into(),
+                    },
+                    Mapping {
+                        environment: "staging".into(),
+                        account_id: "000000000000".into(),
+                        region: "us-west-2".into(),
+                        secret_id: format!("{slug}/staging"),
+                        permission_set: "ReadOnly".into(),
+                    },
+                ],
+            };
+            {
+                let mut st = state.borrow_mut();
+                st.config.applications.push(new_app);
+            }
+            let ui = ui_weak.unwrap();
+            render(&ui, &state);
+        });
+    }
+
+    // Remove an Application, clamping the selection.
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_remove_app(move |index| {
+            let index = index as usize;
+            {
+                let mut st = state.borrow_mut();
+                if index < st.config.applications.len() && st.config.applications.len() > 1 {
+                    st.config.applications.remove(index);
+                    if st.selected >= st.config.applications.len() {
+                        st.selected = st.config.applications.len() - 1;
+                    }
+                }
+            }
+            let ui = ui_weak.unwrap();
+            render(&ui, &state);
+        });
+    }
+
     ui.run()
 }
