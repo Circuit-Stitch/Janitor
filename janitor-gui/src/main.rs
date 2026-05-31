@@ -1,4 +1,5 @@
 slint::include_modules!();
+mod worker;
 
 use std::cell::RefCell;
 use std::rc::Rc;
