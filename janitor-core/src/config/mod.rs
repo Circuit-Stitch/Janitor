@@ -16,6 +16,14 @@ pub struct Config {
     pub sso_start_url: String,
     /// AWS region hosting Identity Center (where SSO-OIDC calls go).
     pub sso_region: String,
+    /// Default region for the guided "list secrets" step. Empty → callers fall
+    /// back to `sso_region`. A plain field so a future settings surface can flip
+    /// it (ADR 0011).
+    pub secret_region: String,
+    /// The last account/role/secret picked in the guided flow, offered as the
+    /// default next run. A `Mapping` (its `environment` is `"live"` for guided
+    /// picks). `None` until the first successful pick.
+    pub last_pick: Option<Mapping>,
     /// Saved Applications, each tying a logical Entry set to a Set per Environment.
     pub applications: Vec<Application>,
 }
@@ -118,6 +126,14 @@ mod tests {
         Config {
             sso_start_url: "https://acme.awsapps.com/start".into(),
             sso_region: "us-east-1".into(),
+            secret_region: "us-west-2".into(),
+            last_pick: Some(Mapping {
+                environment: "live".into(),
+                account_id: "333333333333".into(),
+                region: "us-west-2".into(),
+                secret_id: "myapp/live".into(),
+                permission_set: "ReadOnly".into(),
+            }),
             applications: vec![Application {
                 name: "myapp".into(),
                 environments: vec![
@@ -144,6 +160,8 @@ mod tests {
     fn default_config_is_empty() {
         let c = Config::default();
         assert!(c.sso_start_url.is_empty());
+        assert!(c.secret_region.is_empty());
+        assert!(c.last_pick.is_none());
         assert!(c.applications.is_empty());
     }
 
@@ -161,6 +179,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.toml");
         assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn old_config_without_new_fields_loads_defaults() {
+        // A config.toml written before secret_region / last_pick existed must
+        // still load: the missing keys fall back to defaults (#[serde(default)]).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+sso_start_url = "https://old.awsapps.com/start"
+sso_region = "us-east-1"
+applications = []
+"#,
+        )
+        .unwrap();
+        let c = Config::load_from(&path).unwrap();
+        assert_eq!(c.sso_start_url, "https://old.awsapps.com/start");
+        assert_eq!(c.secret_region, "", "missing secret_region → default empty");
+        assert!(c.last_pick.is_none(), "missing last_pick → default None");
     }
 
     #[test]
