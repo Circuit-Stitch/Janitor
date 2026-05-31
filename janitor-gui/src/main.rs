@@ -11,7 +11,7 @@ use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::mock::MockSource;
 use janitor_core::secret::SecretShape;
 use janitor_core::source::SecretSource;
-use janitor_core::view::{project, reveal_value, MatrixCell, MatrixRow, MatrixView};
+use janitor_core::view::{project, reveal_value, sort_rows, MatrixCell, MatrixRow, MatrixView, SortKey};
 
 /// A few seeded Applications. Payments is hand-seeded in MockSource; the others
 /// fall back to deterministic fabrication, and some have >2 Environments to show
@@ -176,11 +176,18 @@ fn app_models(source: &dyn SecretSource, config: &Config, selected: usize) -> Mo
     ModelRc::from(Rc::new(VecModel::from(items)))
 }
 
+struct Preferences {
+    sort: SortKey,
+    auto_hide_secs: u64,
+    dark: bool,
+}
+
 /// In-memory state shared across Slint callbacks.
 struct AppState {
     source: MockSource,
     config: Config,
     selected: usize,
+    prefs: Preferences,
     sets: Vec<(String, SecretShape)>,
     view: MatrixView,
 }
@@ -190,7 +197,8 @@ fn render(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     let mut st = state.borrow_mut();
     let selected = st.selected;
     let app = st.config.applications[selected].clone();
-    let (sets, view) = build_app(&st.source, &app);
+    let (sets, mut view) = build_app(&st.source, &app);
+    sort_rows(&mut view, st.prefs.sort);
     st.sets = sets;
     st.view = view;
     ui.set_environments(env_models(&st.view));
@@ -206,6 +214,7 @@ fn main() -> Result<(), slint::PlatformError> {
         source: MockSource::new(),
         config,
         selected: 0,
+        prefs: Preferences { sort: SortKey::Name, auto_hide_secs: 5, dark: true },
         sets: Vec::new(),
         view: MatrixView {
             environments: Vec::new(),
@@ -226,37 +235,45 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // Reveal.
+    // Reveal: re-borrow plaintext, copy into SharedString, drop borrow, then read prefs.
     {
         let ui_weak = ui.as_weak();
         let state = state.clone();
         ui.on_reveal_cell(move |row, col| {
             let ui = ui_weak.unwrap();
-            let st = state.borrow();
-            let Some(matrix_row) = st.view.rows.get(row as usize) else {
-                return;
+            // Re-borrow plaintext, copy it into a SharedString, then drop the borrow.
+            let revealed: Option<SharedString> = {
+                let st = state.borrow();
+                st.view
+                    .rows
+                    .get(row as usize)
+                    .and_then(|r| reveal_value(&st.sets, &r.key, col as usize))
+                    .map(|v| SharedString::from(v.expose()))
             };
-            if let Some(value) = reveal_value(&st.sets, &matrix_row.key, col as usize) {
-                ui.set_revealed_row(row);
-                ui.set_revealed_col(col);
-                ui.set_revealed_text(SharedString::from(value.expose()));
-                let ui_weak = ui.as_weak();
-                slint::Timer::single_shot(Duration::from_secs(5), move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_revealed_text(SharedString::new());
-                        ui.set_revealed_row(-1);
-                        ui.set_revealed_col(-1);
-                    }
-                });
-            }
+            let Some(text) = revealed else { return; };
+
+            ui.set_revealed_row(row);
+            ui.set_revealed_col(col);
+            ui.set_revealed_text(text);
+
+            let secs = state.borrow().prefs.auto_hide_secs;
+            let ui_weak = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_secs(secs), move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_revealed_text(SharedString::new());
+                    ui.set_revealed_row(-1);
+                    ui.set_revealed_col(-1);
+                }
+            });
         });
     }
 
-    // Initialize the SSO fields from config.
+    // Initialize the SSO fields and theme from config/prefs.
     {
         let st = state.borrow();
         ui.set_sso_start_url(st.config.sso_start_url.as_str().into());
         ui.set_sso_region(st.config.sso_region.as_str().into());
+        ui.set_dark(st.prefs.dark);
     }
 
     // Toggle settings.
@@ -339,6 +356,35 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let ui = ui_weak.unwrap();
             render(&ui, &state);
+        });
+    }
+
+    // Theme.
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_set_theme(move |dark| {
+            state.borrow_mut().prefs.dark = dark;
+            ui_weak.unwrap().set_dark(dark);
+        });
+    }
+
+    // Sort.
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_set_sort(move |index| {
+            state.borrow_mut().prefs.sort = if index == 1 { SortKey::GapFirst } else { SortKey::Name };
+            let ui = ui_weak.unwrap();
+            render(&ui, &state);
+        });
+    }
+
+    // Auto-hide duration.
+    {
+        let state = state.clone();
+        ui.on_set_auto_hide(move |secs| {
+            state.borrow_mut().prefs.auto_hide_secs = secs.max(1) as u64;
         });
     }
 

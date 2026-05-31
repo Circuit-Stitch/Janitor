@@ -1,4 +1,4 @@
-import { ScrollView, LineEdit, Button } from "std-widgets.slint";
+import { ScrollView, LineEdit, Button, ComboBox, Switch, SpinBox } from "std-widgets.slint";
 
 export struct CellView {
     absent: bool,
@@ -25,7 +25,7 @@ export component MainWindow inherits Window {
     title: "Janitor";
     preferred-width: 1100px;
     preferred-height: 720px;
-    background: #14161a;
+    background: root.dark ? #14161a : #f4f5f7;
 
     in property <[string]> environments;
     in property <[RowView]> rows;
@@ -44,6 +44,12 @@ export component MainWindow inherits Window {
     callback save-sso();
     callback add-app(string);
     callback remove-app(int);
+
+    in property <bool> dark: true;
+    in-out property <int> auto-hide-secs: 5;
+    callback set-theme(bool);
+    callback set-sort(int);
+    callback set-auto-hide(int);
 
     HorizontalLayout {
         // Sidebar
@@ -146,6 +152,7 @@ export component MainWindow inherits Window {
             padding: 24px;
             spacing: 12px;
             Text { text: "Settings"; color: white; font-size: 18px; }
+            Button { text: "Close"; clicked => { root.toggle-settings(); } }
 
             Text { text: "Identity Center"; color: #8a8f98; }
             HorizontalLayout {
@@ -171,6 +178,32 @@ export component MainWindow inherits Window {
                 spacing: 8px;
                 new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
                 Button { text: "Add"; clicked => { root.add-app(new-app.text); } }
+            }
+
+            Text { text: "Preferences"; color: #8a8f98; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Dark theme"; color: #c8ccd4; width: 120px; }
+                Switch { checked: root.dark; toggled => { root.set-theme(self.checked); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Sort"; color: #c8ccd4; width: 120px; }
+                ComboBox {
+                    model: ["Name", "Gap first"];
+                    current-index: 0;
+                    selected => { root.set-sort(self.current-index); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Reveal seconds"; color: #c8ccd4; width: 120px; }
+                SpinBox {
+                    minimum: 1;
+                    maximum: 60;
+                    value <=> root.auto-hide-secs;
+                    edited => { root.set-auto-hide(self.value); }
+                }
             }
         }
     }
