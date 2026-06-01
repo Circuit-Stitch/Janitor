@@ -26,6 +26,15 @@ pub enum Command {
         col: usize,
         key: RowKey,
     },
+    /// Fetch a Value cell's plaintext for the clipboard (#59 tracks auto-clear).
+    /// Same fetch as Reveal, but the reply is routed to the OS clipboard, not the
+    /// view. `row`/`col` let the UI thread name it ("NAME[env]") without the worker
+    /// handling any non-secret labels.
+    CopyValue {
+        row: usize,
+        col: usize,
+        key: RowKey,
+    },
     /// Start a guided `Discovery` walk for one new Environment (ADR 0013). The
     /// resolved browse region + remembered last-pick come from `Config`.
     BeginDiscovery {
@@ -63,6 +72,14 @@ pub enum Event {
         text: String,
     },
     RevealUnavailable,
+    /// A Value fetched for the clipboard. The UI thread sets the OS clipboard and
+    /// logs "NAME[env] copied to clipboard" — never `text` (THREAT-MODEL / ADR 0017).
+    CopyValue {
+        row: usize,
+        col: usize,
+        text: String,
+    },
+    CopyUnavailable,
     /// A guided walk reached `Done`: this Mapping is ready to append to the
     /// Application the Manage window is bound to (THREAT-MODEL: locations only).
     EnvDiscovered(Mapping),
@@ -239,6 +256,10 @@ async fn run_loop(
                 Some(text) => on_event(Event::Revealed { row, col, text }),
                 None => on_event(Event::RevealUnavailable),
             },
+            Command::CopyValue { row, col, key } => match provider.reveal(&key, col) {
+                Some(text) => on_event(Event::CopyValue { row, col, text }),
+                None => on_event(Event::CopyUnavailable),
+            },
             Command::BeginDiscovery {
                 environment,
                 region,
@@ -350,6 +371,40 @@ mod tests {
             revealed,
             Some(("sk_live_prod_b80a0011".to_string(), 0, 0)),
             "reveal round-trips the cached plaintext for the present cell"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_loop_copy_value_round_trips_plaintext_for_the_clipboard() {
+        use janitor_core::secret::EntryName;
+        // Copy fetches the same cached Value as Reveal, but relays it as CopyValue
+        // (the UI thread sets the clipboard and logs the safe "NAME[env]" label —
+        // never this plaintext). row/col ride through so the UI can name it.
+        let payments = janitor_mock::seeded_config().applications[0].clone();
+        let key = RowKey::Entry(EntryName::from_path(&["STRIPE_API_KEY".to_string()]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::LoadApp(payments)).unwrap();
+        tx.send(Command::CopyValue {
+            row: 0,
+            col: 0,
+            key,
+        })
+        .unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut provider = janitor_mock::MockProvider::new();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        let copied = events.lock().unwrap().iter().find_map(|e| match e {
+            Event::CopyValue { text, row, col } => Some((text.clone(), *row, *col)),
+            _ => None,
+        });
+        assert_eq!(
+            copied,
+            Some(("sk_live_prod_b80a0011".to_string(), 0, 0)),
+            "copy round-trips the cached plaintext for the clipboard"
         );
     }
 

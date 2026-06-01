@@ -144,7 +144,12 @@ fn to_item_models(view: &MatrixView, grouped: bool) -> ModelRc<MatrixItemView> {
 /// (ADR 0017) and never panic. The `arboard` / OS-clipboard shell here is
 /// intentionally untested (ADR 0010 §5) — the branch logic is trivial and the
 /// behaviour lives entirely in the platform handle.
-fn copy_entry_name(name: &str) {
+/// Set the OS clipboard to `text`, reusing the long-lived handle. Returns whether
+/// it succeeded so callers only log "copied" on success. Failures surface in the
+/// diagnostic log (ADR 0017) and never panic. **No auto-clear** for a Value yet —
+/// issue #59 tracks the ADR 0005 clipboard hardening. The `arboard` / OS-clipboard
+/// shell here is intentionally untested (ADR 0010 §5).
+fn set_clipboard(text: &str) -> bool {
     CLIPBOARD.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
@@ -152,16 +157,29 @@ fn copy_entry_name(name: &str) {
                 Ok(cb) => *slot = Some(cb),
                 Err(e) => {
                     tracing::warn!(target: "janitor::gui", "clipboard unavailable — {e}");
-                    return;
+                    return false;
                 }
             }
         }
-        if let Some(cb) = slot.as_mut() {
-            if let Err(e) = cb.set_text(name.to_string()) {
-                tracing::warn!(target: "janitor::gui", "clipboard copy failed — {e}");
-            }
+        match slot.as_mut() {
+            Some(cb) => match cb.set_text(text.to_string()) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(target: "janitor::gui", "clipboard copy failed — {e}");
+                    false
+                }
+            },
+            None => false,
         }
-    });
+    })
+}
+
+/// Copy a (non-secret) Entry name and log it (the name IS the safe label). The
+/// name is metadata (ADR 0005), so a plain copy with no auto-clear is correct.
+fn copy_entry_name(name: &str) {
+    if set_clipboard(name) {
+        tracing::info!(target: "janitor::gui", "{name} copied to clipboard");
+    }
 }
 
 fn state_label(state: EntryState) -> &'static str {
@@ -212,7 +230,6 @@ fn env_models(view: &MatrixView) -> ModelRc<SharedString> {
 
 struct Preferences {
     sort: SortKey,
-    auto_hide_secs: u64,
     dark: bool,
     /// Prefix-cluster grouping toggle — default on (issue #20).
     grouped: bool,
@@ -238,6 +255,11 @@ struct AppState {
     /// sidebar app does not change it, so a discovered Environment lands in the
     /// Application the window was opened for.
     manage_app: Option<usize>,
+    /// The cell currently being press-held for reveal, as `(row, col)` into the
+    /// view. Set on press, cleared on release. Guards the async reveal: a Value
+    /// that returns *after* the user released (a quick tap) is dropped instead of
+    /// flashing/sticking. Also names the reveal/hide audit-log lines.
+    revealing: Option<(usize, usize)>,
     /// Best-effort "Snapshot HH:MM / N min ago" main-header stamp (issue #23),
     /// stamped in-memory when a matrix loads/refreshes (ADR 0005: the matrix is an
     /// explicit point-in-time snapshot). Never written to disk. `None` until the
@@ -322,12 +344,55 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
         }
         Event::AppFailed(err) => set_status(ui, state, "error", &banner(&err)),
         Event::Revealed { row, col, text } => {
+            // Drop a Value that arrives after the user already released (a quick tap):
+            // only show it if this is still the cell being held.
+            let name_env = {
+                let st = state.borrow();
+                if st.revealing != Some((row, col)) {
+                    None
+                } else {
+                    let name = st
+                        .view
+                        .rows
+                        .get(row)
+                        .map(|r| r.name.clone())
+                        .unwrap_or_default();
+                    let env = st.view.environments.get(col).cloned().unwrap_or_default();
+                    Some((name, env))
+                }
+            };
+            let Some((name, env)) = name_env else { return };
+            // Press-and-hold owns the lifetime: the press set this, release/cancel
+            // clears it (no auto-hide timer). Audit line names the Entry + env, never
+            // the Value (THREAT-MODEL / ADR 0017).
             ui.set_revealed_row(row as i32);
             ui.set_revealed_col(col as i32);
             ui.set_revealed_text(text.into());
-            schedule_auto_hide(ui, state);
+            tracing::info!(target: "janitor::gui", "{name}[{env}] revealed");
         }
         Event::RevealUnavailable => { /* leave masked */ }
+        // The Value came back for the clipboard: set it, then log the SAFE label
+        // ("NAME[env] copied to clipboard") — never `text` (THREAT-MODEL / ADR 0017).
+        // The name/env are derived from row/col on this (UI) thread.
+        Event::CopyValue { row, col, text } => {
+            let (name, env) = {
+                let st = state.borrow();
+                let name = st
+                    .view
+                    .rows
+                    .get(row)
+                    .map(|r| r.name.clone())
+                    .unwrap_or_default();
+                let env = st.view.environments.get(col).cloned().unwrap_or_default();
+                (name, env)
+            };
+            if set_clipboard(&text) {
+                tracing::info!(target: "janitor::gui", "{name}[{env}] copied to clipboard");
+            }
+        }
+        Event::CopyUnavailable => {
+            tracing::warn!(target: "janitor::gui", "could not copy — value unavailable");
+        }
         Event::EnvDiscovered(mapping) => {
             clear_manage_choice();
             on_env_discovered(ui, state, mapping)
@@ -767,18 +832,6 @@ fn env_rows(config: &Config, selected: usize) -> ModelRc<EnvRow> {
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
-fn schedule_auto_hide(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
-    let secs = state.borrow().prefs.auto_hide_secs;
-    let ui_weak = ui.as_weak();
-    slint::Timer::single_shot(Duration::from_secs(secs), move || {
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_revealed_text(SharedString::new());
-            ui.set_revealed_row(-1);
-            ui.set_revealed_col(-1);
-        }
-    });
-}
-
 fn main() -> Result<(), slint::PlatformError> {
     // Install the Diagnostic Log first (ADR 0017): global tracing sink into an
     // in-memory buffer + the no-op panic hook (zero stdout/stderr). Done before
@@ -824,7 +877,6 @@ fn main() -> Result<(), slint::PlatformError> {
         selected: 0,
         prefs: Preferences {
             sort: SortKey::Name,
-            auto_hide_secs: 5,
             dark: true,
             grouped: true,
         },
@@ -834,6 +886,7 @@ fn main() -> Result<(), slint::PlatformError> {
         },
         status: "unauth".to_string(),
         manage_app: None,
+        revealing: None,
         snapshot_at: None,
     }));
 
@@ -902,7 +955,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let state = state.clone();
         ui.on_reveal_cell(move |row, col| {
             let key = {
-                let st = state.borrow();
+                let mut st = state.borrow_mut();
+                // Mark this cell as the one being held, so a Value that returns after
+                // release is dropped and the hide can name what was revealed.
+                st.revealing = Some((row as usize, col as usize));
                 st.view.rows.get(row as usize).map(|r| r.key.clone())
             };
             if let Some(key) = key {
@@ -917,9 +973,54 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    // Release/cancel of a press-held reveal: clear the guard and log "NAME[env]
+    // hidden" (never the Value). The view already zeroed revealed-row/col/text.
+    {
+        let state = state.clone();
+        ui.on_hide_cell(move || {
+            let name_env = {
+                let mut st = state.borrow_mut();
+                st.revealing.take().map(|(row, col)| {
+                    let name = st
+                        .view
+                        .rows
+                        .get(row)
+                        .map(|r| r.name.clone())
+                        .unwrap_or_default();
+                    let env = st.view.environments.get(col).cloned().unwrap_or_default();
+                    (name, env)
+                })
+            };
+            if let Some((name, env)) = name_env {
+                tracing::info!(target: "janitor::gui", "{name}[{env}] hidden");
+            }
+        });
+    }
     // Copy a row's full Entry name to the clipboard (#40). No Provider round-trip
     // and no AppState needed — the name rides in on the callback.
     ui.on_copy_entry(|name| copy_entry_name(name.as_str()));
+    // Right-click → Copy on a Value cell: fetch the plaintext from the worker (the
+    // Value lives only there — ADR 0012) and route it to the clipboard. The reply
+    // (Event::CopyValue) sets the clipboard and logs "NAME[env]", never the Value.
+    {
+        let state = state.clone();
+        ui.on_copy_value(move |row, col| {
+            let key = {
+                let st = state.borrow();
+                st.view.rows.get(row as usize).map(|r| r.key.clone())
+            };
+            if let Some(key) = key {
+                dispatch(
+                    &state,
+                    Command::CopyValue {
+                        row: row as usize,
+                        col: col as usize,
+                        key,
+                    },
+                );
+            }
+        });
+    }
     // Settings toggle.
     {
         let ui_weak = ui.as_weak();
@@ -1040,12 +1141,6 @@ fn main() -> Result<(), slint::PlatformError> {
             push_matrix(&ui_weak.unwrap(), &state);
         });
     }
-    {
-        let state = state.clone();
-        ui.on_set_auto_hide(move |secs| {
-            state.borrow_mut().prefs.auto_hide_secs = secs.max(1) as u64;
-        });
-    }
     // Prefix-cluster grouping toggle (default on). Re-pushes the item models so
     // headers appear/disappear and zebra restripes.
     {
@@ -1101,7 +1196,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 if log_dirty.get() || last_version.get() != ver {
                     log_dirty.set(false);
                     last_version.set(ver);
+                    // Newest-first render → the first line is the latest event, shown
+                    // inline on the collapsed Diagnostics strip (the status area).
+                    let latest = text.lines().next().unwrap_or("").to_string();
                     ui.set_log_text(text.into());
+                    ui.set_log_latest(latest.into());
                 }
             },
         );

@@ -63,11 +63,21 @@ export component MainWindow inherits Window {
     in property <[MatrixItemView]> items;
     in property <[AppItem]> apps;
 
-    in property <int> revealed-row: -1;
-    in property <int> revealed-col: -1;
-    in property <string> revealed-text;
+    // Writable from the view so a press-release can clear the reveal instantly
+    // (the round-trip fills `revealed-text`; release zeroes it — press-and-hold
+    // momentary reveal). Rust still pushes via `set_revealed_*`.
+    in-out property <int> revealed-row: -1;
+    in-out property <int> revealed-col: -1;
+    in-out property <string> revealed-text;
 
     callback reveal-cell(int, int);
+    // Release/cancel of a press-held reveal — clears the reveal guard and logs the
+    // hide. The view also zeroes revealed-row/col/text inline so the hide is instant.
+    callback hide-cell();
+    // Right-click → Copy a Value cell's plaintext to the clipboard (row, col into
+    // MatrixView). The Value rides back from the worker; the confirmation never
+    // logs it (issue #59 tracks the ADR 0005 auto-clear hardening).
+    callback copy-value(int, int);
     // Copy a row's full Entry name to the OS clipboard (#40, ADR 0005). The name
     // is metadata, never a Value.
     callback copy-entry(string);
@@ -95,11 +105,9 @@ export component MainWindow inherits Window {
     callback manage-selected();
 
     in property <bool> dark: true;
-    in-out property <int> auto-hide-secs: 5;
     in-out property <bool> grouped: true;
     callback set-theme(bool);
     callback set-sort(int);
-    callback set-auto-hide(int);
     callback set-grouped(bool);
 
     // --- Chrome (issue #23): non-secret context strings pushed from Rust. No
@@ -121,6 +129,9 @@ export component MainWindow inherits Window {
     // pre-rendered, level-filtered, error-safe stream (Rust polls the in-memory
     // buffer into it). Collapsible; never touches stdout/stderr/disk.
     in property <string> log-text;
+    // The newest log line, shown inline on the collapsed strip as the in-app
+    // status area (e.g. "NAME[env] copied to clipboard"). Error-safe, never a Value.
+    in property <string> log-latest;
     in-out property <bool> log-open: false;
     callback set-log-filter(int);   // 1=Error 2=Warn 3=Info (max verbosity shown)
     callback clear-log();
@@ -483,60 +494,81 @@ export component MainWindow inherits Window {
                                         accessible-role: text;
                                         accessible-label: "entry-cell";
                                         clip: true;
-                                        VerticalLayout {
-                                            padding: root.row-pad;
-                                            HorizontalLayout {
-                                                spacing: 6px;
-                                                Text {
-                                                    text: item.prefix; color: #6b7280;
-                                                    font-size: root.name-fs; overflow: elide;
-                                                    vertical-alignment: center;
+                                        // Right-click actions. Copy (the full Entry
+                                        // name — metadata) is the only live one in
+                                        // read-only v1; Edit / View history / Delete are
+                                        // disabled placeholders (v2 / unbuilt, ADR 0004/
+                                        // 0006). Left-click no longer copies (#40's
+                                        // click-copy is gone) — copy moved to this menu.
+                                        ectx := ContextMenuArea {
+                                            Menu {
+                                                MenuItem {
+                                                    title: "Copy";
+                                                    activated => { root.copy-entry(item.full-name); }
                                                 }
-                                                Text {
-                                                    text: item.leaf; color: root.dark ? white : #14161a;
-                                                    font-size: root.name-fs; font-weight: 700;
-                                                    overflow: elide; vertical-alignment: center;
-                                                }
-                                                if item.badge != "" : Rectangle {
-                                                    background: root.dark ? #232a36 : #dfe4ec;
-                                                    border-radius: 3px;
-                                                    HorizontalLayout {
-                                                        padding-left: 5px; padding-right: 5px;
-                                                        Text {
-                                                            text: item.badge; color: #9aa0aa;
-                                                            font-size: 9px; vertical-alignment: center;
+                                                MenuItem { title: "Edit"; enabled: false; }
+                                                MenuItem { title: "View history"; enabled: false; }
+                                                MenuItem { title: "Delete"; enabled: false; }
+                                            }
+                                            VerticalLayout {
+                                                padding: root.row-pad;
+                                                HorizontalLayout {
+                                                    spacing: 6px;
+                                                    Text {
+                                                        text: item.prefix; color: #6b7280;
+                                                        font-size: root.name-fs; overflow: elide;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    Text {
+                                                        text: item.leaf; color: root.dark ? white : #14161a;
+                                                        font-size: root.name-fs; font-weight: 700;
+                                                        overflow: elide; vertical-alignment: center;
+                                                    }
+                                                    if item.badge != "" : Rectangle {
+                                                        background: root.dark ? #232a36 : #dfe4ec;
+                                                        border-radius: 3px;
+                                                        HorizontalLayout {
+                                                            padding-left: 5px; padding-right: 5px;
+                                                            Text {
+                                                                text: item.badge; color: #9aa0aa;
+                                                                font-size: 9px; vertical-alignment: center;
+                                                            }
                                                         }
                                                     }
-                                                }
-                                                Rectangle { horizontal-stretch: 1; }
-                                            }
-                                        }
-                                        // Hover reveals the FULL (un-stripped) Entry
-                                        // name — the safety net for a prefix-stripped
-                                        // / elided ENTRY cell. Clicking copies the
-                                        // full name to the clipboard (#40, ADR 0005);
-                                        // copy is the authoritative full-name path —
-                                        // the in-cell preview elides past the column
-                                        // floor rather than hard-clipping. Names are
-                                        // metadata, never Values.
-                                        if ehover.has-hover : Rectangle {
-                                            background: root.dark ? #1b2330 : #e8ebf0;
-                                            HorizontalLayout {
-                                                padding-left: root.row-pad;
-                                                padding-right: root.row-pad;
-                                                Text {
-                                                    text: item.full-name;
-                                                    color: root.dark ? white : #14161a;
-                                                    font-size: root.name-fs;
-                                                    overflow: elide;
-                                                    vertical-alignment: center;
-                                                    accessible-label: "entry-full";
+                                                    Rectangle { horizontal-stretch: 1; }
                                                 }
                                             }
-                                        }
-                                        ehover := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.copy-entry(item.full-name); }
+                                            // Hover reveals the FULL (un-stripped) Entry
+                                            // name — the safety net for a prefix-stripped /
+                                            // elided ENTRY cell. Names are metadata, never
+                                            // Values.
+                                            if ehover.has-hover : Rectangle {
+                                                background: root.dark ? #1b2330 : #e8ebf0;
+                                                HorizontalLayout {
+                                                    padding-left: root.row-pad;
+                                                    padding-right: root.row-pad;
+                                                    Text {
+                                                        text: item.full-name;
+                                                        color: root.dark ? white : #14161a;
+                                                        font-size: root.name-fs;
+                                                        overflow: elide;
+                                                        vertical-alignment: center;
+                                                        accessible-label: "entry-full";
+                                                    }
+                                                }
+                                            }
+                                            // Hover drives the full-name overlay; a right
+                                            // press opens the menu (the TouchArea grabs the
+                                            // right-click, so trigger it directly). No
+                                            // left-click action.
+                                            ehover := TouchArea {
+                                                pointer-event(e) => {
+                                                    if (e.button == PointerEventButton.right
+                                                        && e.kind == PointerEventKind.down) {
+                                                        ectx.show({ x: self.mouse-x, y: self.mouse-y });
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -544,6 +576,11 @@ export component MainWindow inherits Window {
                         }
                         // ENV: horizontally-flickable cells, aligned row-for-row.
                         env-body := Flickable {
+                            // EXPERIMENT: non-interactive so the cell TouchAreas get
+                            // real sustained presses (press-and-hold reveal) and
+                            // right-clicks reach the ContextMenuArea. Trade-off: loses
+                            // horizontal drag-scroll of env columns (ADR 0023).
+                            interactive: false;
                             horizontal-stretch: 1;
                             viewport-width: matrix.envs-w;
                             viewport-height: self.height;
@@ -567,46 +604,106 @@ export component MainWindow inherits Window {
                                             // position-only — never the Value.
                                             accessible-role: text;
                                             accessible-label: "envcell-" + j;
+                                            // The reveal IS the held state: a press fills
+                                            // revealed-row/col/text (worker round-trip);
+                                            // release/cancel zeroes them. `pressed`/
+                                            // `has-hover` can't gate it — inside the
+                                            // interactive env-body Flickable the child
+                                            // TouchArea gets pointer *events* but not the
+                                            // grab, so `pressed` is stuck false. So
+                                            // revealed-row/col itself is the source of
+                                            // truth (press-and-hold momentary reveal —
+                                            // THREAT-MODEL / ADR 0003).
                                             property <bool> is-revealed:
                                                 root.revealed-row == item.row-index
                                                 && root.revealed-col == j;
-                                            HorizontalLayout {
-                                                padding: root.row-pad;
-                                                spacing: 8px;
-                                                if cell.absent : Text {
-                                                    text: "— absent"; color: #4b5563;
-                                                    horizontal-stretch: 1;
-                                                    vertical-alignment: center;
+                                            // Right-click actions (native menu). Copy is
+                                            // the only live one in read-only v1 (ADR 0004);
+                                            // Edit / View history are disabled placeholders
+                                            // (v2 / unbuilt). Copy is disabled on an absent
+                                            // (Gap) cell — nothing to copy.
+                                            ctx := ContextMenuArea {
+                                                Menu {
+                                                    MenuItem {
+                                                        title: "Copy";
+                                                        enabled: !cell.absent;
+                                                        activated => { root.copy-value(item.row-index, j); }
+                                                    }
+                                                    MenuItem { title: "Edit"; enabled: false; }
+                                                    MenuItem { title: "View history"; enabled: false; }
                                                 }
-                                                if !cell.absent : Rectangle {
-                                                    min-width: 6px; max-width: 6px;
-                                                    height: 6px; border-radius: 3px;
-                                                    background: Palette.dot-color(item.state);
+                                                // Padding lives on this wrapping VerticalLayout,
+                                                // NOT on the inner HorizontalLayout — padding
+                                                // directly on a box layout holding an
+                                                // `overflow: elide` Text blanks it (Slint layout
+                                                // quirk; same workaround as the ENTRY cell). That
+                                                // blank is what hid both the masked dots AND the
+                                                // revealed plaintext — the real reveal regression.
+                                                VerticalLayout {
+                                                    padding: root.row-pad;
+                                                    HorizontalLayout {
+                                                        spacing: 8px;
+                                                        if cell.absent : Text {
+                                                            text: "— absent"; color: #4b5563;
+                                                            horizontal-stretch: 1;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        if !cell.absent : Rectangle {
+                                                            min-width: 6px; max-width: 6px;
+                                                            height: 6px; border-radius: 3px;
+                                                            background: Palette.dot-color(item.state);
+                                                        }
+                                                        if !cell.absent : Text {
+                                                            text: is-revealed ? root.revealed-text : cell.dots;
+                                                            color: is-revealed ? #ffd479 : #6b7280;
+                                                            overflow: elide; horizontal-stretch: 1;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        if !cell.absent : Text {
+                                                            text: cell.length; color: #6b7280;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        if !cell.absent : Text {
+                                                            text: cell.hex; color: #9aa0aa;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
                                                 }
-                                                if !cell.absent : Text {
-                                                    text: is-revealed ? root.revealed-text : cell.dots;
-                                                    color: is-revealed ? #ffd479 : #6b7280;
-                                                    overflow: elide; horizontal-stretch: 1;
-                                                    vertical-alignment: center;
+                                                // Hover / reveal as a brightness delta
+                                                // painted on top, so it reads on both
+                                                // stripe shades (no fixed color).
+                                                Rectangle {
+                                                    background: is-revealed ? #ffffff2e
+                                                        : (touch.has-hover ? #ffffff14 : transparent);
                                                 }
-                                                if !cell.absent : Text {
-                                                    text: cell.length; color: #6b7280;
-                                                    vertical-alignment: center;
+                                                // Press-and-hold reveals: a LEFT-button
+                                                // press starts the round-trip; release OR a
+                                                // cancelled grab (pointer left / focus stolen)
+                                                // clears the plaintext at once. Right-clicks
+                                                // aren't `down`-handled, so they fall through
+                                                // to the ContextMenuArea.
+                                                touch := TouchArea {
+                                                    pointer-event(e) => {
+                                                        // Left press-and-hold reveals; right press
+                                                        // opens the menu (the TouchArea grabs the
+                                                        // right-click, so trigger the menu directly).
+                                                        if (e.button == PointerEventButton.left
+                                                            && e.kind == PointerEventKind.down) {
+                                                            root.reveal-cell(item.row-index, j);
+                                                        }
+                                                        if (e.button == PointerEventButton.right
+                                                            && e.kind == PointerEventKind.down) {
+                                                            ctx.show({ x: self.mouse-x, y: self.mouse-y });
+                                                        }
+                                                        if (e.kind == PointerEventKind.up
+                                                            || e.kind == PointerEventKind.cancel) {
+                                                            root.hide-cell();
+                                                            root.revealed-row = -1;
+                                                            root.revealed-col = -1;
+                                                            root.revealed-text = "";
+                                                        }
+                                                    }
                                                 }
-                                                if !cell.absent : Text {
-                                                    text: cell.hex; color: #9aa0aa;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                            // Hover / reveal as a brightness delta
-                                            // painted on top, so it reads on both
-                                            // stripe shades (no fixed color).
-                                            Rectangle {
-                                                background: is-revealed ? #ffffff2e
-                                                    : (touch.has-hover ? #ffffff14 : transparent);
-                                            }
-                                            touch := TouchArea {
-                                                clicked => { root.reveal-cell(item.row-index, j); }
                                             }
                                         }
                                     }
@@ -658,7 +755,17 @@ export component MainWindow inherits Window {
                             color: #8a8f98; font-size: 11px;
                             vertical-alignment: center;
                         }
-                        Rectangle { horizontal-stretch: 1; }
+                        // Collapsed: the newest line is the status area. Expanded:
+                        // a plain spacer (the full stream shows below).
+                        if !root.log-open : Text {
+                            // Content IS the accessible-label (no explicit override),
+                            // so a view test can assert the latest line is shown.
+                            text: root.log-latest;
+                            color: #6b7280; font-size: 11px;
+                            overflow: elide; horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        if root.log-open : Rectangle { horizontal-stretch: 1; }
                         if root.log-open : ComboBox {
                             // Ordered by value: Error(1) Warn(2) Info(3). Default
                             // Info = show everything.
@@ -864,17 +971,6 @@ export component MainWindow inherits Window {
                             current-index: 0;
                             selected => { root.set-sort(self.current-index); }
                             accessible-label: "settings-sort";
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text { text: "Reveal seconds"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
-                        SpinBox {
-                            minimum: 1;
-                            maximum: 60;
-                            value <=> root.auto-hide-secs;
-                            edited => { root.set-auto-hide(self.value); }
-                            accessible-label: "settings-reveal";
                         }
                     }
                 }

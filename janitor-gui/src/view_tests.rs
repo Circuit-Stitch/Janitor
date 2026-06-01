@@ -336,7 +336,112 @@ fn one_row_matrix(full_name: &str, prefix: &str, leaf: &str) -> MainWindow {
 }
 
 #[test]
-fn entry_hover_reveals_full_name_and_click_copies_it() {
+fn value_cell_press_fires_reveal_cell() {
+    i_slint_backend_testing::init_no_event_loop();
+    // The value cells live in the env-body (now non-interactive, so the cell
+    // TouchAreas own their grab — an interactive Flickable would instead defer the
+    // press and synthesise a tap at release, breaking press-and-hold). A press on
+    // envcell-0 must fire reveal-cell with (row=0, col=0).
+    let ui = matrix_window();
+
+    let pressed = Rc::new(std::cell::RefCell::new(None::<(i32, i32)>));
+    {
+        let pressed = pressed.clone();
+        ui.on_reveal_cell(move |r, c| *pressed.borrow_mut() = Some((r, c)));
+    }
+
+    one_by_label(&ui, "envcell-0").mock_single_click(slint::platform::PointerEventButton::Left);
+
+    assert_eq!(
+        *pressed.borrow(),
+        Some((0, 0)),
+        "pressing a value cell must reach its TouchArea and fire reveal-cell — \
+         if None, the env-body Flickable is swallowing the press (the regression)"
+    );
+}
+
+/// The cell centre in logical window coordinates, for raw pointer dispatch.
+fn cell_center(ui: &MainWindow, label: &str) -> slint::LogicalPosition {
+    let h = one_by_label(ui, label);
+    let p = h.absolute_position();
+    let s = h.size();
+    slint::LogicalPosition::new(p.x + s.width / 2.0, p.y + s.height / 2.0)
+}
+
+#[test]
+fn value_cell_reveals_while_held_and_hides_on_release() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    // Press-and-hold momentary reveal: while the left button is held over a value
+    // cell, the worker-supplied plaintext shows; releasing hides it at once. The
+    // worker round-trip is simulated here by setting revealed-* on the press (in
+    // the real app the Revealed event does this); the GATE is the live press+hover,
+    // so the clear-on-release must hide it.
+    let ui = matrix_window();
+    let pos = cell_center(&ui, "envcell-0");
+    let window = ui.window();
+
+    // Press and hold: move to the cell (→ hover) then press (→ reveal-cell). The
+    // worker reply lands as revealed-* for (row 0, col 0).
+    window.dispatch_event(WindowEvent::PointerMoved { position: pos });
+    window.dispatch_event(WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Left });
+    ui.set_revealed_row(0);
+    ui.set_revealed_col(0);
+    ui.set_revealed_text("SECRETVAL".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+
+    // A Text exposes its content as its implicit accessible-label, so the plaintext
+    // renders iff this finds it. While held, it must show.
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "SECRETVAL").count(),
+        1,
+        "the Value must be revealed while the cell is held"
+    );
+
+    // Release: the up handler zeroes revealed-* → the gate closes → plaintext gone.
+    window.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Left });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "SECRETVAL").count(),
+        0,
+        "releasing the cell must hide the Value immediately"
+    );
+}
+
+#[test]
+fn collapsed_diagnostics_strip_shows_the_latest_log_line() {
+    i_slint_backend_testing::init_no_event_loop();
+    // The collapsed "Diagnostics" strip is the status area: it shows the newest log
+    // line inline (e.g. "NAME[env] copied to clipboard"). A Text exposes its content
+    // as its implicit accessible-label, so the line is findable by its text.
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_log_latest("STRIPE_API_KEY[prod] copied to clipboard".into());
+
+    // Collapsed (default): the latest line shows on the strip.
+    ui.set_log_open(false);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "STRIPE_API_KEY[prod] copied to clipboard")
+            .count(),
+        1,
+        "the collapsed Diagnostics strip must show the latest log line"
+    );
+
+    // Expanded: the inline status line is replaced by the full stream below, so the
+    // strip's inline copy is gone.
+    ui.set_log_open(true);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "STRIPE_API_KEY[prod] copied to clipboard")
+            .count(),
+        0,
+        "expanding the log removes the inline status line (the full stream shows instead)"
+    );
+}
+
+#[test]
+fn entry_hover_reveals_full_name_and_left_click_does_not_copy() {
     i_slint_backend_testing::init_no_event_loop();
     // A grouped row would show only "primary.url"; the un-stripped name is the full one.
     let ui = one_row_matrix("database.primary.url", "primary.", "url");
@@ -355,18 +460,22 @@ fn entry_hover_reveals_full_name_and_click_copies_it() {
     );
 
     // mock_single_click routes through window hit-testing: it moves the pointer to
-    // the cell centre (→ hover) before press/release (→ the copy-entry callback).
+    // the cell centre (→ hover) before a LEFT press/release.
     one_by_label(&ui, "entry-cell").mock_single_click(slint::platform::PointerEventButton::Left);
 
+    // Hover still reveals the full (un-stripped) name — the elision safety net.
     assert_eq!(
         ElementHandle::find_by_accessible_label(&ui, "entry-full").count(),
         1,
         "hovering the ENTRY cell must reveal the full (un-stripped) Entry name"
     );
+    // But a LEFT click no longer copies — copy moved to the right-click menu (the
+    // native ContextMenuArea can't render headlessly, so the menu Copy path is
+    // verified by running the app, not here).
     assert_eq!(
         *copied.borrow(),
-        "database.primary.url",
-        "clicking the ENTRY name must copy the full Entry name to the clipboard"
+        "",
+        "a left click on the ENTRY name must NOT copy (copy is now right-click only)"
     );
 }
 
@@ -429,7 +538,8 @@ fn settings_card_keeps_its_controls_after_the_restructure() {
         "settings-card",
         "settings-theme",
         "settings-sort",
-        "settings-reveal",
+        // "settings-reveal" removed: press-and-hold replaced the timed reveal,
+        // so the "Reveal seconds" SpinBox no longer exists.
     ] {
         assert_eq!(
             ElementHandle::find_by_accessible_label(&ui, label).count(),
