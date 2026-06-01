@@ -172,6 +172,35 @@ fn state_label(state: EntryState) -> &'static str {
     }
 }
 
+/// Count the loaded rows in each state for the bottom-bar legend (issue #23).
+/// Derived from the already-masked `MatrixView` — never recomputes secrets.
+fn state_counts(view: &MatrixView) -> (i32, i32, i32) {
+    let mut aligned = 0;
+    let mut drift = 0;
+    let mut gap = 0;
+    for r in &view.rows {
+        match r.state {
+            EntryState::Aligned => aligned += 1,
+            EntryState::Drift => drift += 1,
+            EntryState::Gap => gap += 1,
+        }
+    }
+    (aligned, drift, gap)
+}
+
+/// The representative Secret ARN/name shown as the main-header subtitle (issue
+/// #23): the first Environment's `secret_id` for the selected Application. A
+/// location identifier, not a secret (THREAT-MODEL — OK to show). Empty when the
+/// app has no Environments.
+fn representative_secret_id(config: &Config, selected: usize) -> String {
+    config
+        .applications
+        .get(selected)
+        .and_then(|app| app.environments.first())
+        .map(|m| m.secret_id.clone())
+        .unwrap_or_default()
+}
+
 fn env_models(view: &MatrixView) -> ModelRc<SharedString> {
     let envs: Vec<SharedString> = view
         .environments
@@ -209,6 +238,11 @@ struct AppState {
     /// sidebar app does not change it, so a discovered Environment lands in the
     /// Application the window was opened for.
     manage_app: Option<usize>,
+    /// Best-effort "Snapshot HH:MM / N min ago" main-header stamp (issue #23),
+    /// stamped in-memory when a matrix loads/refreshes (ADR 0005: the matrix is an
+    /// explicit point-in-time snapshot). Never written to disk. `None` until the
+    /// first successful load — the header then reads "Not refreshed yet".
+    snapshot_at: Option<std::time::SystemTime>,
 }
 
 impl AppState {
@@ -276,7 +310,13 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             }
             let sort = state.borrow().prefs.sort;
             sort_rows(&mut view, sort);
-            state.borrow_mut().view = view;
+            {
+                let mut st = state.borrow_mut();
+                st.view = view;
+                // Stamp the point-in-time snapshot (issue #23, ADR 0005): the
+                // matrix just refreshed. In-memory only — never persisted.
+                st.snapshot_at = Some(std::time::SystemTime::now());
+            }
             set_status(ui, state, "loaded", "");
             push_matrix(ui, state);
         }
@@ -618,6 +658,54 @@ fn push_matrix(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     }
     // The app-set may have changed (add/remove), which flips the empty-state.
     push_pane(ui, state);
+    push_chrome(ui, state);
+}
+
+/// Push the non-secret chrome strings + counts (issue #23): the Application
+/// title/breadcrumb, the representative Secret ARN subtitle, the legend counts
+/// (derived from row states), and the snapshot stamp. Identity strings, ARNs,
+/// timestamps, and counts only — never a Value (THREAT-MODEL).
+fn push_chrome(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let st = state.borrow();
+    let title = st
+        .config
+        .applications
+        .get(st.selected)
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+    ui.set_app_title(title.into());
+    ui.set_secret_arn(representative_secret_id(&st.config, st.selected).into());
+    let (aligned, drift, gap) = state_counts(&st.view);
+    ui.set_aligned_count(aligned);
+    ui.set_drift_count(drift);
+    ui.set_gap_count(gap);
+    ui.set_snapshot_label(snapshot_label(st.snapshot_at).into());
+}
+
+/// Best-effort "Snapshot HH:MM / N min ago" stamp from the in-memory load time
+/// (issue #23, ADR 0005). Never read from / written to disk. `None` → "" so the
+/// view renders its "Not refreshed yet" placeholder. Wall-clock HH:MM is derived
+/// without a date dependency (UTC seconds-of-day); the "N min ago" is the
+/// elapsed-since-load delta, which is what the user actually reads.
+fn snapshot_label(at: Option<std::time::SystemTime>) -> String {
+    let Some(at) = at else {
+        return String::new();
+    };
+    let Ok(since_epoch) = at.duration_since(std::time::UNIX_EPOCH) else {
+        return String::new();
+    };
+    let secs_of_day = since_epoch.as_secs() % 86_400;
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    let mins_ago = at.elapsed().map(|d| d.as_secs() / 60).unwrap_or(0);
+    let ago = if mins_ago == 0 {
+        "just now".to_string()
+    } else if mins_ago == 1 {
+        "1 min ago".to_string()
+    } else {
+        format!("{mins_ago} min ago")
+    };
+    format!("Snapshot {hh:02}:{mm:02} UTC / {ago}")
 }
 
 /// Sidebar items. Drift badge shows ONLY for the selected, loaded app — never a
@@ -746,6 +834,7 @@ fn main() -> Result<(), slint::PlatformError> {
         },
         status: "unauth".to_string(),
         manage_app: None,
+        snapshot_at: None,
     }));
 
     // Publish the state on the UI thread so the (Send) worker bridge can reach
@@ -1018,6 +1107,27 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
 
+    // Tick the snapshot label's "N min ago" so it stays honest between manual
+    // refreshes (issue #23) — otherwise it's frozen at "just now" forever. A pure
+    // clock re-push: no network, no secret activity, consistent with the
+    // manual-refresh / no-background-polling model (ADR 0005). Kept alive for the
+    // run; no-ops until the first load stamps `snapshot_at`.
+    let snapshot_timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        snapshot_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(30),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let at = STATE.with(|s| s.borrow().as_ref().and_then(|st| st.borrow().snapshot_at));
+                if at.is_some() {
+                    ui.set_snapshot_label(snapshot_label(at).into());
+                }
+            },
+        );
+    }
+
     let run_result = ui.run();
 
     // App closing: stop the worker loop (harmless if it already exited). This is
@@ -1025,4 +1135,112 @@ fn main() -> Result<(), slint::PlatformError> {
     // `worker::run_loop` already handles.
     let _ = state.borrow().tx.send(Command::Shutdown);
     run_result
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    //! Pure-Rust seams for the issue #23 chrome derivations (counts / ARN /
+    //! snapshot). These count and format non-secret metadata only — no Values.
+    use super::*;
+    use janitor_core::compare::{EntryState, RowKey};
+    use janitor_core::view::{MatrixRow, MatrixView};
+
+    fn row(state: EntryState) -> MatrixRow {
+        MatrixRow {
+            key: RowKey::WholeSet,
+            name: "x".into(),
+            state,
+            kind: None,
+            cells: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn state_counts_tallies_each_entry_state() {
+        let view = MatrixView {
+            environments: vec!["prod".into()],
+            rows: vec![
+                row(EntryState::Aligned),
+                row(EntryState::Aligned),
+                row(EntryState::Drift),
+                row(EntryState::Gap),
+            ],
+        };
+        assert_eq!(state_counts(&view), (2, 1, 1));
+    }
+
+    #[test]
+    fn representative_secret_id_is_the_first_env_mapping_or_empty() {
+        let mut config = Config::default();
+        config.applications.push(Application {
+            name: "Payments".into(),
+            environments: vec![
+                Mapping {
+                    environment: "prod".into(),
+                    account_id: "111".into(),
+                    region: "us-east-1".into(),
+                    secret_id: "arn:aws:secretsmanager:us-east-1:111:secret:payments".into(),
+                    permission_set: "ps".into(),
+                },
+                Mapping {
+                    environment: "staging".into(),
+                    account_id: "222".into(),
+                    region: "us-east-1".into(),
+                    secret_id: "arn:other".into(),
+                    permission_set: "ps".into(),
+                },
+            ],
+        });
+        // First env's secret_id is the representative subtitle.
+        assert_eq!(
+            representative_secret_id(&config, 0),
+            "arn:aws:secretsmanager:us-east-1:111:secret:payments"
+        );
+        // An app with no environments → empty (the view renders "—").
+        config.applications.push(Application {
+            name: "Empty".into(),
+            environments: Vec::new(),
+        });
+        assert_eq!(representative_secret_id(&config, 1), "");
+        // Out-of-range selection → empty (never panics).
+        assert_eq!(representative_secret_id(&config, 99), "");
+    }
+
+    #[test]
+    fn snapshot_label_is_empty_until_first_load_then_renders_a_stamp() {
+        // No load yet → empty (the view shows "Not refreshed yet").
+        assert_eq!(snapshot_label(None), "");
+        // Just loaded → "just now" with a UTC HH:MM stamp.
+        let now = std::time::SystemTime::now();
+        let label = snapshot_label(Some(now));
+        assert!(
+            label.starts_with("Snapshot ") && label.contains("just now"),
+            "fresh snapshot label was {label:?}"
+        );
+        // The absolute stamp is the load-bearing, never-stale part: assert the
+        // "Snapshot HH:MM UTC" shape (two-digit hour : two-digit minute).
+        let after_marker = label.strip_prefix("Snapshot ").unwrap();
+        let hhmm = &after_marker[..5];
+        let (hh, mm) = hhmm.split_once(':').expect("HH:MM stamp");
+        assert!(
+            hh.len() == 2
+                && mm.len() == 2
+                && hh.parse::<u32>().is_ok()
+                && mm.parse::<u32>().is_ok(),
+            "snapshot stamp is not HH:MM: {label:?}"
+        );
+        assert!(
+            after_marker.contains("UTC"),
+            "snapshot stamp missing UTC: {label:?}"
+        );
+
+        // The relative clause — "what the user actually reads" — across its branches.
+        let ago = |secs| snapshot_label(Some(now - std::time::Duration::from_secs(secs)));
+        assert!(ago(90).contains("1 min ago"), "90s ago was {:?}", ago(90));
+        assert!(
+            ago(7 * 60).contains("7 min ago"),
+            "7m ago was {:?}",
+            ago(7 * 60)
+        );
+    }
 }

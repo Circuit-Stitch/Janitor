@@ -98,6 +98,21 @@ export component MainWindow inherits Window {
     callback set-auto-hide(int);
     callback set-grouped(bool);
 
+    // --- Chrome (issue #23): non-secret context strings pushed from Rust. No
+    // Values ever — identity strings, the Application name/breadcrumb, the Secret
+    // ARN (a location, not a secret), the snapshot timestamp, and Aligned/Drift/Gap
+    // COUNTS only. v1 ships read-only (ADR 0004); `identity` / `session-remaining`
+    // are best-effort and render a graceful placeholder when not yet plumbed. ---
+    in property <bool> read-only: true;
+    in property <string> identity;          // signed-in identity ("" → placeholder)
+    in property <string> session-remaining; // SSO token time left ("" → "—")
+    in property <string> app-title;         // selected Application name (breadcrumb)
+    in property <string> secret-arn;        // representative Mapping secret_id
+    in property <string> snapshot-label;    // "Snapshot HH:MM / N min ago" ("" hidden)
+    in property <int> aligned-count;
+    in property <int> drift-count;
+    in property <int> gap-count;
+
     // Diagnostic Log (ADR 0017): the only diagnostic surface. `log-text` is the
     // pre-rendered, level-filtered, error-safe stream (Rust polls the in-memory
     // buffer into it). Collapsible; never touches stdout/stderr/disk.
@@ -177,7 +192,46 @@ export component MainWindow inherits Window {
             padding: 16px;
             spacing: 6px;
 
+            // Top bar (issue #23): a read-only badge (v1 ships read-only — ADR
+            // 0004), the signed-in identity, an Application breadcrumb, then the
+            // pane title and the action buttons. Identity / ARN / counts only —
+            // never a Value.
             HorizontalLayout {
+                spacing: 8px;
+                // Read-only badge — always present (v1 has no read-write mode).
+                Rectangle {
+                    background: root.dark ? #232a36 : #dfe4ec;
+                    border-radius: 4px;
+                    accessible-role: text;
+                    accessible-label: "topbar-readonly";
+                    vertical-stretch: 0;
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px;
+                        padding-top: 3px; padding-bottom: 3px;
+                        Text {
+                            text: "READ-ONLY";
+                            color: #9aa0aa; font-size: 10px; font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                // Signed-in identity ("" → a memory-only placeholder).
+                Text {
+                    accessible-role: text;
+                    accessible-label: "topbar-identity";
+                    text: root.identity != "" ? root.identity : "memory-only session";
+                    color: root.identity != "" ? #c8ccd4 : #6b7280;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                // Application breadcrumb.
+                Text {
+                    accessible-role: text;
+                    accessible-label: "topbar-breadcrumb";
+                    text: root.app-title != "" ? "/ " + root.app-title : "";
+                    color: #8a8f98; font-size: 12px;
+                    vertical-alignment: center;
+                }
                 Text {
                     text: root.pane == "matrix" ? "Drift matrix"
                         : root.pane == "empty-apps" ? "No Applications"
@@ -186,6 +240,8 @@ export component MainWindow inherits Window {
                         : "Not signed in";
                     color: #c8ccd4;
                     horizontal-stretch: 1;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
                 }
                 if root.pane == "signin" || root.pane == "error" : Button {
                     text: "Sign in";
@@ -224,6 +280,40 @@ export component MainWindow inherits Window {
 
             if root.pane == "matrix" : VerticalLayout {
                 spacing: 6px;
+
+                // Main header (issue #23): the Application title, the Secret ARN
+                // subtitle (a location identifier, not a secret — OK to show), and
+                // a point-in-time "Snapshot HH:MM / N min ago" last-refresh stamp
+                // (ADR 0005 — the matrix is an explicit snapshot, no background
+                // polling). Distinct from the top bar; sits directly above the
+                // matrix toolbar.
+                VerticalLayout {
+                    spacing: 2px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.app-title != "" ? root.app-title : "Drift matrix";
+                            color: root.dark ? white : #14161a;
+                            font-size: 16px; font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            accessible-role: text;
+                            accessible-label: "header-snapshot";
+                            text: root.snapshot-label != "" ? root.snapshot-label : "Not refreshed yet";
+                            color: #6b7280; font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        accessible-role: text;
+                        accessible-label: "header-arn";
+                        text: root.secret-arn != "" ? root.secret-arn : "—";
+                        color: #6b7280; font-size: 11px;
+                        overflow: elide;
+                    }
+                }
 
                 // Group-by-prefix toggle (default on).
                 HorizontalLayout {
@@ -537,77 +627,201 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+
+            // Bottom session/status bar (issue #23): identity, SSO session time
+            // remaining, a memory-only note, a manual-refresh / no-background-
+            // polling note (ADR 0005), and the Drift/Aligned/Gap legend WITH
+            // COUNTS. Counts come from Rust (derived from row states) — no Values.
+            Rectangle {
+                height: 28px;
+                background: root.dark ? #0e1115 : #e4e7eb;
+                border-radius: 4px;
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px;
+                    spacing: 12px;
+                    Text {
+                        accessible-role: text;
+                        accessible-label: "statusbar-identity";
+                        text: root.identity != "" ? root.identity : "memory-only session";
+                        color: root.identity != "" ? #c8ccd4 : #6b7280;
+                        font-size: 11px; vertical-alignment: center;
+                    }
+                    Text {
+                        accessible-role: text;
+                        accessible-label: "statusbar-session";
+                        text: "session: " + (root.session-remaining != "" ? root.session-remaining : "—");
+                        color: #6b7280; font-size: 11px; vertical-alignment: center;
+                    }
+                    Text {
+                        accessible-role: text;
+                        accessible-label: "statusbar-memory-note";
+                        text: "memory-only";
+                        color: #6b7280; font-size: 11px; vertical-alignment: center;
+                    }
+                    Text {
+                        accessible-role: text;
+                        accessible-label: "statusbar-refresh-note";
+                        text: "manual refresh · no background polling";
+                        color: #6b7280; font-size: 11px; vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    // Legend WITH COUNTS. Each entry: a state-coloured dot + the
+                    // "<State> <count>" text (the Text carries the count as its
+                    // implicit accessible-label, so view tests can assert it).
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Rectangle {
+                            min-width: 6px; max-width: 6px; height: 6px;
+                            border-radius: 3px; background: Palette.dot-color("Aligned");
+                            y: (parent.height - 6px) / 2;
+                        }
+                        Text {
+                            text: "Aligned " + root.aligned-count;
+                            color: #8a8f98; font-size: 11px; vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Rectangle {
+                            min-width: 6px; max-width: 6px; height: 6px;
+                            border-radius: 3px; background: Palette.dot-color("Drift");
+                            y: (parent.height - 6px) / 2;
+                        }
+                        Text {
+                            text: "Drift " + root.drift-count;
+                            color: #8a8f98; font-size: 11px; vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Rectangle {
+                            min-width: 6px; max-width: 6px; height: 6px;
+                            border-radius: 3px; background: Palette.dot-color("Gap");
+                            y: (parent.height - 6px) / 2;
+                        }
+                        Text {
+                            text: "Gap " + root.gap-count;
+                            color: #8a8f98; font-size: 11px; vertical-alignment: center;
+                        }
+                    }
+                }
+            }
         }
     }
 
+    // Settings (issue #23): a dimmed full-window backdrop holding a CENTERED,
+    // constrained-width card (~540px) — not the old full-bleed panel. The card
+    // scrolls if the controls overflow a short window. All controls are unchanged;
+    // only the chrome (centering, width cap, density) changed. No secret logic.
     if settings-open : Rectangle {
         width: 100%;
         height: 100%;
-        background: #0b0d11;
-        VerticalLayout {
-            padding: 24px;
-            spacing: 12px;
-            Text { text: "Settings"; color: white; font-size: 18px; }
-            Button { text: "Close"; clicked => { root.toggle-settings(); } }
+        // Click-catching dim backdrop; clicking outside the card closes settings.
+        background: #0b0d11d8;
+        TouchArea { clicked => { root.toggle-settings(); } }
 
-            Text { text: "Identity Center"; color: #8a8f98; }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "SSO start URL"; color: #c8ccd4; width: 120px; }
-                start-url := LineEdit { text <=> root.sso-start-url; horizontal-stretch: 1; }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Region"; color: #c8ccd4; width: 120px; }
-                region := LineEdit { text <=> root.sso-region; horizontal-stretch: 1; }
-            }
-            Button { text: "Save accounts"; clicked => { root.save-sso(); } }
+        settings-card := Rectangle {
+            // Bounded, centered card. Width is capped to a card; x/y center it in
+            // the backdrop (it is not in a layout, so centre explicitly).
+            accessible-role: text;
+            accessible-label: "settings-card";
+            width: min(540px, parent.width - 48px);
+            // Cap the height so the card never fills the whole window; the inner
+            // ScrollView handles overflow.
+            height: min(620px, parent.height - 48px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: root.dark ? #161a20 : #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: root.dark ? #23272f : #d8dce2;
+            // Swallow backdrop clicks landing on the card (don't close).
+            TouchArea {}
 
-            Text { text: "Applications"; color: #8a8f98; }
-            for app[i] in apps : HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: app.name + (app.selected ? "  (selected)" : "");
-                    color: app.selected ? #ffd479 : white;
-                    horizontal-stretch: 1;
-                }
-                Button { text: "Select"; clicked => { root.select-app(i); } }
-                Button { text: "Remove"; clicked => { root.remove-app(i); } }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
-                Button { text: "Add application"; clicked => { root.add-app(new-app.text); } }
-            }
-            Text {
-                text: "Add or remove Environments from each Application's Manage window.";
-                color: #6b7280;
-                font-size: 11px;
-            }
+            ScrollView {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
 
-            Text { text: "Preferences"; color: #8a8f98; }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Dark theme"; color: #c8ccd4; width: 120px; }
-                Switch { checked: root.dark; toggled => { root.set-theme(self.checked); } }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Sort"; color: #c8ccd4; width: 120px; }
-                ComboBox {
-                    model: ["Name", "Gap first"];
-                    current-index: 0;
-                    selected => { root.set-sort(self.current-index); }
-                }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Reveal seconds"; color: #c8ccd4; width: 120px; }
-                SpinBox {
-                    minimum: 1;
-                    maximum: 60;
-                    value <=> root.auto-hide-secs;
-                    edited => { root.set-auto-hide(self.value); }
+                    HorizontalLayout {
+                        Text {
+                            text: "Settings"; color: root.dark ? white : #14161a;
+                            font-size: 18px; font-weight: 700;
+                            horizontal-stretch: 1; vertical-alignment: center;
+                        }
+                        Button { text: "Close"; clicked => { root.toggle-settings(); } }
+                    }
+
+                    Text { text: "Identity Center"; color: #8a8f98; font-size: 12px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "SSO start URL"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
+                        start-url := LineEdit { text <=> root.sso-start-url; horizontal-stretch: 1; }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Region"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
+                        region := LineEdit { text <=> root.sso-region; horizontal-stretch: 1; }
+                    }
+                    HorizontalLayout {
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: "Save accounts"; clicked => { root.save-sso(); } }
+                    }
+
+                    Text { text: "Applications"; color: #8a8f98; font-size: 12px; font-weight: 700; }
+                    for app[i] in apps : HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: app.name + (app.selected ? "  (selected)" : "");
+                            color: app.selected ? #ffd479 : (root.dark ? white : #14161a);
+                            horizontal-stretch: 1; vertical-alignment: center;
+                        }
+                        Button { text: "Select"; clicked => { root.select-app(i); } }
+                        Button { text: "Remove"; clicked => { root.remove-app(i); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        new-app := LineEdit { placeholder-text: "New Application name"; horizontal-stretch: 1; }
+                        Button { text: "Add application"; clicked => { root.add-app(new-app.text); } }
+                    }
+                    Text {
+                        text: "Add or remove Environments from each Application's Manage window.";
+                        color: #6b7280;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+
+                    Text { text: "Preferences"; color: #8a8f98; font-size: 12px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Dark theme"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
+                        Switch {
+                            checked: root.dark;
+                            toggled => { root.set-theme(self.checked); }
+                            accessible-label: "settings-theme";
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Sort"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
+                        ComboBox {
+                            model: ["Name", "Gap first"];
+                            current-index: 0;
+                            selected => { root.set-sort(self.current-index); }
+                            accessible-label: "settings-sort";
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Reveal seconds"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
+                        SpinBox {
+                            minimum: 1;
+                            maximum: 60;
+                            value <=> root.auto-hide-secs;
+                            edited => { root.set-auto-hide(self.value); }
+                            accessible-label: "settings-reveal";
+                        }
+                    }
                 }
             }
         }
