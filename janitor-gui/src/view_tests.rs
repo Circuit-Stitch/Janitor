@@ -164,3 +164,58 @@ fn env_columns_align_and_band_fills_window() {
          the table stops filling the window (ADR 0020 regression)."
     );
 }
+
+// --- Issue #38: STATE is the leftmost frozen column (left of ENTRY), and the
+// ENTRY cell is one line — the status dot and the secondary state word are gone,
+// so the glyph in the STATE column is the row's only state carrier. ---
+
+#[test]
+fn state_column_is_frozen_left_of_entry() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = matrix_window();
+
+    // Header band: the STATE header sits left of the ENTRY header. Both live in
+    // the same band OUTSIDE the body ScrollView, so absolute x is reliable and
+    // directly comparable (no ScrollView chrome offset to factor out).
+    let state_hdr = one_by_label(&ui, "statehdr").absolute_position().x;
+    let entry_hdr = one_by_label(&ui, "entryhdr").absolute_position().x;
+    assert!(
+        state_hdr < entry_hdr,
+        "STATE header (x={state_hdr}) must be left of ENTRY header (x={entry_hdr})"
+    );
+
+    // Body: the frozen STATE glyph cell sits left of the ENTRY cell. Both are in
+    // one HorizontalLayout inside the ScrollView, so their relative order holds
+    // even though absolute x carries the (shared) ScrollView chrome offset.
+    let state_cell = one_by_label(&ui, "state-cell").absolute_position().x;
+    let entry_cell = one_by_label(&ui, "entry-cell").absolute_position().x;
+    assert!(
+        state_cell < entry_cell,
+        "STATE cell (x={state_cell}) must be left of ENTRY cell (x={entry_cell})"
+    );
+}
+
+#[test]
+fn entry_cell_is_single_line_with_no_state_word() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = matrix_window();
+
+    // The secondary state word ("Aligned"/"Drift"/"Gap") no longer renders in the
+    // ENTRY cell. A `Text` exposes its content as its implicit accessible-label,
+    // so the word being absent means zero elements carry it. (The fixture row's
+    // state is "Aligned"; the STATE glyph is "=", never the word.)
+    let state_word_hits = ElementHandle::find_by_accessible_label(&ui, "Aligned").count();
+    assert_eq!(
+        state_word_hits, 0,
+        "the secondary state word must be gone from the ENTRY cell (found {state_word_hits})"
+    );
+
+    // Row height is now single-line (name + symmetric padding ≈ 30px), well below
+    // the old two-line height (~49px). The ENTRY cell fills the row, so its height
+    // is the row height — `size()` is reliable headlessly (only offsets aren't).
+    let h = one_by_label(&ui, "entry-cell").size().height;
+    assert!(
+        (20.0..40.0).contains(&h),
+        "ENTRY cell height {h} is not single-line (expected ~30px; two-line was ~49px)"
+    );
+}

@@ -107,7 +107,9 @@ export component MainWindow inherits Window {
     property <length> name-fs: 14px;
     property <length> sub-fs: 11px;
     property <length> row-pad: 8px;
-    property <length> row-h: root.name-fs + root.sub-fs + 3 * root.row-pad;
+    // Single-line ENTRY cell (#38): one name line + symmetric vertical padding.
+    // State no longer adds a second line — it lives in the STATE glyph column.
+    property <length> row-h: root.name-fs + 2 * root.row-pad;
     property <length> header-h: root.sub-fs + 2 * root.row-pad;
     property <length> entry-w: 300px;
     property <length> state-w: 46px;
@@ -239,14 +241,16 @@ export component MainWindow inherits Window {
                 // horizontally in lockstep with the body (viewport-x bound below).
                 HorizontalLayout {
                     Text {
-                        text: "ENTRY"; color: #8a8f98; font-size: 11px;
-                        min-width: root.entry-w; max-width: root.entry-w;
-                        vertical-alignment: center;
-                    }
-                    Text {
                         text: "STATE"; color: #8a8f98; font-size: 11px;
                         min-width: root.state-w; max-width: root.state-w;
                         horizontal-alignment: center; vertical-alignment: center;
+                        accessible-label: "statehdr";
+                    }
+                    Text {
+                        text: "ENTRY"; color: #8a8f98; font-size: 11px;
+                        min-width: root.entry-w; max-width: root.entry-w;
+                        vertical-alignment: center;
+                        accessible-label: "entryhdr";
                     }
                     env-head := Flickable {
                         // Mirror the body's env region (horizontal-stretch +
@@ -303,19 +307,36 @@ export component MainWindow inherits Window {
                                     }
                                 }
                                 if !item.is-header : HorizontalLayout {
-                                    // ENTRY cell: dot + prefix.leaf + badge, state word.
+                                    // STATE glyph column — frozen leftmost, and the
+                                    // row's SOLE state carrier (#38): the coloured
+                                    // =/≠/∅ glyph. No dot or state word elsewhere.
+                                    Rectangle {
+                                        min-width: root.state-w; max-width: root.state-w;
+                                        accessible-role: text;
+                                        accessible-label: "state-cell";
+                                        Text {
+                                            text: item.glyph;
+                                            color: Palette.dot-color(item.state);
+                                            font-size: 16px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    // ENTRY cell — one line: muted prefix + bold leaf
+                                    // + type badge. Dot and state word removed (#38),
+                                    // so the row collapses to single-line height. The
+                                    // padding lives on a wrapping VerticalLayout, not
+                                    // on the inner HorizontalLayout — padding directly
+                                    // on a box layout holding `overflow: elide` Texts
+                                    // blanks them (Slint layout quirk).
                                     Rectangle {
                                         min-width: root.entry-w; max-width: root.entry-w;
+                                        accessible-role: text;
+                                        accessible-label: "entry-cell";
                                         VerticalLayout {
                                             padding: root.row-pad;
-                                            spacing: 3px;
                                             HorizontalLayout {
                                                 spacing: 6px;
-                                                Rectangle {
-                                                    min-width: 8px; max-width: 8px;
-                                                    height: 8px; border-radius: 4px;
-                                                    background: Palette.dot-color(item.state);
-                                                }
                                                 Text {
                                                     text: item.prefix; color: #6b7280;
                                                     font-size: root.name-fs; overflow: elide;
@@ -339,22 +360,6 @@ export component MainWindow inherits Window {
                                                 }
                                                 Rectangle { horizontal-stretch: 1; }
                                             }
-                                            Text {
-                                                text: item.state;
-                                                color: Palette.dot-color(item.state);
-                                                font-size: root.sub-fs;
-                                            }
-                                        }
-                                    }
-                                    // STATE glyph column.
-                                    Rectangle {
-                                        min-width: root.state-w; max-width: root.state-w;
-                                        Text {
-                                            text: item.glyph;
-                                            color: Palette.dot-color(item.state);
-                                            font-size: 16px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
                                         }
                                     }
                                 }
