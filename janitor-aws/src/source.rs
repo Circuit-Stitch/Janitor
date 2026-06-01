@@ -48,6 +48,14 @@ impl AuthenticatedSource {
         }
     }
 
+    /// The SSO token currently in use — *after* any internal re-Sign-in this
+    /// `fetch` may have performed. Lets `Session` run stale-role recovery
+    /// (ADR 0018) under the live token instead of the one it captured before the
+    /// fetch (which a re-Sign-in would have replaced).
+    pub fn current_token(&self) -> Arc<SsoToken> {
+        self.broker.token()
+    }
+
     /// Fetch and shape the Set for `mapping`, handling the two refreshes with
     /// at-most-once caps (ADR 0010 §4):
     ///

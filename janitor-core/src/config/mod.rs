@@ -68,6 +68,27 @@ impl Application {
             self.environments.remove(index);
         }
     }
+
+    /// Apply a recovered role (ADR 0018) to the Environment it was computed for,
+    /// updating ONLY `permission_set`. The target Environment is matched by full
+    /// identity — name **and** `account_id` **and** `secret_id` — so a same-named
+    /// Environment in a different Application (names are not unique) can never be
+    /// mis-corrected. Returns whether a matching Environment was found. A
+    /// location-only edit, never an account/secret retarget and never an append
+    /// (so it cannot create or stomp a Mapping).
+    pub fn apply_corrected_role(&mut self, corrected: &Mapping) -> bool {
+        match self.environments.iter_mut().find(|m| {
+            m.environment == corrected.environment
+                && m.account_id == corrected.account_id
+                && m.secret_id == corrected.secret_id
+        }) {
+            Some(m) => {
+                m.permission_set = corrected.permission_set.clone();
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Which concrete AWS Secret Set backs one Environment of an Application.
@@ -274,6 +295,46 @@ mod tests {
         };
         app.remove_environment(5);
         assert_eq!(app.environments.len(), 1);
+    }
+
+    #[test]
+    fn apply_corrected_role_updates_only_permission_set_of_the_identity_match() {
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod"), mapping("staging")],
+        };
+        let mut corrected = mapping("staging");
+        corrected.permission_set = "PowerUser".into();
+        assert!(app.apply_corrected_role(&corrected));
+        let staging = &app.environments[1];
+        assert_eq!(staging.permission_set, "PowerUser");
+        // Only permission_set moved; the other locations are untouched.
+        assert_eq!(staging.account_id, "111111111111");
+        assert_eq!(staging.region, "us-east-1");
+        assert_eq!(staging.secret_id, "myapp/staging");
+        // prod is untouched.
+        assert_eq!(app.environments[0].permission_set, "ReadOnly");
+    }
+
+    #[test]
+    fn apply_corrected_role_is_a_noop_when_account_or_secret_differs() {
+        // Same env NAME but a different account/secret (e.g. a same-named env in
+        // another Application's matrix) must NOT be corrected — identity guard.
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod")],
+        };
+        let mut wrong_account = mapping("prod");
+        wrong_account.account_id = "999999999999".into();
+        wrong_account.permission_set = "PowerUser".into();
+        assert!(!app.apply_corrected_role(&wrong_account));
+        assert_eq!(app.environments[0].permission_set, "ReadOnly");
+
+        let mut wrong_secret = mapping("prod");
+        wrong_secret.secret_id = "myapp/other".into();
+        wrong_secret.permission_set = "PowerUser".into();
+        assert!(!app.apply_corrected_role(&wrong_secret));
+        assert_eq!(app.environments[0].permission_set, "ReadOnly");
     }
 
     #[test]

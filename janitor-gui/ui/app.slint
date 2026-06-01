@@ -1,4 +1,4 @@
-import { ScrollView, LineEdit, Button, ComboBox, Switch, SpinBox } from "std-widgets.slint";
+import { ScrollView, LineEdit, Button, ComboBox, Switch, SpinBox, TextEdit } from "std-widgets.slint";
 
 export struct CellView {
     absent: bool,
@@ -93,6 +93,14 @@ export component MainWindow inherits Window {
     callback set-auto-hide(int);
     callback set-grouped(bool);
 
+    // Diagnostic Log (ADR 0017): the only diagnostic surface. `log-text` is the
+    // pre-rendered, level-filtered, error-safe stream (Rust polls the in-memory
+    // buffer into it). Collapsible; never touches stdout/stderr/disk.
+    in property <string> log-text;
+    in-out property <bool> log-open: false;
+    callback set-log-filter(int);   // 1=Error 2=Warn 3=Info (max verbosity shown)
+    callback clear-log();
+
     // --- Matrix table metrics: row height derives from font-size + padding (no
     // magic 48px); column widths drive the frozen/scroll split. ---
     property <length> name-fs: 14px;
@@ -184,13 +192,17 @@ export component MainWindow inherits Window {
             }
 
             if root.pane == "error" || (root.pane == "signing" && root.status-message != "") : Rectangle {
-                height: 28px;
+                height: 32px;
                 background: root.status == "error" ? #3a1d1d : #1d2a3a;
+                border-radius: 4px;
                 HorizontalLayout {
-                    padding: 6px;
+                    padding-left: 10px;
+                    padding-right: 10px;
                     Text {
                         text: root.status-message;
                         color: root.status == "error" ? #e0a3a3 : #a3c0e0;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
                         overflow: elide;
                     }
                 }
@@ -409,10 +421,53 @@ export component MainWindow inherits Window {
                     text: root.pane == "signin" ? "Sign in to load this Application's secrets."
                         : root.pane == "signing" ? "A browser tab has opened — complete sign-in there."
                         : root.pane == "loading" ? "Fetching secrets…"
+                        : root.status-message != "" ? "Could not load — " + root.status-message
                         : "Could not load. See the message above, then Sign in to retry.";
                     color: #6b7280;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            // Diagnostic Log (ADR 0017): collapsible; the only diagnostic
+            // surface. Read-only TextEdit → native select/copy; no clipboard dep.
+            Rectangle {
+                height: root.log-open ? 200px : 30px;
+                background: root.dark ? #0e1115 : #e4e7eb;
+                border-radius: 4px;
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Diagnostics";
+                            color: #8a8f98; font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        if root.log-open : ComboBox {
+                            // Ordered by value: Error(1) Warn(2) Info(3). Default
+                            // Info = show everything.
+                            model: ["Error", "Warn", "Info"];
+                            current-index: 2;
+                            selected => { root.set-log-filter(self.current-index + 1); }
+                        }
+                        if root.log-open : Button {
+                            text: "Clear";
+                            clicked => { root.clear-log(); }
+                        }
+                        Button {
+                            text: root.log-open ? "Hide ▾" : "Logs ▸";
+                            clicked => { root.log-open = !root.log-open; }
+                        }
+                    }
+                    if root.log-open : TextEdit {
+                        read-only: true;
+                        text: root.log-text;
+                        vertical-stretch: 1;
+                    }
                 }
             }
         }

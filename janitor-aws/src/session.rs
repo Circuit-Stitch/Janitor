@@ -43,6 +43,10 @@ impl From<&SessionError> for FetchFailReason {
         match e {
             SessionError::ReauthRequired => FetchFailReason::NeedsSignIn,
             SessionError::AccessDenied => FetchFailReason::AccessDenied,
+            // An un-recovered role denial surfaces as plain "access denied" — the
+            // recovery attempt (ADR 0018) is upstream in `Session::load`; by the
+            // time it becomes a `Failure`, recovery has already declined/failed.
+            SessionError::RoleNotEntitled { .. } => FetchFailReason::AccessDenied,
             SessionError::NotFound => FetchFailReason::NotFound,
             SessionError::Throttled => FetchFailReason::Throttled,
             SessionError::Unsupported => FetchFailReason::Unsupported,
@@ -51,19 +55,33 @@ impl From<&SessionError> for FetchFailReason {
     }
 }
 
+/// One Environment's failure within a whole-Application load: the Environment
+/// name, the classified `reason` (drives control flow + a fallback label), and
+/// the real, error-safe `detail` (AWS `code: message`; ADR 0017). `detail` is
+/// what the banner and Diagnostic Log show — never a Value/Credential/token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub environment: String,
+    pub reason: FetchFailReason,
+    pub detail: String,
+}
+
 /// A whole-Application load failure: at least one Environment failed, so no
 /// matrix is shown (spec Decision 8 — never a partial matrix, never a fake Gap).
-/// Each entry is `(environment_name, reason)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppError {
-    pub failures: Vec<(String, FetchFailReason)>,
+    pub failures: Vec<Failure>,
 }
 
 impl AppError {
     /// The synthetic "you must sign in first" error (no real Environment failed).
     pub fn needs_sign_in() -> Self {
         AppError {
-            failures: vec![("(sign-in)".to_string(), FetchFailReason::NeedsSignIn)],
+            failures: vec![Failure {
+                environment: "(sign-in)".to_string(),
+                reason: FetchFailReason::NeedsSignIn,
+                detail: "a fresh Sign-in is required".to_string(),
+            }],
         }
     }
 }
@@ -80,9 +98,96 @@ use crate::broker::CredentialBroker;
 use crate::discovery::{Discovery, Step};
 use crate::error::SignInError;
 use crate::secrets::SecretsClient;
+use crate::select::{plan_selection, SelectionPlan};
 use crate::source::{AuthenticatedSource, Reauth};
 use crate::types::{Clock, SsoToken};
 use crate::wire::{AccountCatalog, RoleCredentialClient, SecretsApi};
+
+/// A successful `Session::load`: the masked matrix plus any Mappings whose
+/// `permission_set` was auto-corrected this load (ADR 0018 stale-role recovery).
+/// `corrected` is empty on the common path; when non-empty the GUI persists those
+/// permission-set changes to Config (locations only).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Loaded {
+    pub view: MatrixView,
+    pub corrected: Vec<Mapping>,
+}
+
+/// The outcome of re-resolving an account's entitled roles during recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoleResolution {
+    /// Exactly one entitled role — the unambiguous correction (its permission-set
+    /// name). Recovery rewrites + retries only when this differs from the stored.
+    Single(String),
+    /// Two or more entitled roles — Janitor must never auto-pick (carry the count
+    /// for logging only).
+    Ambiguous(usize),
+    /// Zero entitled roles on the account.
+    None,
+    /// `list_account_roles` itself errored.
+    ListFailed,
+}
+
+/// Re-resolve which permission set the signed-in user is entitled to on
+/// `account_id`, reusing the live SSO token (no browser). Pure decision via the
+/// shared [`plan_selection`] with **no remembered default** — the stored role is
+/// the one that just got denied, so it must not bias the choice.
+async fn recover_role(
+    catalog: &dyn AccountCatalog,
+    token: &SsoToken,
+    account_id: &str,
+) -> RoleResolution {
+    let roles = match catalog.list_account_roles(token, account_id).await {
+        Ok(r) => r,
+        Err(_) => return RoleResolution::ListFailed,
+    };
+    match plan_selection(&roles, None) {
+        SelectionPlan::Empty => RoleResolution::None,
+        SelectionPlan::Auto(i) => RoleResolution::Single(roles[i].name.clone()),
+        SelectionPlan::Ask { .. } => RoleResolution::Ambiguous(roles.len()),
+    }
+}
+
+/// Build a `Failure` from an Environment's Mapping + the `SessionError` that
+/// failed it. `detail` is the error-safe `Display` (never a Value/Credential).
+fn fail(m: &Mapping, e: &SessionError) -> Failure {
+    Failure {
+        environment: m.environment.clone(),
+        reason: FetchFailReason::from(e),
+        detail: e.to_string(),
+    }
+}
+
+/// Log why a stale-role recovery declined (error-safe: only locations + counts).
+fn log_recovery_declined(m: &Mapping, resolution: &RoleResolution) {
+    match resolution {
+        RoleResolution::Ambiguous(n) => tracing::warn!(
+            target: "janitor::aws",
+            env = %m.environment,
+            account = %m.account_id,
+            count = *n,
+            "multiple entitled roles; not auto-selecting — surfacing access denied"
+        ),
+        RoleResolution::None => tracing::warn!(
+            target: "janitor::aws",
+            env = %m.environment,
+            account = %m.account_id,
+            "no entitled roles on this account"
+        ),
+        RoleResolution::ListFailed => tracing::warn!(
+            target: "janitor::aws",
+            env = %m.environment,
+            account = %m.account_id,
+            "could not list roles for recovery — keeping original denial"
+        ),
+        // Single-but-equal: the denial wasn't a stale-role problem.
+        RoleResolution::Single(_) => tracing::info!(
+            target: "janitor::aws",
+            env = %m.environment,
+            "stored role is the only entitled one; denial is not a stale-role problem"
+        ),
+    }
+}
 
 /// The GUI's authenticated session. Built from the same `Arc<dyn …>` seams as
 /// `live-verify`; signs in lazily and caches the current Application's fetched
@@ -213,19 +318,81 @@ impl Session {
     /// Load one Application: ensure signed in, fetch every Environment, and —
     /// if ANY Environment fails — return a whole-app error naming the failures
     /// (spec Decision 8). On full success, cache the Sets and return the masked
-    /// view. The Sets (plaintext) never leave `self.cached`.
-    pub async fn load(&mut self, app: &Application) -> Result<MatrixView, AppError> {
+    /// view plus any Mappings whose `permission_set` was auto-corrected this load.
+    /// The Sets (plaintext) never leave `self.cached`.
+    ///
+    /// **Stale-role recovery (ADR 0018):** if an Environment's fetch fails with
+    /// [`SessionError::RoleNotEntitled`] (the stored permission set is no longer
+    /// assigned), re-resolve the account's entitled roles from the *live* session
+    /// (no browser) and, **only** when exactly one role is entitled and it differs
+    /// from the stored one, rewrite that Mapping's `permission_set` and retry the
+    /// fetch **once**. Zero / many / same-as-stored roles, or a re-list error, keep
+    /// the original denial. At most one list + one retry per Environment — never a
+    /// loop, never an auto-pick among several roles.
+    pub async fn load(&mut self, app: &Application) -> Result<Loaded, AppError> {
         self.sign_in()
             .await
             .map_err(|_| AppError::needs_sign_in())?;
+        // Arc clone for recovery's `list_account_roles`, taken before the `&mut
+        // self.facade` borrow below so it doesn't conflict (disjoint handle). The
+        // recovery *token* is read from the facade at recovery time — see below —
+        // not captured here, so it reflects any re-Sign-in the fetch performed.
+        let catalog = Arc::clone(&self.catalog);
         let facade = self.facade.as_mut().expect("facade exists after sign_in");
 
         let mut sets: Vec<(String, SecretShape)> = Vec::new();
-        let mut failures: Vec<(String, FetchFailReason)> = Vec::new();
+        let mut failures: Vec<Failure> = Vec::new();
+        let mut corrected: Vec<Mapping> = Vec::new();
         for m in &app.environments {
             match facade.fetch(m).await {
                 Ok(shape) => sets.push((m.environment.clone(), shape)),
-                Err(e) => failures.push((m.environment.clone(), FetchFailReason::from(&e))),
+                Err(SessionError::RoleNotEntitled { context }) => {
+                    tracing::info!(
+                        target: "janitor::aws",
+                        env = %m.environment,
+                        account = %m.account_id,
+                        "role not entitled — attempting auto-correct"
+                    );
+                    // Re-list under the facade's LIVE token (post any re-Sign-in
+                    // this fetch did), not a token captured before the fetch.
+                    let token = facade.current_token();
+                    match recover_role(catalog.as_ref(), &token, &m.account_id).await {
+                        // Exactly one entitled role, different from the stored one:
+                        // the unambiguous correction. Rewrite + retry ONCE.
+                        RoleResolution::Single(new_ps) if new_ps != m.permission_set => {
+                            tracing::info!(
+                                target: "janitor::aws",
+                                env = %m.environment,
+                                from = %m.permission_set,
+                                to = %new_ps,
+                                "auto-corrected permission set"
+                            );
+                            let patched = Mapping {
+                                permission_set: new_ps,
+                                ..m.clone()
+                            };
+                            match facade.fetch(&patched).await {
+                                Ok(shape) => {
+                                    sets.push((m.environment.clone(), shape));
+                                    corrected.push(patched);
+                                }
+                                // Retry failed — final, NEVER a second recovery.
+                                Err(e2) => failures.push(fail(m, &e2)),
+                            }
+                        }
+                        // Zero / many / same-as-stored / re-list error: decline and
+                        // keep the original denial (surfaces as "access denied").
+                        resolution => {
+                            log_recovery_declined(m, &resolution);
+                            failures.push(Failure {
+                                environment: m.environment.clone(),
+                                reason: FetchFailReason::AccessDenied,
+                                detail: context,
+                            });
+                        }
+                    }
+                }
+                Err(e) => failures.push(fail(m, &e)),
             }
         }
         if !failures.is_empty() {
@@ -233,7 +400,7 @@ impl Session {
         }
         let view = project(&Comparison::build(&sets));
         self.cached = sets;
-        Ok(view)
+        Ok(Loaded { view, corrected })
     }
 
     /// Momentary reveal of one cell's plaintext from the cached Sets, returned
@@ -299,6 +466,13 @@ mod tests {
             FetchFailReason::from(&SessionError::AccessDenied),
             FetchFailReason::AccessDenied
         );
+        // An un-recovered role denial surfaces as plain "access denied".
+        assert_eq!(
+            FetchFailReason::from(&SessionError::RoleNotEntitled {
+                context: "Forbidden".into()
+            }),
+            FetchFailReason::AccessDenied
+        );
         assert_eq!(
             FetchFailReason::from(&SessionError::NotFound),
             FetchFailReason::NotFound
@@ -333,7 +507,7 @@ mod tests {
     fn needs_sign_in_names_a_synthetic_environment() {
         let e = AppError::needs_sign_in();
         assert_eq!(e.failures.len(), 1);
-        assert_eq!(e.failures[0].1, FetchFailReason::NeedsSignIn);
+        assert_eq!(e.failures[0].reason, FetchFailReason::NeedsSignIn);
     }
 
     #[tokio::test]
@@ -365,7 +539,9 @@ mod tests {
                 mapping("staging", "app/staging"),
             ],
         };
-        let view = s.load(&app).await.unwrap();
+        let loaded = s.load(&app).await.unwrap();
+        assert!(loaded.corrected.is_empty(), "no recovery on the happy path");
+        let view = loaded.view;
         assert_eq!(view.environments, vec!["prod", "staging"]);
         let b = view.rows.iter().find(|r| r.name == "B").unwrap();
         assert_eq!(b.state, EntryState::Gap);
@@ -392,8 +568,8 @@ mod tests {
         };
         let err = s.load(&app).await.unwrap_err();
         assert_eq!(err.failures.len(), 1);
-        assert_eq!(err.failures[0].0, "staging");
-        assert_eq!(err.failures[0].1, FetchFailReason::AccessDenied);
+        assert_eq!(err.failures[0].environment, "staging");
+        assert_eq!(err.failures[0].reason, FetchFailReason::AccessDenied);
     }
 
     #[tokio::test]
@@ -407,7 +583,289 @@ mod tests {
             environments: vec![mapping("prod", "a/prod")],
         };
         let err = s.load(&app).await.unwrap_err();
-        assert_eq!(err.failures[0].1, FetchFailReason::NeedsSignIn);
+        assert_eq!(err.failures[0].reason, FetchFailReason::NeedsSignIn);
+    }
+
+    // ---- Stale-role recovery (ADR 0018) ----
+
+    fn role_not_entitled() -> Result<CredSpec, SessionError> {
+        Err(SessionError::RoleNotEntitled {
+            context: "ForbiddenException: No access".into(),
+        })
+    }
+    fn roles(names: &[&str]) -> Result<Vec<RoleSummary>, SessionError> {
+        Ok(names
+            .iter()
+            .map(|n| RoleSummary { name: (*n).into() })
+            .collect())
+    }
+    fn one_env(secret_id: &str) -> Application {
+        Application {
+            name: "app".into(),
+            environments: vec![mapping("prod", secret_id)],
+        }
+    }
+
+    #[tokio::test]
+    async fn single_role_auto_corrects_retries_and_persists_corrected_mapping() {
+        // Stored ReadOnly is denied; the account has exactly one entitled role
+        // (PowerUser) → silent rewrite + one retry → success, no second sign-in.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![role_not_entitled(), cred_ok()]));
+        let api = Arc::new(FakeSecretsApi::new(vec![secret_json(r#"{"A":"1"}"#)]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["PowerUser"])]));
+        let mut s = Session::new(
+            reauth.clone(),
+            role.clone(),
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let loaded = s.load(&one_env("app/prod")).await.unwrap();
+
+        assert_eq!(loaded.view.environments, vec!["prod"]);
+        assert_eq!(loaded.corrected.len(), 1);
+        let c = &loaded.corrected[0];
+        assert_eq!(c.environment, "prod");
+        assert_eq!(c.permission_set, "PowerUser", "role rewritten");
+        assert_eq!(c.account_id, "111111111111", "ONLY permission_set changed");
+        assert_eq!(c.secret_id, "app/prod");
+        assert_eq!(catalog.role_call_count(), 1, "exactly one re-list");
+        assert_eq!(role.call_count(), 2, "denied mint + corrected mint");
+        assert_eq!(
+            reauth.count(),
+            1,
+            "recovery reuses the session token — no 2nd sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_roles_keeps_failure_and_never_auto_picks() {
+        // Two entitled roles → Janitor must NOT pick. Keep the denial, no retry.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![role_not_entitled()]));
+        let api = Arc::new(FakeSecretsApi::new(vec![]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["A", "B"])]));
+        let mut s = Session::new(
+            reauth,
+            role.clone(),
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let err = s.load(&one_env("app/prod")).await.unwrap_err();
+
+        assert_eq!(err.failures[0].reason, FetchFailReason::AccessDenied);
+        assert_eq!(
+            err.failures[0].detail, "ForbiddenException: No access",
+            "keeps the real denial detail"
+        );
+        assert_eq!(role.call_count(), 1, "no retry mint proves no silent pick");
+        assert_eq!(catalog.role_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_entitled_roles_keeps_failure() {
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![role_not_entitled()]));
+        let api = Arc::new(FakeSecretsApi::new(vec![]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&[])]));
+        let mut s = Session::new(
+            reauth,
+            role.clone(),
+            api,
+            catalog,
+            Arc::new(FakeClock::at(0)),
+        );
+        let err = s.load(&one_env("app/prod")).await.unwrap_err();
+        assert_eq!(err.failures[0].reason, FetchFailReason::AccessDenied);
+        assert_eq!(role.call_count(), 1, "no retry");
+    }
+
+    #[tokio::test]
+    async fn single_role_equal_to_stored_is_a_noop() {
+        // The one entitled role IS the stored one → the denial wasn't a stale-role
+        // problem; no pointless rewrite/retry that would just fail again.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![role_not_entitled()]));
+        let api = Arc::new(FakeSecretsApi::new(vec![]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["ReadOnly"])]));
+        let mut s = Session::new(
+            reauth,
+            role.clone(),
+            api,
+            catalog,
+            Arc::new(FakeClock::at(0)),
+        );
+        let err = s.load(&one_env("app/prod")).await.unwrap_err();
+        assert_eq!(err.failures[0].reason, FetchFailReason::AccessDenied);
+        assert_eq!(
+            role.call_count(),
+            1,
+            "no retry for a same-role 'correction'"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_retry_failure_surfaces_and_never_recovers_again() {
+        // Stored denied → re-resolve to PowerUser → retry ALSO denied → final.
+        // Crucially: NO second re-list (no recovery loop).
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![
+            role_not_entitled(),
+            role_not_entitled(),
+        ]));
+        let api = Arc::new(FakeSecretsApi::new(vec![]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["PowerUser"])]));
+        let mut s = Session::new(
+            reauth,
+            role.clone(),
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let err = s.load(&one_env("app/prod")).await.unwrap_err();
+        assert_eq!(err.failures[0].reason, FetchFailReason::AccessDenied);
+        assert_eq!(role.call_count(), 2, "denied + one retry, no more");
+        assert_eq!(
+            catalog.role_call_count(),
+            1,
+            "at-most-once: no second re-list"
+        );
+    }
+
+    #[tokio::test]
+    async fn reauth_at_role_step_does_not_trigger_recovery() {
+        // A dead token (ReauthRequired) is handled by the facade's re-sign-in tier,
+        // NOT by role recovery — list_account_roles is never called.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![
+            Err(SessionError::ReauthRequired),
+            cred_ok(),
+        ]));
+        let api = Arc::new(FakeSecretsApi::new(vec![secret_json(r#"{"A":"1"}"#)]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![]));
+        let mut s = Session::new(
+            reauth.clone(),
+            role,
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let loaded = s.load(&one_env("app/prod")).await.unwrap();
+        assert!(loaded.corrected.is_empty());
+        assert_eq!(
+            catalog.role_call_count(),
+            0,
+            "recovery never entered for a dead token"
+        );
+        assert_eq!(reauth.count(), 2, "load sign-in + facade re-sign-in");
+    }
+
+    #[tokio::test]
+    async fn list_roles_error_during_recovery_keeps_original_failure() {
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![role_not_entitled()]));
+        let api = Arc::new(FakeSecretsApi::new(vec![]));
+        let catalog = Arc::new(FakeAccountCatalog::new(
+            vec![],
+            vec![Err(SessionError::Throttled)],
+        ));
+        let mut s = Session::new(
+            reauth,
+            role.clone(),
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let err = s.load(&one_env("app/prod")).await.unwrap_err();
+        assert_eq!(err.failures[0].reason, FetchFailReason::AccessDenied);
+        assert_eq!(
+            role.call_count(),
+            1,
+            "no retry when the re-list itself fails"
+        );
+        assert_eq!(catalog.role_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_env_only_the_failing_env_recovers() {
+        // env A (acct 111) is denied + recovers; env B (acct 222) loads normally.
+        let reauth = Arc::new(FakeReauth::ok());
+        // A: denied mint, then PowerUser mint; B: ReadOnly mint.
+        let role = Arc::new(FakeRoleClient::new(vec![
+            role_not_entitled(),
+            cred_ok(),
+            cred_ok(),
+        ]));
+        let api = Arc::new(FakeSecretsApi::new(vec![
+            secret_json(r#"{"A":"1"}"#),
+            secret_json(r#"{"A":"1"}"#),
+        ]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["PowerUser"])]));
+        let mut s = Session::new(
+            reauth,
+            role,
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let m_a = Mapping {
+            environment: "prod".into(),
+            account_id: "111".into(),
+            region: "us-east-1".into(),
+            secret_id: "app/prod".into(),
+            permission_set: "ReadOnly".into(),
+        };
+        let m_b = Mapping {
+            account_id: "222".into(),
+            environment: "staging".into(),
+            ..m_a.clone()
+        };
+        let app = Application {
+            name: "app".into(),
+            environments: vec![m_a, m_b],
+        };
+        let loaded = s.load(&app).await.unwrap();
+        assert_eq!(loaded.view.environments, vec!["prod", "staging"]);
+        assert_eq!(
+            loaded.corrected.len(),
+            1,
+            "only the failing env was corrected"
+        );
+        assert_eq!(loaded.corrected[0].environment, "prod");
+        assert_eq!(loaded.corrected[0].permission_set, "PowerUser");
+        assert_eq!(catalog.role_call_count(), 1, "only one env needed recovery");
+    }
+
+    #[tokio::test]
+    async fn recovery_after_a_resign_in_uses_the_live_token() {
+        // A dead token then a de-assigned role in ONE fetch: the facade re-signs-in
+        // (fresh token), the retry mint returns RoleNotEntitled, and recovery must
+        // re-list under the facade's LIVE token (current_token), not the one
+        // captured before the fetch — and still succeed. (The fakes ignore the
+        // token value, so this guards the control flow / accessor wiring.)
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![
+            Err(SessionError::ReauthRequired), // dead token
+            role_not_entitled(),               // post-re-sign-in: role de-assigned
+            cred_ok(),                         // corrected role mints
+        ]));
+        let api = Arc::new(FakeSecretsApi::new(vec![secret_json(r#"{"A":"1"}"#)]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["PowerUser"])]));
+        let mut s = Session::new(
+            reauth.clone(),
+            role.clone(),
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let loaded = s.load(&one_env("app/prod")).await.unwrap();
+        assert_eq!(loaded.corrected.len(), 1);
+        assert_eq!(loaded.corrected[0].permission_set, "PowerUser");
+        assert_eq!(reauth.count(), 2, "initial sign-in + one re-sign-in");
+        assert_eq!(catalog.role_call_count(), 1, "recovery re-listed once");
+        assert_eq!(role.call_count(), 3, "dead + de-assigned + corrected mint");
     }
 
     #[tokio::test]

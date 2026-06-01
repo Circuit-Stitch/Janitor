@@ -45,7 +45,15 @@ pub enum Event {
     SignedIn,
     SignInFailed(String),
     AppLoading,
-    AppLoaded(MatrixView),
+    /// A load succeeded. `corrected` carries any Mappings whose `permission_set`
+    /// was auto-corrected this load (ADR 0018 stale-role recovery) — empty on the
+    /// common path; the GUI persists them to Config. `app_name` guards the fold
+    /// against a mid-load sidebar switch (only apply to the app it was loaded for).
+    AppLoaded {
+        view: MatrixView,
+        corrected: Vec<Mapping>,
+        app_name: String,
+    },
     AppFailed(AppError),
     Revealed {
         row: usize,
@@ -154,17 +162,51 @@ async fn run_loop(
         match cmd {
             Command::Shutdown => break,
             Command::SignIn => {
+                tracing::info!(target: "janitor::gui", "Sign-in requested");
                 on_event(Event::SignInStarted);
                 match session.sign_in().await {
-                    Ok(()) => on_event(Event::SignedIn),
-                    Err(e) => on_event(Event::SignInFailed(e.to_string())),
+                    Ok(()) => {
+                        tracing::info!(target: "janitor::gui", "Signed in");
+                        on_event(Event::SignedIn);
+                    }
+                    Err(e) => {
+                        // SignInError Display is error-safe (static phrases /
+                        // scrubbed Sdk label) — never secret material.
+                        tracing::warn!(target: "janitor::gui", "Sign-in failed — {e}");
+                        on_event(Event::SignInFailed(e.to_string()));
+                    }
                 }
             }
             Command::LoadApp(app) => {
+                tracing::info!(target: "janitor::gui", app = %app.name, "Loading Application");
                 on_event(Event::AppLoading);
                 match session.load(&app).await {
-                    Ok(view) => on_event(Event::AppLoaded(view)),
-                    Err(e) => on_event(Event::AppFailed(e)),
+                    Ok(loaded) => {
+                        tracing::info!(
+                            target: "janitor::gui",
+                            app = %app.name,
+                            entries = loaded.view.rows.len(),
+                            corrected = loaded.corrected.len(),
+                            "Loaded Application"
+                        );
+                        on_event(Event::AppLoaded {
+                            view: loaded.view,
+                            corrected: loaded.corrected,
+                            app_name: app.name.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        for f in &e.failures {
+                            tracing::warn!(
+                                target: "janitor::gui",
+                                app = %app.name,
+                                env = %f.environment,
+                                "Load failed — {}",
+                                f.detail
+                            );
+                        }
+                        on_event(Event::AppFailed(e));
+                    }
                 }
             }
             Command::Reveal { row, col, key } => match session.reveal(&key, col) {

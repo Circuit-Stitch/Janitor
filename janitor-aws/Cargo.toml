@@ -13,6 +13,7 @@ aws-sdk-ssooidc = "1"
 aws-sdk-sso = "1"
 aws-sdk-secretsmanager = "1"
 aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
 secrecy = "0.10"
 zeroize = "1"
 thiserror = "2"
@@ -21,6 +22,7 @@ base64 = "0.22"
 rand = "0.8"
 open = "5"
 async-trait = "0.1"
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }

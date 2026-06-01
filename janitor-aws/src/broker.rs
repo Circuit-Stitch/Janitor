@@ -45,6 +45,14 @@ impl CredentialBroker {
         format!("{}|{}|{}", m.account_id, m.permission_set, m.region)
     }
 
+    /// The SSO token this broker currently holds. After the facade re-Signs-in it
+    /// rebuilds the broker on a fresh token, so this is the *live* token — used by
+    /// `Session` to re-list roles for stale-role recovery (ADR 0018) rather than a
+    /// token captured before the fetch.
+    pub fn token(&self) -> Arc<SsoToken> {
+        Arc::clone(&self.token)
+    }
+
     /// Return a currently-valid Credential for `mapping`, minting or re-minting
     /// via `GetRoleCredentials` when the cache is empty or the cached Credential
     /// is within `REFRESH_SKEW` of expiry. `&self`: the cache is interior.
