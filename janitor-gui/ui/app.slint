@@ -258,15 +258,20 @@ export component MainWindow inherits Window {
                         // common left origin in both bands.
                         horizontal-stretch: 1;
                         interactive: false;
+                        // Structural anchor for the view-test harness (ADR 0021),
+                        // position-only — a Flickable needs a role to carry a label.
+                        accessible-role: text;
+                        accessible-label: "envhead-band";
                         viewport-x: env-body.viewport-x;
                         viewport-width: root.envs-w;
                         viewport-height: self.height;
                         HorizontalLayout {
                             alignment: start;
-                            for env in environments : Text {
+                            for env[j] in environments : Text {
                                 text: env; color: #c8ccd4; font-size: 11px;
                                 min-width: root.env-w; max-width: root.env-w;
                                 vertical-alignment: center;
+                                accessible-label: "envhead-" + j;
                             }
                         }
                     }
@@ -376,6 +381,10 @@ export component MainWindow inherits Window {
                                         alignment: start;
                                         for cell[j] in item.cells : Rectangle {
                                             min-width: root.env-w; max-width: root.env-w;
+                                            // Structural test anchor (ADR 0021),
+                                            // position-only — never the Value.
+                                            accessible-role: text;
+                                            accessible-label: "envcell-" + j;
                                             property <bool> is-revealed:
                                                 root.revealed-row == item.row-index
                                                 && root.revealed-col == j;
