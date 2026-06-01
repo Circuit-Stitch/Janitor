@@ -1,0 +1,19 @@
+# Codecov is display-only for this repo — the ≥80% gates are enforced in CI by
+# `cargo llvm-cov --fail-under-lines` (ADR 0016). Turn off Codecov's own status
+# checks and PR comments so it can never become a second, externally-hosted gate.
+coverage:
+  status:
+    project: false
+    patch: false
+
+comment: false
+
+# Two per-crate flags back the two README badges. Paths scope each flag to its
+# crate; janitor-gui is intentionally absent (no badge, no coverage — ADR 0003).
+flags:
+  core:
+    paths:
+      - janitor-core/
+  aws:
+    paths:
+      - janitor-aws/

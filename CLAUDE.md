@@ -93,7 +93,8 @@ cargo test -p janitor-core <name> # a single core test (substring match)
 cargo test -- --nocapture         # show test stdout/stderr
 cargo clippy --all-targets        # lint
 cargo fmt                         # format
-cargo llvm-cov -p janitor-core    # coverage (≥80% gate, core only)
+cargo llvm-cov -p janitor-core    # core coverage (≥80% gate)
+cargo llvm-cov -p janitor-aws --ignore-filename-regex 'src/bin/'  # aws lib coverage (≥80% gate, ADR 0016)
 cargo run -p janitor-gui          # real AWS via the worker bridge (browser sign-in; needs a configured org)
 $env:JANITOR_MOCK=1; cargo run -p janitor-gui   # offline mock — Windows PowerShell
 JANITOR_MOCK=1 cargo run -p janitor-gui         # offline mock — bash

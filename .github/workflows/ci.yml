@@ -50,9 +50,33 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      # janitor-aws is exercised by `cargo test --workspace` above but is NOT
-      # line-gated: its browser / loopback / SDK shell is untestable by design
-      # (ADR 0010 §5), so a blanket gate would fail on those shell lines. The
-      # tested logic is proven by its unit tests; the 80% line gate stays on core.
-      - name: Test with coverage (janitor-core ≥80% lines)
-        run: cargo llvm-cov --package janitor-core --all-features --fail-under-lines 80
+      # Per-crate coverage gates, enforced here (not by Codecov) so build
+      # pass/fail stays inside this workflow — ADR 0016. Each run gates ≥80% and
+      # emits an lcov for the badge. janitor-gui is excluded (thin view, no
+      # secret logic — ADR 0003). janitor-aws is gated on its *library* surface:
+      # `src/bin/` holds the run-on-demand harnesses (live-verify, loopback-spike,
+      # 0% by design), so they're dropped; the untestable SDK shell stays in.
+      - name: Coverage — janitor-core (≥80% lines)
+        run: cargo llvm-cov --package janitor-core --all-features --fail-under-lines 80 --lcov --output-path lcov-core.info
+
+      - name: Coverage — janitor-aws library (≥80% lines)
+        run: cargo llvm-cov --package janitor-aws --all-features --ignore-filename-regex 'src/bin/' --fail-under-lines 80 --lcov --output-path lcov-aws.info
+
+      # Display-only upload (ADR 0016): renders the two README badges. A missing
+      # token or Codecov outage leaves badges stale but never fails the build —
+      # the gates above already passed. Per-crate flags keep the badges distinct.
+      - name: Upload janitor-core coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-core.info
+          flags: core
+          fail_ci_if_error: false
+
+      - name: Upload janitor-aws coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-aws.info
+          flags: aws
+          fail_ci_if_error: false

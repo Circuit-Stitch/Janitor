@@ -1,6 +1,8 @@
 # Janitor
 
 [![CI](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml)
+[![core coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=core&label=core%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
+[![aws coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=aws&label=aws%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 
 > An ephemeral desktop client onto **AWS Secrets Manager**. It stores no secrets
 > and no credentials of its own — it borrows them on demand and forgets them.
