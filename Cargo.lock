@@ -3275,6 +3275,7 @@ version = "0.1.0"
 dependencies = [
  "janitor-aws",
  "janitor-core",
+ "janitor-mock",
  "slint",
  "slint-build",
  "tokio",

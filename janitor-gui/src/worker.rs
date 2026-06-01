@@ -1,7 +1,9 @@
-//! The GUI's async bridge: a worker thread owns a Tokio current-thread runtime
-//! and the `janitor_aws::Session`. The UI sends `Command`s; the worker runs the
-//! async Session calls and posts `Event`s back onto the Slint event loop. This
-//! is untested I/O shell (ADR 0010 §5); all real logic lives in `Session`.
+//! The GUI's async bridge (ADR 0019): a worker thread owns a Tokio current-thread
+//! runtime and drives a `&mut dyn Provider` (built by [`build_provider`] from the
+//! chosen [`ProviderKind`]) — one async path for AWS and the offline mock alike.
+//! The UI sends `Command`s; the worker runs the async Provider calls and posts
+//! `Event`s back onto the Slint event loop. This is untested I/O shell
+//! (ADR 0010 §5); all real logic lives in the `Provider` impls.
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
@@ -80,13 +82,27 @@ pub enum Event {
     DiscoveryReauthRequired,
 }
 
+/// Which [`Provider`] the GUI runs against. The composition root (`main`) picks
+/// this from `JANITOR_MOCK`/`--mock` — its one mock-vs-real decision (ADR 0019).
+/// A future Provider adds one arm here and in [`build_provider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Aws,
+    Mock,
+}
+
 /// Spawn the worker. `on_event` is invoked (on the UI thread, via the caller's
 /// marshalling) for each emitted Event. Returns the command Sender.
 ///
-/// `config` supplies the org locations (`sso_start_url` as the issuer URL,
-/// `sso_region` for the SDK clients). Adapters are built once at startup; the
+/// `kind` selects the Provider; `config` supplies the org locations
+/// (`sso_start_url` as the issuer URL, `sso_region` for the SDK clients). The
+/// Provider is built once at startup inside the worker runtime; for AWS the
 /// browser Sign-in is deferred to the first `SignIn`/`LoadApp` (lazy).
-pub fn spawn(config: Config, on_event: impl Fn(Event) + Send + 'static) -> Sender<Command> {
+pub fn spawn(
+    kind: ProviderKind,
+    config: Config,
+    on_event: impl Fn(Event) + Send + 'static,
+) -> Sender<Command> {
     let (tx, rx) = std::sync::mpsc::channel::<Command>();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -94,11 +110,21 @@ pub fn spawn(config: Config, on_event: impl Fn(Event) + Send + 'static) -> Sende
             .build()
             .expect("build worker runtime");
         rt.block_on(async move {
-            let mut session = build_session(&config).await;
-            run_loop(rx, &mut session, &on_event).await;
+            let mut provider = build_provider(kind, &config).await;
+            run_loop(rx, provider.as_mut(), &on_event).await;
         });
     });
     tx
+}
+
+/// Build the chosen Provider **inside the worker runtime** (ADR 0019): AWS adapter
+/// construction is async, so it must happen here; the mock builds trivially. The
+/// boxed `dyn Provider` lets `run_loop` drive one async path for every Provider.
+async fn build_provider(kind: ProviderKind, config: &Config) -> Box<dyn Provider> {
+    match kind {
+        ProviderKind::Aws => Box::new(build_session(config).await),
+        ProviderKind::Mock => Box::new(janitor_mock::MockProvider::new()),
+    }
 }
 
 /// Build the real adapters (no ambient credentials — ADR 0010 §10) and the
@@ -154,7 +180,7 @@ fn discovery_event(step: Step) -> Event {
 
 async fn run_loop(
     rx: Receiver<Command>,
-    session: &mut Session,
+    provider: &mut dyn Provider,
     on_event: &(impl Fn(Event) + Send + 'static),
 ) {
     // `recv()` is blocking; that is fine on the worker's own thread.
@@ -164,7 +190,7 @@ async fn run_loop(
             Command::SignIn => {
                 tracing::info!(target: "janitor::gui", "Sign-in requested");
                 on_event(Event::SignInStarted);
-                match session.sign_in().await {
+                match provider.sign_in().await {
                     Ok(()) => {
                         tracing::info!(target: "janitor::gui", "Signed in");
                         on_event(Event::SignedIn);
@@ -180,7 +206,7 @@ async fn run_loop(
             Command::LoadApp(app) => {
                 tracing::info!(target: "janitor::gui", app = %app.name, "Loading Application");
                 on_event(Event::AppLoading);
-                match session.load(&app).await {
+                match provider.load(&app).await {
                     Ok(loaded) => {
                         tracing::info!(
                             target: "janitor::gui",
@@ -209,7 +235,7 @@ async fn run_loop(
                     }
                 }
             }
-            Command::Reveal { row, col, key } => match session.reveal(&key, col) {
+            Command::Reveal { row, col, key } => match provider.reveal(&key, col) {
                 Some(text) => on_event(Event::Revealed { row, col, text }),
                 None => on_event(Event::RevealUnavailable),
             },
@@ -217,7 +243,7 @@ async fn run_loop(
                 environment,
                 region,
                 remembered,
-            } => match session
+            } => match provider
                 .begin_discovery(environment, region, remembered)
                 .await
             {
@@ -227,7 +253,7 @@ async fn run_loop(
                 Err(_) => on_event(Event::DiscoveryReauthRequired),
             },
             Command::AdvanceDiscovery { choice } => {
-                if let Some(step) = session.advance_discovery(choice).await {
+                if let Some(step) = provider.advance_discovery(choice).await {
                     on_event(discovery_event(step));
                 }
             }
@@ -238,6 +264,106 @@ async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn run_loop_drives_a_provider_signing_in_through_the_port() {
+        // The single async path (ADR 0019): the worker drives `&mut dyn Provider`,
+        // not a concrete Session. SignIn surfaces SignInStarted then SignedIn for
+        // any Provider — here the offline MockProvider, whose sign_in is instant.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::SignIn).unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut provider = janitor_mock::MockProvider::new();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(events.as_slice(), [Event::SignInStarted, Event::SignedIn]),
+            "SignIn must surface SignInStarted then SignedIn through the port"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_loop_loads_an_application_into_a_projected_matrix() {
+        use janitor_core::compare::EntryState;
+        // LoadApp surfaces AppLoading then AppLoaded with the projected
+        // Aligned/Drift/Gap matrix, driven entirely through the port.
+        let payments = janitor_mock::seeded_config().applications[0].clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::LoadApp(payments)).unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut provider = janitor_mock::MockProvider::new();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        let events = events.lock().unwrap();
+        let [Event::AppLoading, Event::AppLoaded {
+            view,
+            corrected,
+            app_name,
+        }] = events.as_slice()
+        else {
+            panic!("LoadApp must surface AppLoading then AppLoaded");
+        };
+        assert_eq!(app_name, "Payments API");
+        assert!(corrected.is_empty(), "the mock never auto-corrects");
+        assert_eq!(view.environments, vec!["prod", "staging"]);
+        let state = |name: &str| view.rows.iter().find(|r| r.name == name).map(|r| r.state);
+        assert_eq!(state("GITHUB_APP_ID"), Some(EntryState::Aligned));
+        assert_eq!(state("STRIPE_API_KEY"), Some(EntryState::Drift));
+        assert_eq!(state("database.replica.url"), Some(EntryState::Gap));
+    }
+
+    #[tokio::test]
+    async fn run_loop_reveal_round_trips_plaintext_through_the_port() {
+        use janitor_core::secret::EntryName;
+        // The one explicit on-demand plaintext crossing (ADR 0003): after a load,
+        // Reveal asks the Provider for the cached Value and relays it as Revealed.
+        let payments = janitor_mock::seeded_config().applications[0].clone();
+        let key = RowKey::Entry(EntryName::from_path(&["STRIPE_API_KEY".to_string()]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::LoadApp(payments)).unwrap();
+        tx.send(Command::Reveal {
+            row: 0,
+            col: 0,
+            key,
+        })
+        .unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut provider = janitor_mock::MockProvider::new();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        let revealed = events.lock().unwrap().iter().find_map(|e| match e {
+            Event::Revealed { text, row, col } => Some((text.clone(), *row, *col)),
+            _ => None,
+        });
+        assert_eq!(
+            revealed,
+            Some(("sk_live_prod_b80a0011".to_string(), 0, 0)),
+            "reveal round-trips the cached plaintext for the present cell"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_provider_mock_arm_yields_a_usable_provider() {
+        // The composition root's one decision is `kind`; build_provider wires the
+        // chosen adapter inside the worker runtime. The Mock arm builds trivially
+        // and signs in instantly — what lets main auto-send SignIn at startup so
+        // the offline demo "opens already signed in" (ADR 0019). The Aws arm builds
+        // real SDK clients and is untested I/O shell (ADR 0010 §5).
+        let config = janitor_mock::seeded_config();
+        let mut provider = build_provider(ProviderKind::Mock, &config).await;
+        assert!(provider.sign_in().await.is_ok());
+    }
 
     #[test]
     fn ask_step_becomes_discovery_choice_preserving_what_labels_and_default() {
