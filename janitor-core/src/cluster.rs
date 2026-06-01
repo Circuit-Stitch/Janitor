@@ -103,6 +103,24 @@ fn longest_common_prefix<'a>(members: &[&'a str]) -> &'a str {
     &first[..end]
 }
 
+/// The cluster-relative tail of an Entry `name`: `name` with its cluster's common
+/// prefix removed, so a row under a labelled header need not repeat the prefix the
+/// header already shows (`"database.*"` + `"database.primary.url"` →
+/// `"primary.url"`; `"GITHUB_APP_*"` + `"GITHUB_APP_ID"` → `"ID"`). The prefix is
+/// the cluster `label` minus its trailing `*`.
+///
+/// A `None` label (a lone / ungrouped row, whose header carries no prefix) — or a
+/// `name` that doesn't start with the cluster prefix — yields the full `name`
+/// unchanged. UTF-8 safe: it only ever splits at the prefix boundary, which is a
+/// valid char boundary because the prefix is itself a prefix of `name`.
+pub fn cluster_relative_name<'a>(label: Option<&str>, name: &'a str) -> &'a str {
+    let Some(label) = label else {
+        return name;
+    };
+    let prefix = label.strip_suffix('*').unwrap_or(label);
+    name.strip_prefix(prefix).unwrap_or(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +250,62 @@ mod tests {
                 (None, 1), // LOG_LEVEL
             ],
         );
+    }
+
+    // --- Issue #40: cluster-relative Entry names. A grouped row omits the common
+    // prefix its cluster header already shows. ---
+
+    #[test]
+    fn grouped_member_is_stripped_to_its_cluster_relative_tail() {
+        assert_eq!(
+            cluster_relative_name(Some("database.*"), "database.primary.url"),
+            "primary.url"
+        );
+    }
+
+    #[test]
+    fn underscore_cluster_strips_the_underscore_prefix() {
+        assert_eq!(
+            cluster_relative_name(Some("GITHUB_APP_*"), "GITHUB_APP_ID"),
+            "ID"
+        );
+    }
+
+    #[test]
+    fn a_none_label_returns_the_full_name() {
+        assert_eq!(cluster_relative_name(None, "STRIPE_KEY"), "STRIPE_KEY");
+    }
+
+    #[test]
+    fn a_deeper_member_keeps_the_segments_below_the_shared_prefix() {
+        // Under the fallback "database.*" label a primary/replica split keeps the
+        // whole tail after "database.".
+        assert_eq!(
+            cluster_relative_name(Some("database.*"), "database.replica.url"),
+            "replica.url"
+        );
+    }
+
+    #[test]
+    fn stripping_is_utf8_safe_on_multibyte_prefixes() {
+        assert_eq!(
+            cluster_relative_name(Some("café.*"), "café.au_lait"),
+            "au_lait"
+        );
+    }
+
+    #[test]
+    fn a_name_outside_the_cluster_prefix_is_returned_whole() {
+        // Defensive: never panic / mis-slice if a name doesn't start with the
+        // cluster prefix.
+        assert_eq!(
+            cluster_relative_name(Some("database.*"), "other.key"),
+            "other.key"
+        );
+    }
+
+    #[test]
+    fn a_label_without_a_trailing_star_still_strips_its_prefix() {
+        assert_eq!(cluster_relative_name(Some("database."), "database.x"), "x");
     }
 }
