@@ -156,10 +156,15 @@ therefore **supersedes that specific rejection.**
   `--account-id`/`--role`/`--secret-id` overrides were dropped with it (the
   machine auto-picks singletons and menus the rest).
 - `CONTEXT.md` gains the **Discovery** term (already added).
-- **Deferred to Slice 2 (a later ADR):** the left/right Environment-dropdown 2-up
+- ~~**Deferred to Slice 2 (a later ADR):** the left/right Environment-dropdown 2-up
   diff (pick 2 of N), switching `load()` to fetch only the two selected
   Environments, the pairwise `= / ≠ / ø` glyph, the AWS-console-style region
-  picker, and cross-region discovery. An "Ad-hoc compare" (compare two arbitrary
-  Secret Sets without saving an Application) is noted but unscheduled.
+  picker, and cross-region discovery.~~ **Resolved/superseded:** the pairwise 2-up
+  diff is **rejected** by
+  [ADR 0014](0014-drift-matrix-model-n-column-and-comparison-columns.md), which
+  keeps the **N-column** matrix with a frozen whole-row state column and view-level
+  **Comparison Columns** (swap/hide columns without mutating config). The region
+  picker + cross-region discovery survive in issue #12. An "Ad-hoc compare" (compare
+  two arbitrary Secret Sets without saving an Application) is noted but unscheduled.
 - Live re-verification (browser + real org) stays human-gated, like `live-verify`;
   the `Discovery` logic is CI-tested against fakes.

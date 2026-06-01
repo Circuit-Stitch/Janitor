@@ -29,6 +29,10 @@ _Avoid_: project, service, app group (use Application)
 **Mapping**:
 The saved record, inside an Application, of which concrete AWS secret (account + region + name/ARN + permission set) backs a given Environment. Plain data in Config; the thing that prevents Janitor from ever guessing which secret an Environment refers to.
 
+**Comparison Columns**:
+The chosen, ordered subset of an Application's Environments currently shown as columns in the matrix. A *view* selection over the Application's Environments — not the same as which Environments are configured. Taking a column "out of the comparison" hides that Environment from the view; it stays configured and can be brought back. Persisted in Config (locations only — Environment identifiers, never Values).
+_Avoid_: columns, visible envs (use Comparison Columns; reserve "Environment" for the configured thing, "Comparison Column" for the shown thing)
+
 **Sign-in**:
 The browser-based AWS IAM Identity Center authentication the user performs when opening Janitor. Yields the ephemeral SSO token, from which per-Environment Credentials are derived. Never cached to disk — every launch requires a fresh Sign-in.
 _Avoid_: login, SSO (use Sign-in)
