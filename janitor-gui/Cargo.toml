@@ -12,6 +12,9 @@ janitor-aws = { path = "../janitor-aws" }
 janitor-mock = { path = "../janitor-mock" }
 slint = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# OS clipboard for copy-Entry-name (#40, ADR 0005). Only Entry names (metadata)
+# are ever placed on the clipboard — never Values.
+arboard = "3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
