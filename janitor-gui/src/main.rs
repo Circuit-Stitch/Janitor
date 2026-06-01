@@ -12,41 +12,13 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use janitor_core::compare::{Comparison, EntryState};
+use janitor_core::compare::EntryState;
 use janitor_core::config::{Application, Config, Mapping};
-use janitor_core::mock::MockSource;
 use janitor_core::provider::{AppError, What};
-use janitor_core::secret::SecretShape;
-use janitor_core::source::SecretSource;
-use janitor_core::view::{
-    project, reveal_value, sort_rows, state_glyph, MatrixCell, MatrixView, SortKey,
-};
+use janitor_core::view::{sort_rows, state_glyph, MatrixCell, MatrixView, SortKey};
 
 use rows::{matrix_items, MatrixItem};
-use worker::{Command, Event};
-
-/// Where matrix data comes from. Both arms feed the one `apply_event` path.
-enum Backend {
-    /// Real AWS via the worker thread.
-    Real(Sender<Command>),
-    /// Offline: MockSource, served synchronously on the UI thread. Holds the
-    /// last-loaded Sets so reveal works without a worker, and any guided walk
-    /// paused on a choice so the picker can be exercised without a browser.
-    Mock {
-        source: MockSource,
-        cached: RefCell<Vec<(String, SecretShape)>>,
-        pending: RefCell<Option<MockWalk>>,
-    },
-}
-
-/// A mock guided walk paused on the account choice, so `JANITOR_MOCK` can drive
-/// the picker offline. `AdvanceDiscovery` finishes it into a `Mapping`.
-struct MockWalk {
-    environment: String,
-    region: String,
-    /// Candidate accounts as `(name, id)`, in label order.
-    accounts: Vec<(String, String)>,
-}
+use worker::{Command, Event, ProviderKind};
 
 // The UI-thread-owned shared state. The worker bridge cannot capture an `Rc`
 // (its `upgrade_in_event_loop` closure is `Send + 'static`, and `Rc` is
@@ -58,9 +30,9 @@ thread_local! {
     // reused. Held here (not in AppState) so its callbacks can capture `state`
     // strongly without a reference cycle.
     static MANAGE: RefCell<Option<ManageWindow>> = const { RefCell::new(None) };
-    // A weak handle to the main window, so commands initiated from the Manage
-    // window (which has no MainWindow handle) can still drive `dispatch`/the
-    // mock inline path.
+    // A weak handle to the main window, so off-window refreshes initiated from
+    // the Manage window (which has no MainWindow handle) — `push_matrix` after a
+    // rename/remove — can still reach the main window.
     static MAIN: RefCell<Option<slint::Weak<MainWindow>>> = const { RefCell::new(None) };
 }
 
@@ -73,88 +45,18 @@ fn with_main_ui(f: impl FnOnce(&MainWindow)) {
     });
 }
 
-/// Dispatch a command from a context lacking a `MainWindow` (e.g. a Manage
-/// callback), reaching the main window via the `MAIN` weak handle.
-fn dispatch_via_state(state: &Rc<RefCell<AppState>>, cmd: Command) {
-    with_main_ui(|ui| dispatch(ui, state, cmd));
-}
-
 /// After mutating the bound app off-window, refresh the matrix and reload it if
-/// it is the visible app.
+/// it is the visible app. Reaches the main window via the `MAIN` weak handle.
 fn dispatch_via_state_refresh(state: &Rc<RefCell<AppState>>, target: usize, reload: bool) {
     with_main_ui(|ui| {
         push_matrix(ui, state);
         if reload {
             let app = state.borrow().config.applications.get(target).cloned();
             if let Some(app) = app {
-                dispatch(ui, state, Command::LoadApp(app));
+                dispatch(state, Command::LoadApp(app));
             }
         }
     });
-}
-
-/// A few seeded Applications. Payments is hand-seeded in MockSource; the others
-/// fall back to deterministic fabrication, and some have >2 Environments to show
-/// the matrix generalize.
-fn seeded_config() -> Config {
-    let app = |name: &str, base: &str, envs: &[(&str, &str, &str)]| Application {
-        name: name.into(),
-        environments: envs
-            .iter()
-            .map(|(env, account, region)| Mapping {
-                environment: (*env).into(),
-                account_id: (*account).into(),
-                region: (*region).into(),
-                secret_id: format!("{base}/{env}"),
-                permission_set: "ReadOnly".into(),
-            })
-            .collect(),
-    };
-    Config {
-        sso_start_url: "https://identitycenter.amazonaws.com/ssoins-mockmock0000".into(),
-        sso_region: "us-east-1".into(),
-        applications: vec![
-            app(
-                "Payments API",
-                "payments",
-                &[
-                    ("prod", "914xxxxxx021", "us-east-1"),
-                    ("staging", "550xxxxxx118", "us-west-2"),
-                ],
-            ),
-            app(
-                "Auth Service",
-                "auth",
-                &[
-                    ("prod", "914xxxxxx021", "us-east-1"),
-                    ("staging", "550xxxxxx118", "us-west-2"),
-                    ("dev", "330xxxxxx777", "us-west-2"),
-                ],
-            ),
-            app(
-                "Billing Worker",
-                "billing",
-                &[
-                    ("prod", "914xxxxxx021", "us-east-1"),
-                    ("staging", "550xxxxxx118", "us-west-2"),
-                ],
-            ),
-            app(
-                "Notifications",
-                "notif",
-                &[
-                    ("prod", "914xxxxxx021", "us-east-1"),
-                    ("staging", "550xxxxxx118", "us-west-2"),
-                    ("dev", "330xxxxxx777", "us-west-2"),
-                    ("qa", "330xxxxxx777", "us-west-2"),
-                ],
-            ),
-        ],
-        // secret_region / last_pick (ADR 0011) default to ""/None — the mock GUI
-        // seed needs neither. `..Default::default()` keeps this site from
-        // breaking when locations-only Config fields are added.
-        ..Default::default()
-    }
 }
 
 /// Masked length-dots, capped so a long Value does not blow out the row.
@@ -247,7 +149,13 @@ struct Preferences {
 }
 
 struct AppState {
-    backend: Backend,
+    /// Commands to the worker thread, which drives the chosen `Provider` and
+    /// posts `Event`s back via `upgrade_in_event_loop` (ADR 0019 — one async path).
+    tx: Sender<Command>,
+    /// Which Provider the worker runs. The GUI is Provider-agnostic except here:
+    /// the offline `Mock` Provider is ephemeral, so Config is never persisted for
+    /// it (`maybe_save`) — a real-org write must not be stomped by demo data.
+    kind: ProviderKind,
     config: Config,
     selected: usize,
     prefs: Preferences,
@@ -262,134 +170,26 @@ struct AppState {
     manage_app: Option<usize>,
 }
 
-/// Send a command to whichever backend is active. Mock serves it inline by
-/// invoking `apply_event` synchronously; real forwards to the worker (whose
-/// replies arrive via `upgrade_in_event_loop`).
-fn dispatch(ui: &MainWindow, state: &Rc<RefCell<AppState>>, cmd: Command) {
-    let is_mock = matches!(state.borrow().backend, Backend::Mock { .. });
-    if is_mock {
-        match cmd {
-            Command::SignIn => apply_event(ui, state, Event::SignedIn),
-            Command::LoadApp(app) => {
-                let view = {
-                    let st = state.borrow();
-                    let Backend::Mock { source, cached, .. } = &st.backend else {
-                        unreachable!()
-                    };
-                    let sets: Vec<(String, SecretShape)> = app
-                        .environments
-                        .iter()
-                        .map(|m| {
-                            (
-                                m.environment.clone(),
-                                source.fetch(m).expect("mock never fails"),
-                            )
-                        })
-                        .collect();
-                    let v = project(&Comparison::build(&sets));
-                    *cached.borrow_mut() = sets;
-                    v
-                };
-                // Mock never fails a fetch, so there is nothing to auto-correct.
-                apply_event(
-                    ui,
-                    state,
-                    Event::AppLoaded {
-                        view,
-                        corrected: Vec::new(),
-                        app_name: app.name.clone(),
-                    },
-                );
-            }
-            Command::Reveal { row, col, key } => {
-                let revealed: Option<String> = {
-                    let st = state.borrow();
-                    let Backend::Mock { cached, .. } = &st.backend else {
-                        unreachable!()
-                    };
-                    // Bind the `Ref` to a named local so it drops before `st`
-                    // (named locals drop in reverse declaration order, ahead of
-                    // the block's tail temporaries — fixes E0597).
-                    let cache = cached.borrow();
-                    reveal_value(&cache, &key, col).map(|v| v.expose().to_string())
-                };
-                let ev = match revealed {
-                    Some(text) => Event::Revealed { row, col, text },
-                    None => Event::RevealUnavailable,
-                };
-                apply_event(ui, state, ev);
-            }
-            // Offline discovery: no AWS, so fabricate a small multi-account org
-            // and ask, exercising the picker (and remembered default) under
-            // JANITOR_MOCK without a browser. Role + secret then auto-pick.
-            Command::BeginDiscovery {
-                environment,
-                region,
-                remembered,
-            } => {
-                let accounts = vec![
-                    ("Prod".to_string(), "000000000001".to_string()),
-                    ("Staging".to_string(), "000000000002".to_string()),
-                ];
-                let default = remembered
-                    .as_ref()
-                    .and_then(|m| accounts.iter().position(|(_, id)| *id == m.account_id));
-                let labels = accounts
-                    .iter()
-                    .map(|(name, id)| format!("{name} ({id})"))
-                    .collect();
-                {
-                    let st = state.borrow();
-                    let Backend::Mock { pending, .. } = &st.backend else {
-                        unreachable!()
-                    };
-                    *pending.borrow_mut() = Some(MockWalk {
-                        environment,
-                        region,
-                        accounts,
-                    });
-                }
-                apply_event(
-                    ui,
-                    state,
-                    Event::DiscoveryChoice {
-                        what: What::Accounts,
-                        labels,
-                        default,
-                    },
-                );
-            }
-            Command::AdvanceDiscovery { choice } => {
-                let walk = {
-                    let st = state.borrow();
-                    let Backend::Mock { pending, .. } = &st.backend else {
-                        unreachable!()
-                    };
-                    let taken = pending.borrow_mut().take();
-                    taken
-                };
-                if let Some(walk) = walk {
-                    let i = choice.min(walk.accounts.len() - 1);
-                    let (_, account_id) = &walk.accounts[i];
-                    let mapping = Mapping {
-                        environment: walk.environment.clone(),
-                        account_id: account_id.clone(),
-                        region: walk.region,
-                        secret_id: format!("discovered/{}", walk.environment),
-                        permission_set: "ReadOnly".into(),
-                    };
-                    apply_event(ui, state, Event::EnvDiscovered(mapping));
-                }
-            }
-            Command::Shutdown => {}
+impl AppState {
+    /// Persist Config (locations only — THREAT-MODEL) unless the offline mock
+    /// Provider is active, whose seeded demo `Config` must never overwrite a real
+    /// org's saved file.
+    fn maybe_save(&self) {
+        if self.kind != ProviderKind::Mock {
+            let _ = self.config.save();
         }
-    } else if let Backend::Real(tx) = &state.borrow().backend {
-        let _ = tx.send(cmd);
     }
 }
 
-/// Apply one Event to the UI + state. Called on the UI thread (directly for
-/// mock; via `upgrade_in_event_loop` for the worker).
+/// Send a command to the worker (ADR 0019 — one async path for every Provider).
+/// Replies arrive as `Event`s marshalled onto the UI loop via
+/// `upgrade_in_event_loop`.
+fn dispatch(state: &Rc<RefCell<AppState>>, cmd: Command) {
+    let _ = state.borrow().tx.send(cmd);
+}
+
+/// Apply one Event to the UI + state. Called on the UI thread via
+/// `upgrade_in_event_loop` for the worker's replies.
 fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
     match ev {
         Event::SignInStarted => set_status(ui, state, "signing", ""),
@@ -399,7 +199,7 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
                 st.config.applications.get(st.selected).cloned()
             };
             if let Some(app) = app {
-                dispatch(ui, state, Command::LoadApp(app));
+                dispatch(state, Command::LoadApp(app));
             } else {
                 set_status(ui, state, "loaded", "");
             }
@@ -493,9 +293,7 @@ fn on_env_discovered(ui: &MainWindow, state: &Rc<RefCell<AppState>>, mapping: Ma
             return;
         }
         st.config.last_pick = Some(mapping);
-        if !matches!(st.backend, Backend::Mock { .. }) {
-            let _ = st.config.save();
-        }
+        st.maybe_save();
         set_manage_status(&format!("Added \"{env_name}\"."));
         (target, target == st.selected)
     };
@@ -506,7 +304,7 @@ fn on_env_discovered(ui: &MainWindow, state: &Rc<RefCell<AppState>>, mapping: Ma
     if reload {
         let app = state.borrow().config.applications.get(target).cloned();
         if let Some(app) = app {
-            dispatch(ui, state, Command::LoadApp(app));
+            dispatch(state, Command::LoadApp(app));
         }
     }
 }
@@ -531,8 +329,8 @@ fn fold_corrections(state: &Rc<RefCell<AppState>>, corrected: &[Mapping]) {
                 changed = true;
             }
         }
-        if changed && !matches!(st.backend, Backend::Mock { .. }) {
-            let _ = st.config.save();
+        if changed {
+            st.maybe_save();
         }
         changed
     };
@@ -627,9 +425,7 @@ fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String) {
     };
     clear_manage_choice();
     set_manage_status("Discovering…");
-    // Dispatch needs a MainWindow handle for the mock inline path; reach it via
-    // the live STATE/event loop the same way worker events do.
-    dispatch_via_state(state, cmd);
+    dispatch(state, cmd);
 }
 
 /// Feed the user's picked index back into the in-progress walk. Clears the picker
@@ -638,7 +434,7 @@ fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String) {
 fn advance_discovery(state: &Rc<RefCell<AppState>>, choice: usize) {
     clear_manage_choice();
     set_manage_status("Discovering…");
-    dispatch_via_state(state, Command::AdvanceDiscovery { choice });
+    dispatch(state, Command::AdvanceDiscovery { choice });
 }
 
 /// Remove an Environment from the **bound** Application, persist, refresh.
@@ -649,9 +445,7 @@ fn remove_bound_env(state: &Rc<RefCell<AppState>>, index: usize) {
         if let Some(app) = st.config.applications.get_mut(target) {
             app.remove_environment(index);
         }
-        if !matches!(st.backend, Backend::Mock { .. }) {
-            let _ = st.config.save();
-        }
+        st.maybe_save();
         (target, target == st.selected)
     };
     refresh_manage_window(state);
@@ -668,9 +462,7 @@ fn rename_bound_app(state: &Rc<RefCell<AppState>>, name: String) {
         if !st.config.rename_application(target, &name) {
             return;
         }
-        if !matches!(st.backend, Backend::Mock { .. }) {
-            let _ = st.config.save();
-        }
+        st.maybe_save();
     }
     refresh_manage_window(state);
     with_main_ui(|ui| push_matrix(ui, state));
@@ -866,20 +658,40 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let ui = MainWindow::new()?;
 
+    // The composition root's one mock-vs-real decision (ADR 0019): pick the
+    // Provider `kind`. Mock loads the seeded demo Config (never persisted); real
+    // loads the user's saved org.
     let mock = env::var("JANITOR_MOCK").is_ok() || env::args().any(|a| a == "--mock");
+    let kind = if mock {
+        ProviderKind::Mock
+    } else {
+        ProviderKind::Aws
+    };
     let config = if mock {
-        seeded_config()
+        janitor_mock::seeded_config()
     } else {
         Config::load().unwrap_or_default()
     };
 
+    // One async path (ADR 0019): the worker ALWAYS spawns and drives the chosen
+    // Provider (built inside its Tokio runtime), marshalling each Event onto the
+    // UI loop. The mock runs on the worker exactly like AWS.
+    let tx = {
+        let ui_weak = ui.as_weak();
+        worker::spawn(kind, config.clone(), move |ev| {
+            let _ = ui_weak.upgrade_in_event_loop(move |ui| {
+                let st = STATE.with(|s| s.borrow().clone());
+                if let Some(st) = st {
+                    apply_event(&ui, &st, ev);
+                }
+            });
+        })
+    };
+
     let state = Rc::new(RefCell::new(AppState {
-        backend: Backend::Mock {
-            source: MockSource::new(),
-            cached: RefCell::new(Vec::new()),
-            pending: RefCell::new(None),
-        },
-        config: config.clone(),
+        tx,
+        kind,
+        config,
         selected: 0,
         prefs: Preferences {
             sort: SortKey::Name,
@@ -900,20 +712,6 @@ fn main() -> Result<(), slint::PlatformError> {
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     MAIN.with(|m| *m.borrow_mut() = Some(ui.as_weak()));
 
-    // Real backend: spawn the worker, marshalling its Events onto the UI loop.
-    if !mock {
-        let ui_weak = ui.as_weak();
-        let tx = worker::spawn(config.clone(), move |ev| {
-            let _ = ui_weak.upgrade_in_event_loop(move |ui| {
-                let st = STATE.with(|s| s.borrow().clone());
-                if let Some(st) = st {
-                    apply_event(&ui, &st, ev);
-                }
-            });
-        });
-        state.borrow_mut().backend = Backend::Real(tx);
-    }
-
     // Initial chrome.
     {
         let st = state.borrow();
@@ -924,28 +722,21 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_status(st.status.as_str().into());
     }
     push_matrix(&ui, &state);
-    // Mock opens already "signed in" → load the first app immediately.
+    // Mock opens already "signed in": its `sign_in` returns instantly, so auto-send
+    // SignIn at startup and the SignedIn handler loads the first app — the offline
+    // demo feel, now via the same worker path the user's Sign-in click uses (ADR
+    // 0019). Real AWS waits for that click (it launches the browser).
     if mock {
-        // Bind first so the `state.borrow()` temporary DROPS before `dispatch`.
-        // An `if let` scrutinee would hold the shared borrow across the whole
-        // block, and the `AppLoaded` handler's `state.borrow_mut()` would then
-        // panic ("already borrowed") — this matches the let-then-if-let pattern
-        // the other dispatch call sites use.
-        let first_app = state.borrow().config.applications.first().cloned();
-        if let Some(app) = first_app {
-            dispatch(&ui, &state, Command::LoadApp(app));
-        }
+        dispatch(&state, Command::SignIn);
     }
 
     // Sign in.
     {
-        let ui_weak = ui.as_weak();
         let state = state.clone();
-        ui.on_sign_in(move || dispatch(&ui_weak.unwrap(), &state, Command::SignIn));
+        ui.on_sign_in(move || dispatch(&state, Command::SignIn));
     }
     // Refresh (reload selected app).
     {
-        let ui_weak = ui.as_weak();
         let state = state.clone();
         ui.on_refresh(move || {
             let app = {
@@ -953,11 +744,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 st.config.applications.get(st.selected).cloned()
             };
             if let Some(app) = app {
-                dispatch(&ui_weak.unwrap(), &state, Command::LoadApp(app));
+                dispatch(&state, Command::LoadApp(app));
             }
         });
     }
-    // Sidebar selection → load that app (real: only if signed in; else prompt).
+    // Sidebar selection → load that app (only once signed in; else just show it).
     {
         let ui_weak = ui.as_weak();
         let state = state.clone();
@@ -966,31 +757,26 @@ fn main() -> Result<(), slint::PlatformError> {
             state.borrow_mut().selected = index as usize;
             let (app, signed) = {
                 let st = state.borrow();
-                let signed = st.status == "loaded"
-                    || st.status == "loading"
-                    || matches!(st.backend, Backend::Mock { .. });
+                let signed = st.status == "loaded" || st.status == "loading";
                 (st.config.applications.get(index as usize).cloned(), signed)
             };
             if let (Some(app), true) = (app, signed) {
-                dispatch(&ui, &state, Command::LoadApp(app));
+                dispatch(&state, Command::LoadApp(app));
             } else {
                 push_matrix(&ui, &state);
             }
         });
     }
-    // Reveal → round-trip (real) or inline (mock); both via dispatch.
+    // Reveal → an on-demand round-trip to the Provider via dispatch.
     {
-        let ui_weak = ui.as_weak();
         let state = state.clone();
         ui.on_reveal_cell(move |row, col| {
-            let ui = ui_weak.unwrap();
             let key = {
                 let st = state.borrow();
                 st.view.rows.get(row as usize).map(|r| r.key.clone())
             };
             if let Some(key) = key {
                 dispatch(
-                    &ui,
                     &state,
                     Command::Reveal {
                         row: row as usize,
@@ -1018,9 +804,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut st = state.borrow_mut();
             st.config.sso_start_url = ui.get_sso_start_url().to_string();
             st.config.sso_region = ui.get_sso_region().to_string();
-            if !matches!(st.backend, Backend::Mock { .. }) {
-                let _ = st.config.save();
-            }
+            st.maybe_save();
         });
     }
     // Add application (empty).
@@ -1039,9 +823,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     environments: Vec::new(),
                 });
                 st.selected = st.config.applications.len() - 1;
-                if !matches!(st.backend, Backend::Mock { .. }) {
-                    let _ = st.config.save();
-                }
+                st.maybe_save();
             }
             push_matrix(&ui_weak.unwrap(), &state);
         });
@@ -1061,9 +843,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     {
                         st.selected = st.config.applications.len() - 1;
                     }
-                    if !matches!(st.backend, Backend::Mock { .. }) {
-                        let _ = st.config.save();
-                    }
+                    st.maybe_save();
                 }
             }
             push_matrix(&ui_weak.unwrap(), &state);
@@ -1086,9 +866,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     environments: Vec::new(),
                 });
                 st.selected = st.config.applications.len() - 1;
-                if !matches!(st.backend, Backend::Mock { .. }) {
-                    let _ = st.config.save();
-                }
+                st.maybe_save();
                 st.selected
             };
             push_matrix(&ui_weak.unwrap(), &state);
@@ -1198,11 +976,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let run_result = ui.run();
 
-    // App closing: stop the worker loop. No-op in mock mode; harmless if the
-    // worker already exited. This is also the one site that *constructs*
-    // `Command::Shutdown` — the variant `worker::run_loop` already handles.
-    if let Backend::Real(tx) = &state.borrow().backend {
-        let _ = tx.send(Command::Shutdown);
-    }
+    // App closing: stop the worker loop (harmless if it already exited). This is
+    // the one site that *constructs* `Command::Shutdown` — the variant
+    // `worker::run_loop` already handles.
+    let _ = state.borrow().tx.send(Command::Shutdown);
     run_result
 }

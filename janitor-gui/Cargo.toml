@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 janitor-core = { path = "../janitor-core" }
 janitor-aws = { path = "../janitor-aws" }
+janitor-mock = { path = "../janitor-mock" }
 slint = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"

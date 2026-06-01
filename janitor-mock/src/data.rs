@@ -1,7 +1,7 @@
-//! The hand-seeded, **non-production** demo dataset (relocated from
-//! `janitor_core::mock`). Knows a few canned Secret Sets (reproducing the design
-//! mockup's Payments API) and deterministically fabricates a plausible Set for
-//! anything else. Holds no real secret material.
+//! The hand-seeded, **non-production** demo dataset (relocated here from core's
+//! former `mock` module, now removed — ADR 0019). Knows a few canned Secret Sets
+//! (reproducing the design mockup's Payments API) and deterministically
+//! fabricates a plausible Set for anything else. Holds no real secret material.
 
 use janitor_core::config::Mapping;
 use janitor_core::secret::SecretShape;

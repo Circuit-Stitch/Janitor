@@ -3,8 +3,8 @@
 //! Async-native. Holds Identity Center Sign-in (browser Auth Code + PKCE),
 //! per-Environment role-Credential brokering, and Secrets Manager reads.
 //! Depends on `janitor-core` for domain types (`Mapping`, `SecretShape`,
-//! `Value`); contains **no GUI** and does not touch `janitor-core`'s sync
-//! `SecretSource` (that seam stays untouched until the GUI integration slice).
+//! `Value`) and the `Provider` port its `Session` implements (ADR 0019);
+//! contains **no GUI**.
 //!
 //! ## Trust & memory posture
 //! Nothing here is persisted. The SSO token and role Credentials live only in

@@ -16,9 +16,7 @@
 pub mod cluster;
 pub mod compare;
 pub mod config;
-pub mod mock;
 pub mod provider;
 pub mod secret;
 pub mod select;
-pub mod source;
 pub mod view;
