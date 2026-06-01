@@ -22,21 +22,20 @@
 //!   2. HOLD-FLOOR-AND-SCROLL: with many columns (or a narrow window) the columns
 //!      stop shrinking at the floor and the env region's content grows past the
 //!      visible band, so it scrolls horizontally.
-//!   3. ALIGNMENT: header env column N and body env column N step left-to-right by
-//!      the same per-column width (`col-w`) — column N of the header sits at the
-//!      same offset-from-its-band as column N of the body, so they line up at any
-//!      window width. (Measured relative to each band's own origin, which factors
-//!      out the constant `ScrollView` chrome offset the headless style adds around
-//!      the body — see the module note below.) One shared `col-w` drives both
-//!      bands, so the header is metric-locked to its column and can't drift.
+//!   3. ALIGNMENT: header env column N sits directly above body env column N —
+//!      the two bands share the same env-region ORIGIN (column 0 at the same
+//!      absolute x) AND the same per-column step (`col-w`), at every window width.
+//!      One shared `col-w` drives both bands and the frozen ENTRY/STATE column is
+//!      pinned to a fixed width, so neither origin nor step drifts.
 //!
-//! Note on the literal "header.x == body.x" check: the body env region is
-//! wrapped in a `std-widgets` `ScrollView`, and the headless testing backend's
-//! style reserves a different amount of chrome around it than the real (fluent)
-//! renderer, shifting the whole body region right by a constant. So absolute
-//! header.x vs body.x is NOT equal headlessly even when the columns are
-//! correctly aligned. We therefore assert the renderer-independent invariant:
-//! identical per-column step within each band. See the spike report for detail.
+//! Note on absolute origin alignment: the body env region is wrapped in a
+//! `std-widgets` `ScrollView`, and the frozen ENTRY/STATE column beside it is
+//! pinned to `state-w + entry-w` (a bare `VerticalLayout` there defaults to
+//! horizontal-stretch 1 and would otherwise balloon to half the viewport, shoving
+//! the body env region sideways — the regression `assert_header_body_aligned`
+//! guards). With the column pinned, the body env origin equals the header band's,
+//! so we assert absolute alignment directly rather than only equal per-column step
+//! (a step-only check cancels any constant offset and would miss exactly that drift).
 
 #![cfg(test)]
 
@@ -197,19 +196,30 @@ fn env_columns_hold_floor_and_scroll_when_many() {
 }
 
 /// Assert the env-name header sits directly above its column's cells: the header
-/// band and the body advance by the SAME per-column step. Because every column is
-/// the one uniform `col-w` wide, an equal step means header column N lands above
-/// body column N for all N — measured between the two always-visible leftmost
-/// columns (off-screen `for` columns aren't instantiated by the Flickable). The
-/// step is taken within each band, so the constant ScrollView chrome offset the
-/// headless style adds around the body cancels out (see the module note).
+/// band and the body share the SAME env-region origin (column 0 starts at the same
+/// absolute x) AND advance by the SAME per-column step. Equal origin + equal step
+/// ⇒ header column N lands exactly above body column N for all N (checked at the
+/// two always-visible leftmost columns; off-screen `for` columns aren't
+/// instantiated by the Flickable). The ORIGIN check is the regression guard: a
+/// frozen column that stretches (a VerticalLayout defaults to stretch 1) balloons
+/// to half the viewport and shoves the whole body env region sideways while the
+/// fixed-width header band stays put — a window-width-dependent drift that an
+/// equal-step-only check (which cancels any constant offset) silently passes.
 fn assert_header_body_aligned(ui: &MainWindow) {
+    let h0 = header_x(ui, 0);
+    let b0 = body_x(ui, 0);
+    assert!(
+        (h0 - b0).abs() <= 1.0,
+        "env header column 0 starts at x={h0} but body column 0 at x={b0} — the env \
+         region's origin differs between the bands, so every header sits off its own \
+         cells (AC3)"
+    );
     let h_step = header_x(ui, 1) - header_x(ui, 0);
     let b_step = body_x(ui, 1) - body_x(ui, 0);
     assert!(
         (h_step - b_step).abs() <= 1.0,
         "header per-column step {h_step} != body per-column step {b_step} — the env \
-         header is not metric-locked to its column and drifts across columns (AC3)"
+         header drifts across columns (AC3)"
     );
 }
 
@@ -218,10 +228,11 @@ fn env_header_and_body_columns_stay_aligned() {
     i_slint_backend_testing::init_no_event_loop();
 
     // AC3: the env-name header stays directly above its own column's cells at
-    // every width — both when columns STRETCH (few/wide) and when they HOLD THE
-    // FLOOR and scroll (many/narrow). One `col-w` drives both bands, so they can't
-    // drift in either regime.
+    // every width — columns STRETCH wide (1400) and narrower (1100), and HOLD THE
+    // FLOOR and scroll (8 cols / 1000). One `col-w` drives both bands and the
+    // frozen column is pinned, so neither the origin nor the step drifts.
     assert_header_body_aligned(&matrix_window());
+    assert_header_body_aligned(&matrix_window_n(2, 1100.0, 700.0));
     assert_header_body_aligned(&matrix_window_n(8, 1000.0, 700.0));
 }
 

@@ -424,8 +424,20 @@ export component MainWindow inherits Window {
                 ScrollView {
                     vertical-stretch: 1;
                     HorizontalLayout {
-                        // FROZEN: ENTRY (2-line) + STATE glyph, per item.
+                        // FROZEN: ENTRY (2-line) + STATE glyph, per item. Pinned to
+                        // the exact frozen width (state-w + entry-w) so the body's
+                        // env region starts at the SAME x as the header band's
+                        // (whose frozen side is fixed-width Texts). Without the pin a
+                        // VerticalLayout defaults to stretch 1 and competes 50/50
+                        // with the stretch-1 env-body Flickable, ballooning to half
+                        // the viewport and pushing the env cells right of their
+                        // headers — a window-width-dependent drift (issue #41 AC3).
+                        // (min == max, not stretch:0, because the per-row background
+                        // Rectangles don't propagate the cells' min-width, so a bare
+                        // stretch:0 would instead collapse the column to 0.)
                         VerticalLayout {
+                            min-width: root.state-w + root.entry-w;
+                            max-width: root.state-w + root.entry-w;
                             for item[i] in items : Rectangle {
                                 height: item.is-header ? root.header-h : root.row-h;
                                 background: item.is-header ? root.header-bg
