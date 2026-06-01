@@ -164,3 +164,116 @@ fn env_columns_align_and_band_fills_window() {
          the table stops filling the window (ADR 0020 regression)."
     );
 }
+
+// --- Issue #23: Settings + chrome polish (cosmetic layout pass). The settings
+// overlay must render as a centered, constrained-width card (not full-bleed); the
+// top bar carries a read-only badge + identity + breadcrumb; the bottom status bar
+// carries identity, session time, memory-only / manual-refresh notes, and the
+// Drift/Aligned/Gap legend WITH COUNTS; the main header carries the Application
+// title + Secret ARN subtitle + a snapshot timestamp. All chrome facts are pushed
+// from Rust as `in` properties (no Values — identity / ARN / timestamps / counts
+// only). Geometry assertions use only size + relative inset (renderer-independent
+// per ADR 0021). ---
+
+/// A wide window (1400px) with the settings overlay open, so the card's bounded
+/// width and centering are geometrically obvious.
+fn settings_window() -> MainWindow {
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_settings_open(true);
+    ui.window().set_size(LogicalSize::new(1400.0, 800.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    ui
+}
+
+#[test]
+fn settings_renders_as_a_centered_bounded_width_card() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = settings_window();
+
+    // The card is a structural anchor (a Rectangle needs a role to carry a label).
+    let card = one_by_label(&ui, "settings-card");
+    let card_pos = card.absolute_position();
+    let card_w = card.size().width;
+
+    // (1) BOUNDED: in a 1400px window the card stays a constrained card, not a
+    // full-bleed panel. The spec calls for ~520–560px; allow generous slack.
+    assert!(
+        card_w <= 600.0,
+        "settings card width {card_w} is not bounded to a card (≤600px) in a 1400px window"
+    );
+
+    // (2) CENTERED: the left inset ≈ the right inset. Both are relative facts
+    // (size + position within the window), reliable headlessly.
+    let win_w = ui.window().size().width as f32; // physical px == logical at scale 1
+    let left = card_pos.x;
+    let right = win_w - (card_pos.x + card_w);
+    assert!(
+        (left - right).abs() <= 4.0,
+        "settings card is not centered: left inset {left} != right inset {right}"
+    );
+}
+
+#[test]
+fn top_bar_carries_read_only_badge_and_identity_and_breadcrumb() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_identity("ops@acme".into());
+    ui.set_app_title("Payments API".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+
+    // The read-only badge (v1 ships read-only — ADR 0004) is always present.
+    one_by_label(&ui, "topbar-readonly");
+    // Identity + breadcrumb anchors are present (their text is fed by properties).
+    one_by_label(&ui, "topbar-identity");
+    one_by_label(&ui, "topbar-breadcrumb");
+}
+
+#[test]
+fn bottom_status_bar_carries_session_notes_and_legend_with_counts() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_aligned_count(5);
+    ui.set_drift_count(2);
+    ui.set_gap_count(1);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+
+    // Session/status bar anchors: identity, session-remaining, the memory-only
+    // note, and the manual-refresh / no-background-polling note (ADR 0005).
+    one_by_label(&ui, "statusbar-identity");
+    one_by_label(&ui, "statusbar-session");
+    one_by_label(&ui, "statusbar-memory-note");
+    one_by_label(&ui, "statusbar-refresh-note");
+
+    // The legend shows COUNTS. A `Text` carries its content as its implicit
+    // accessible-label, so the counted phrases must each match exactly one element.
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "Aligned 5").count(),
+        1,
+        "legend must show the Aligned count"
+    );
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "Drift 2").count(),
+        1,
+        "legend must show the Drift count"
+    );
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "Gap 1").count(),
+        1,
+        "legend must show the Gap count"
+    );
+}
+
+#[test]
+fn main_header_carries_arn_subtitle_and_snapshot_anchor() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = MainWindow::new().expect("create MainWindow");
+    // The main header lives above the matrix toolbar; it shows for the matrix pane.
+    ui.set_pane("matrix".into());
+    ui.set_app_title("Payments API".into());
+    ui.set_secret_arn("arn:aws:secretsmanager:us-east-1:111:secret:payments".into());
+    ui.set_snapshot_label("Snapshot 14:05 / 2 min ago".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+
+    one_by_label(&ui, "header-arn");
+    one_by_label(&ui, "header-snapshot");
+}
