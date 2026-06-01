@@ -13,7 +13,7 @@ jobs:
     name: fmt + clippy + test + coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust (stable) with rustfmt, clippy, llvm-tools
         uses: dtolnay/rust-toolchain@stable
@@ -66,7 +66,7 @@ jobs:
       # token or Codecov outage leaves badges stale but never fails the build —
       # the gates above already passed. Per-crate flags keep the badges distinct.
       - name: Upload janitor-core coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov-core.info
@@ -74,7 +74,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Upload janitor-aws coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov-aws.info
