@@ -758,7 +758,11 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         Text { text: "Dark theme"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
-                        Switch { checked: root.dark; toggled => { root.set-theme(self.checked); } }
+                        Switch {
+                            checked: root.dark;
+                            toggled => { root.set-theme(self.checked); }
+                            accessible-label: "settings-theme";
+                        }
                     }
                     HorizontalLayout {
                         spacing: 8px;
@@ -767,6 +771,7 @@ export component MainWindow inherits Window {
                             model: ["Name", "Gap first"];
                             current-index: 0;
                             selected => { root.set-sort(self.current-index); }
+                            accessible-label: "settings-sort";
                         }
                     }
                     HorizontalLayout {
@@ -777,6 +782,7 @@ export component MainWindow inherits Window {
                             maximum: 60;
                             value <=> root.auto-hide-secs;
                             edited => { root.set-auto-hide(self.value); }
+                            accessible-label: "settings-reveal";
                         }
                     }
                 }

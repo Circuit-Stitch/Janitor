@@ -214,6 +214,49 @@ fn settings_renders_as_a_centered_bounded_width_card() {
 }
 
 #[test]
+fn settings_card_keeps_its_controls_after_the_restructure() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = settings_window();
+
+    // A full-block rewrite is exactly where a control silently goes missing, so
+    // assert each relocated Preferences control still renders in the new card.
+    for label in [
+        "settings-card",
+        "settings-theme",
+        "settings-sort",
+        "settings-reveal",
+    ] {
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&ui, label).count(),
+            1,
+            "settings control {label:?} did not survive the card restructure"
+        );
+    }
+    // The text-bearing action buttons survive too (found by their caption, the
+    // implicit accessible-label of a Button).
+    for caption in ["Save accounts", "Add application"] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, caption).count() >= 1,
+            "settings button {caption:?} did not survive the card restructure"
+        );
+    }
+
+    // And the Dark-theme switch is still WIRED, not merely rendered: a real
+    // press/release routed through hit-testing toggles it and fires set-theme.
+    let fired = Rc::new(std::cell::RefCell::new(false));
+    {
+        let fired = fired.clone();
+        ui.on_set_theme(move |_| *fired.borrow_mut() = true);
+    }
+    one_by_label(&ui, "settings-theme")
+        .mock_single_click(slint::platform::PointerEventButton::Left);
+    assert!(
+        *fired.borrow(),
+        "toggling the Dark-theme switch must still fire set-theme after the restructure"
+    );
+}
+
+#[test]
 fn top_bar_carries_read_only_badge_and_identity_and_breadcrumb() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = MainWindow::new().expect("create MainWindow");

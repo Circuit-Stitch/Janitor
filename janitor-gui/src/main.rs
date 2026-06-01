@@ -1065,6 +1065,27 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
 
+    // Tick the snapshot label's "N min ago" so it stays honest between manual
+    // refreshes (issue #23) — otherwise it's frozen at "just now" forever. A pure
+    // clock re-push: no network, no secret activity, consistent with the
+    // manual-refresh / no-background-polling model (ADR 0005). Kept alive for the
+    // run; no-ops until the first load stamps `snapshot_at`.
+    let snapshot_timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        snapshot_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(30),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let at = STATE.with(|s| s.borrow().as_ref().and_then(|st| st.borrow().snapshot_at));
+                if at.is_some() {
+                    ui.set_snapshot_label(snapshot_label(at).into());
+                }
+            },
+        );
+    }
+
     let run_result = ui.run();
 
     // App closing: stop the worker loop (harmless if it already exited). This is
@@ -1148,10 +1169,36 @@ mod chrome_tests {
         // No load yet → empty (the view shows "Not refreshed yet").
         assert_eq!(snapshot_label(None), "");
         // Just loaded → "just now" with a UTC HH:MM stamp.
-        let label = snapshot_label(Some(std::time::SystemTime::now()));
+        let now = std::time::SystemTime::now();
+        let label = snapshot_label(Some(now));
         assert!(
             label.starts_with("Snapshot ") && label.contains("just now"),
             "fresh snapshot label was {label:?}"
+        );
+        // The absolute stamp is the load-bearing, never-stale part: assert the
+        // "Snapshot HH:MM UTC" shape (two-digit hour : two-digit minute).
+        let after_marker = label.strip_prefix("Snapshot ").unwrap();
+        let hhmm = &after_marker[..5];
+        let (hh, mm) = hhmm.split_once(':').expect("HH:MM stamp");
+        assert!(
+            hh.len() == 2
+                && mm.len() == 2
+                && hh.parse::<u32>().is_ok()
+                && mm.parse::<u32>().is_ok(),
+            "snapshot stamp is not HH:MM: {label:?}"
+        );
+        assert!(
+            after_marker.contains("UTC"),
+            "snapshot stamp missing UTC: {label:?}"
+        );
+
+        // The relative clause — "what the user actually reads" — across its branches.
+        let ago = |secs| snapshot_label(Some(now - std::time::Duration::from_secs(secs)));
+        assert!(ago(90).contains("1 min ago"), "90s ago was {:?}", ago(90));
+        assert!(
+            ago(7 * 60).contains("7 min ago"),
+            "7m ago was {:?}",
+            ago(7 * 60)
         );
     }
 }
