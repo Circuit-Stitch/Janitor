@@ -112,6 +112,9 @@ export component MainWindow inherits Window {
     property <length> entry-w: 300px;
     property <length> state-w: 46px;
     property <length> env-w: 200px;
+    // Sidebar list rows (Applications + the add-app row) share one fixed height
+    // so the "+ new application" row lines up as a list item, not a stray bar.
+    property <length> sidebar-row-h: 48px;
     property <length> envs-w: root.env-w * environments.length;
     // Stripe shades + chrome. State never tints the row — it lives in the dot /
     // glyph / pill only.
@@ -129,22 +132,26 @@ export component MainWindow inherits Window {
                 padding: 12px;
                 spacing: 4px;
                 Text { text: "APPLICATIONS"; color: #6b7280; font-size: 11px; }
-                HorizontalLayout {
-                    spacing: 4px;
-                    new-app-name := LineEdit {
-                        placeholder-text: "New application";
-                        horizontal-stretch: 1;
-                    }
-                    Button {
-                        text: "+";
-                        clicked => {
-                            root.new-app-managed(new-app-name.text);
-                            new-app-name.text = "";
+                Rectangle {
+                    height: root.sidebar-row-h;
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 4px;
+                        new-app-name := LineEdit {
+                            placeholder-text: "New application";
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "+";
+                            clicked => {
+                                root.new-app-managed(new-app-name.text);
+                                new-app-name.text = "";
+                            }
                         }
                     }
                 }
                 for app[i] in apps : Rectangle {
-                    height: 48px;
+                    height: root.sidebar-row-h;
                     background: app.selected ? #1b2330 : (atouch.has-hover ? #161a20 : transparent);
                     atouch := TouchArea { clicked => { root.select-app(i); } }
                     HorizontalLayout {
