@@ -165,6 +165,140 @@ fn env_columns_align_and_band_fills_window() {
     );
 }
 
+// --- Issue #38: STATE is the leftmost frozen column (left of ENTRY), and the
+// ENTRY cell is one line — the status dot and the secondary state word are gone,
+// so the glyph in the STATE column is the row's only state carrier. ---
+
+#[test]
+fn state_column_is_frozen_left_of_entry() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = matrix_window();
+
+    // Header band: the STATE header sits left of the ENTRY header. Both live in
+    // the same band OUTSIDE the body ScrollView, so absolute x is reliable and
+    // directly comparable (no ScrollView chrome offset to factor out).
+    let state_hdr = one_by_label(&ui, "statehdr").absolute_position().x;
+    let entry_hdr = one_by_label(&ui, "entryhdr").absolute_position().x;
+    assert!(
+        state_hdr < entry_hdr,
+        "STATE header (x={state_hdr}) must be left of ENTRY header (x={entry_hdr})"
+    );
+
+    // Body: the frozen STATE glyph cell sits left of the ENTRY cell. Both are in
+    // one HorizontalLayout inside the ScrollView, so their relative order holds
+    // even though absolute x carries the (shared) ScrollView chrome offset.
+    let state_cell = one_by_label(&ui, "state-cell").absolute_position().x;
+    let entry_cell = one_by_label(&ui, "entry-cell").absolute_position().x;
+    assert!(
+        state_cell < entry_cell,
+        "STATE cell (x={state_cell}) must be left of ENTRY cell (x={entry_cell})"
+    );
+
+    // STATE is the SOLE state carrier: assert the coloured glyph actually renders
+    // (= for the Aligned fixture row). A Text exposes its content as its implicit
+    // accessible-label, so finding "=" confirms the glyph is present — not just the
+    // cell. Without this, a dropped glyph would still pass the position checks.
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "=").count(),
+        1,
+        "the STATE column's glyph must render as the row's sole state carrier"
+    );
+}
+
+#[test]
+fn entry_cell_is_single_line_with_no_state_word() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = matrix_window();
+
+    // The secondary state word ("Aligned"/"Drift"/"Gap") no longer renders in the
+    // ENTRY cell. A `Text` exposes its content as its implicit accessible-label,
+    // so the word being absent means zero elements carry it. (The fixture row's
+    // state is "Aligned"; the STATE glyph is "=", never the word.)
+    let state_word_hits = ElementHandle::find_by_accessible_label(&ui, "Aligned").count();
+    assert_eq!(
+        state_word_hits, 0,
+        "the secondary state word must be gone from the ENTRY cell (found {state_word_hits})"
+    );
+
+    // Row height is now single-line (name + symmetric padding ≈ 30px), well below
+    // the old two-line height (~49px). The ENTRY cell fills the row, so its height
+    // is the row height — `size()` is reliable headlessly (only offsets aren't).
+    let h = one_by_label(&ui, "entry-cell").size().height;
+    assert!(
+        (20.0..40.0).contains(&h),
+        "ENTRY cell height {h} is not single-line (expected ~30px; two-line was ~49px)"
+    );
+}
+
+// --- Issue #40: a grouped/elided ENTRY name is safe because hovering reveals the
+// full (un-stripped) name and clicking copies it. ---
+
+/// A one-row matrix whose row carries an explicit `full_name` (and the
+/// prefix/leaf it would render when prefix-stripped).
+fn one_row_matrix(full_name: &str, prefix: &str, leaf: &str) -> MainWindow {
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_pane(SharedString::from("matrix"));
+    ui.set_environments(ModelRc::from(Rc::new(VecModel::from(vec![
+        SharedString::from("prod"),
+    ]))));
+    let cells = vec![CellView {
+        absent: false,
+        dots: SharedString::from("··"),
+        length: SharedString::from("2"),
+        hex: SharedString::from("ab"),
+    }];
+    let item = MatrixItemView {
+        is_header: false,
+        row_index: 0,
+        prefix: SharedString::from(prefix),
+        leaf: SharedString::from(leaf),
+        full_name: SharedString::from(full_name),
+        state: SharedString::from("Aligned"),
+        glyph: SharedString::from("="),
+        cells: ModelRc::from(Rc::new(VecModel::from(cells))),
+        ..Default::default()
+    };
+    ui.set_items(ModelRc::from(Rc::new(VecModel::from(vec![item]))));
+    ui.window().set_size(LogicalSize::new(1000.0, 400.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    ui
+}
+
+#[test]
+fn entry_hover_reveals_full_name_and_click_copies_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    // A grouped row would show only "primary.url"; the un-stripped name is the full one.
+    let ui = one_row_matrix("database.primary.url", "primary.", "url");
+
+    let copied = Rc::new(std::cell::RefCell::new(String::new()));
+    {
+        let copied = copied.clone();
+        ui.on_copy_entry(move |name| *copied.borrow_mut() = name.to_string());
+    }
+
+    // The full-name overlay is hidden until the cell is hovered.
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "entry-full").count(),
+        0,
+        "the full-name overlay must stay hidden until the ENTRY cell is hovered"
+    );
+
+    // mock_single_click routes through window hit-testing: it moves the pointer to
+    // the cell centre (→ hover) before press/release (→ the copy-entry callback).
+    one_by_label(&ui, "entry-cell").mock_single_click(slint::platform::PointerEventButton::Left);
+
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "entry-full").count(),
+        1,
+        "hovering the ENTRY cell must reveal the full (un-stripped) Entry name"
+    );
+    assert_eq!(
+        *copied.borrow(),
+        "database.primary.url",
+        "clicking the ENTRY name must copy the full Entry name to the clipboard"
+    );
+}
+
 // --- Issue #23: Settings + chrome polish (cosmetic layout pass). The settings
 // overlay must render as a centered, constrained-width card (not full-bleed); the
 // top bar carries a read-only badge + identity + breadcrumb; the bottom status bar

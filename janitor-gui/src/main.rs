@@ -36,6 +36,11 @@ thread_local! {
     // the Manage window (which has no MainWindow handle) — `push_matrix` after a
     // rename/remove — can still reach the main window.
     static MAIN: RefCell<Option<slint::Weak<MainWindow>>> = const { RefCell::new(None) };
+    // One OS clipboard handle kept alive for the process: X11/Wayland serve the
+    // selection from the owning process, so a short-lived handle would lose the
+    // copied text on drop. Only ever holds Entry names — metadata, never Values
+    // (#40, ADR 0005).
+    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
 /// Run `f` with the upgraded main window, if it is still alive.
@@ -104,14 +109,22 @@ fn to_item_models(view: &MatrixView, grouped: bool) -> ModelRc<MatrixItemView> {
                 count: count as i32,
                 ..Default::default()
             },
-            MatrixItem::Row { index, zebra } => {
+            MatrixItem::Row {
+                index,
+                zebra,
+                group_label,
+            } => {
                 let r = &view.rows[index];
-                let (prefix, leaf) = rows::split_name(&r.name);
+                // Omit the cluster's common prefix the header already shows, then
+                // the muted-prefix / bold-leaf split over what remains (#40). Flat
+                // / lone rows (group_label None) keep the full name.
+                let (prefix, leaf) = rows::display_name_parts(group_label.as_deref(), &r.name);
                 MatrixItemView {
                     is_header: false,
                     row_index: index as i32,
                     prefix: prefix.into(),
                     leaf: leaf.into(),
+                    full_name: r.name.as_str().into(),
                     badge: rows::badge_label(r.kind).into(),
                     state: state_label(r.state).into(),
                     glyph: state_glyph(r.state).into(),
@@ -123,6 +136,32 @@ fn to_item_models(view: &MatrixView, grouped: bool) -> ModelRc<MatrixItemView> {
         })
         .collect();
     ModelRc::from(Rc::new(VecModel::from(items)))
+}
+
+/// Copy a (non-secret) Entry name to the OS clipboard, reusing the long-lived
+/// handle (ADR 0005; the name is metadata, so a plain copy with no auto-clear is
+/// right — that policy guards Values). Failures surface in the diagnostic log
+/// (ADR 0017) and never panic. The `arboard` / OS-clipboard shell here is
+/// intentionally untested (ADR 0010 §5) — the branch logic is trivial and the
+/// behaviour lives entirely in the platform handle.
+fn copy_entry_name(name: &str) {
+    CLIPBOARD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => *slot = Some(cb),
+                Err(e) => {
+                    tracing::warn!(target: "janitor::gui", "clipboard unavailable — {e}");
+                    return;
+                }
+            }
+        }
+        if let Some(cb) = slot.as_mut() {
+            if let Err(e) = cb.set_text(name.to_string()) {
+                tracing::warn!(target: "janitor::gui", "clipboard copy failed — {e}");
+            }
+        }
+    });
 }
 
 fn state_label(state: EntryState) -> &'static str {
@@ -878,6 +917,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    // Copy a row's full Entry name to the clipboard (#40). No Provider round-trip
+    // and no AppState needed — the name rides in on the callback.
+    ui.on_copy_entry(|name| copy_entry_name(name.as_str()));
     // Settings toggle.
     {
         let ui_weak = ui.as_weak();

@@ -17,6 +17,7 @@ export struct MatrixItemView {
     row-index: int,       // data row: index into MatrixView.rows (reveal coords)
     prefix: string,       // data row: muted name prefix (incl. trailing separator)
     leaf: string,         // data row: bold final segment
+    full-name: string,    // data row: complete Entry name (hover reveal / copy, #40)
     badge: string,        // data row: STRING/NUMBER/… ("" = none)
     state: string,        // data row: "Aligned"/"Drift"/"Gap"
     glyph: string,        // data row: order-independent =/≠/∅
@@ -63,6 +64,9 @@ export component MainWindow inherits Window {
     in property <string> revealed-text;
 
     callback reveal-cell(int, int);
+    // Copy a row's full Entry name to the OS clipboard (#40, ADR 0005). The name
+    // is metadata, never a Value.
+    callback copy-entry(string);
     callback select-app(int);
     // Auth / load state (driven by the worker). status: one of
     // "unauth" | "signing" | "loading" | "loaded" | "error".
@@ -122,7 +126,9 @@ export component MainWindow inherits Window {
     property <length> name-fs: 14px;
     property <length> sub-fs: 11px;
     property <length> row-pad: 8px;
-    property <length> row-h: root.name-fs + root.sub-fs + 3 * root.row-pad;
+    // Single-line ENTRY cell (#38): one name line + symmetric vertical padding.
+    // State no longer adds a second line — it lives in the STATE glyph column.
+    property <length> row-h: root.name-fs + 2 * root.row-pad;
     property <length> header-h: root.sub-fs + 2 * root.row-pad;
     property <length> entry-w: 300px;
     property <length> state-w: 46px;
@@ -329,14 +335,16 @@ export component MainWindow inherits Window {
                 // horizontally in lockstep with the body (viewport-x bound below).
                 HorizontalLayout {
                     Text {
-                        text: "ENTRY"; color: #8a8f98; font-size: 11px;
-                        min-width: root.entry-w; max-width: root.entry-w;
-                        vertical-alignment: center;
-                    }
-                    Text {
                         text: "STATE"; color: #8a8f98; font-size: 11px;
                         min-width: root.state-w; max-width: root.state-w;
                         horizontal-alignment: center; vertical-alignment: center;
+                        accessible-label: "statehdr";
+                    }
+                    Text {
+                        text: "ENTRY"; color: #8a8f98; font-size: 11px;
+                        min-width: root.entry-w; max-width: root.entry-w;
+                        vertical-alignment: center;
+                        accessible-label: "entryhdr";
                     }
                     env-head := Flickable {
                         // Mirror the body's env region (horizontal-stretch +
@@ -393,19 +401,37 @@ export component MainWindow inherits Window {
                                     }
                                 }
                                 if !item.is-header : HorizontalLayout {
-                                    // ENTRY cell: dot + prefix.leaf + badge, state word.
+                                    // STATE glyph column — frozen leftmost, and the
+                                    // row's SOLE state carrier (#38): the coloured
+                                    // =/≠/∅ glyph. No dot or state word elsewhere.
+                                    Rectangle {
+                                        min-width: root.state-w; max-width: root.state-w;
+                                        accessible-role: text;
+                                        accessible-label: "state-cell";
+                                        Text {
+                                            text: item.glyph;
+                                            color: Palette.dot-color(item.state);
+                                            font-size: 16px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    // ENTRY cell — one line: muted prefix + bold leaf
+                                    // + type badge. Dot and state word removed (#38),
+                                    // so the row collapses to single-line height. The
+                                    // padding lives on a wrapping VerticalLayout, not
+                                    // on the inner HorizontalLayout — padding directly
+                                    // on a box layout holding `overflow: elide` Texts
+                                    // blanks them (Slint layout quirk).
                                     Rectangle {
                                         min-width: root.entry-w; max-width: root.entry-w;
+                                        accessible-role: text;
+                                        accessible-label: "entry-cell";
+                                        clip: true;
                                         VerticalLayout {
                                             padding: root.row-pad;
-                                            spacing: 3px;
                                             HorizontalLayout {
                                                 spacing: 6px;
-                                                Rectangle {
-                                                    min-width: 8px; max-width: 8px;
-                                                    height: 8px; border-radius: 4px;
-                                                    background: Palette.dot-color(item.state);
-                                                }
                                                 Text {
                                                     text: item.prefix; color: #6b7280;
                                                     font-size: root.name-fs; overflow: elide;
@@ -429,22 +455,33 @@ export component MainWindow inherits Window {
                                                 }
                                                 Rectangle { horizontal-stretch: 1; }
                                             }
-                                            Text {
-                                                text: item.state;
-                                                color: Palette.dot-color(item.state);
-                                                font-size: root.sub-fs;
+                                        }
+                                        // Hover reveals the FULL (un-stripped) Entry
+                                        // name — the safety net for a prefix-stripped
+                                        // / elided ENTRY cell. Clicking copies the
+                                        // full name to the clipboard (#40, ADR 0005);
+                                        // copy is the authoritative full-name path —
+                                        // the in-cell preview elides past the column
+                                        // floor rather than hard-clipping. Names are
+                                        // metadata, never Values.
+                                        if ehover.has-hover : Rectangle {
+                                            background: root.dark ? #1b2330 : #e8ebf0;
+                                            HorizontalLayout {
+                                                padding-left: root.row-pad;
+                                                padding-right: root.row-pad;
+                                                Text {
+                                                    text: item.full-name;
+                                                    color: root.dark ? white : #14161a;
+                                                    font-size: root.name-fs;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                    accessible-label: "entry-full";
+                                                }
                                             }
                                         }
-                                    }
-                                    // STATE glyph column.
-                                    Rectangle {
-                                        min-width: root.state-w; max-width: root.state-w;
-                                        Text {
-                                            text: item.glyph;
-                                            color: Palette.dot-color(item.state);
-                                            font-size: 16px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
+                                        ehover := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.copy-entry(item.full-name); }
                                         }
                                     }
                                 }
