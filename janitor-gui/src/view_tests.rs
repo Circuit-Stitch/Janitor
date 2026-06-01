@@ -1,5 +1,7 @@
 //! Spike (tracer bullet): prove the headless Slint testing backend works in
-//! this repo, and use it to lock in the ADR 0020 env-band layout fix.
+//! this repo, and use it to lock in the env-band layout — originally the ADR
+//! 0020 resize fix, now the ADR 0023 column-sizing model (stretch-to-fill down
+//! to a content floor; below the floor, hold the floor and scroll).
 //!
 //! What this demonstrates about the harness:
 //!   * `i_slint_backend_testing::init_no_event_loop()` lets us create a
@@ -13,27 +15,27 @@
 //!     ONLY structural / positional info (the column index, or a band name) —
 //!     never a Value, the masked dots, or a length (THREAT-MODEL).
 //!
-//! What it asserts about the UI (ADR 0020):
-//!   1. ALIGNMENT: header env column N and body env column N step left-to-right
-//!      by exactly `env-w`, packed flush, in lockstep — i.e. column N of the
-//!      header sits at the same offset-from-its-band as column N of the body, so
-//!      they line up at any window width. (Measured relative to each band's own
-//!      origin, which factors out the constant `ScrollView` chrome offset the
-//!      headless style adds around the body — see the module note below.)
-//!   2. NO-SPREAD / FILLS THE WINDOW: with the `alignment: start` fix present the
-//!      env band's max-width stays infinite, so it STRETCHES to fill a window far
-//!      wider than the table (band width ≫ table-of-columns width). This is the
-//!      exact property `alignment: start` controls; removing it collapses the
-//!      band to the columns' intrinsic width and the table stops filling the
-//!      window — the RED state.
+//! What it asserts about the UI (ADR 0023 column-sizing model):
+//!   1. STRETCH-TO-FILL: with few columns and a wide window the Comparison
+//!      Columns share the available env width and stretch past the content floor
+//!      to fill it (no right-hand gutter).
+//!   2. HOLD-FLOOR-AND-SCROLL: with many columns (or a narrow window) the columns
+//!      stop shrinking at the floor and the env region's content grows past the
+//!      visible band, so it scrolls horizontally.
+//!   3. ALIGNMENT: header env column N sits directly above body env column N —
+//!      the two bands share the same env-region ORIGIN (column 0 at the same
+//!      absolute x) AND the same per-column step (`col-w`), at every window width.
+//!      One shared `col-w` drives both bands and the frozen ENTRY/STATE column is
+//!      pinned to a fixed width, so neither origin nor step drifts.
 //!
-//! Note on the literal "header.x == body.x" check: the body env region is
-//! wrapped in a `std-widgets` `ScrollView`, and the headless testing backend's
-//! style reserves a different amount of chrome around it than the real (fluent)
-//! renderer, shifting the whole body region right by a constant. So absolute
-//! header.x vs body.x is NOT equal headlessly even when the columns are
-//! correctly aligned. We therefore assert the renderer-independent invariant:
-//! identical per-column step within each band. See the spike report for detail.
+//! Note on absolute origin alignment: the body env region is wrapped in a
+//! `std-widgets` `ScrollView`, and the frozen ENTRY/STATE column beside it is
+//! pinned to `state-w + entry-w` (a bare `VerticalLayout` there defaults to
+//! horizontal-stretch 1 and would otherwise balloon to half the viewport, shoving
+//! the body env region sideways — the regression `assert_header_body_aligned`
+//! guards). With the column pinned, the body env origin equals the header band's,
+//! so we assert absolute alignment directly rather than only equal per-column step
+//! (a step-only check cancels any constant offset and would miss exactly that drift).
 
 #![cfg(test)]
 
@@ -43,7 +45,7 @@ use std::rc::Rc;
 use crate::{CellView, MainWindow, MatrixItemView};
 use i_slint_backend_testing::ElementHandle;
 
-const ENV_W: f32 = 200.0; // must match `env-w` in app.slint
+const ENV_FLOOR: f32 = 200.0; // must match `env-floor` in app.slint (the content floor)
 const ENV_COUNT: usize = 2;
 
 /// One non-header data row with `env_count` present cells. The cell text is a
@@ -92,77 +94,146 @@ fn body_x(ui: &MainWindow, col: usize) -> f32 {
         .x
 }
 
-/// Build the window, feed it a 2-env / 1-row matrix, and force it WIDE so any
-/// column spread / band collapse is geometrically obvious. Returns the window
-/// (kept alive by the caller).
-fn matrix_window() -> MainWindow {
+/// Build the window, feed it an `env_count`-env / 1-row matrix at a forced window
+/// size, and settle the layout so geometry is populated. Returns the window (kept
+/// alive by the caller). The env names are structural fixtures, never Values.
+fn matrix_window_n(env_count: usize, w: f32, h: f32) -> MainWindow {
     let ui = MainWindow::new().expect("create MainWindow");
     ui.set_pane(SharedString::from("matrix"));
-    ui.set_environments(ModelRc::from(Rc::new(VecModel::from(vec![
-        SharedString::from("prod"),
-        SharedString::from("staging"),
-    ]))));
+    let envs: Vec<SharedString> = (0..env_count)
+        .map(|j| SharedString::from(format!("env{j}")))
+        .collect();
+    ui.set_environments(ModelRc::from(Rc::new(VecModel::from(envs))));
     ui.set_items(ModelRc::from(Rc::new(VecModel::from(vec![data_row(
-        ENV_COUNT,
+        env_count,
     )]))));
-
-    // Table content ≈ entry(300) + state(46) + 2*env(200) = 746px; 1400px
-    // leaves ~650px of slack the band must absorb (GREEN) — or spread into (RED).
-    ui.window().set_size(LogicalSize::new(1400.0, 700.0));
+    ui.window().set_size(LogicalSize::new(w, h));
     // Advance the mock clock once so the layout pass settles and geometry /
     // absolute_position() are populated.
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     ui
 }
 
+/// The default fixture: a 2-env / 1-row matrix in a WIDE window, so any column
+/// spread / band collapse is geometrically obvious.
+fn matrix_window() -> MainWindow {
+    matrix_window_n(ENV_COUNT, 1400.0, 700.0)
+}
+
+/// The body's per-column width = the absolute-x step between adjacent env cells
+/// (chrome offset cancels in the difference). Needs ≥2 env columns.
+fn body_col_w(ui: &MainWindow) -> f32 {
+    body_x(ui, 1) - body_x(ui, 0)
+}
+
+// --- Issue #41 / ADR 0023: the Comparison Columns stretch to fill the available
+// env width down to a content floor, and below the floor hold the floor and the
+// env region scrolls horizontally. The Environment-name header stays metric-locked
+// above its own column at every width. (env-w is gone; the floor is `env-floor`.)
+
 #[test]
-fn env_columns_align_and_band_fills_window() {
+fn env_columns_stretch_to_fill_when_few_and_wide() {
     // MUST initialise the backend before creating any window.
     i_slint_backend_testing::init_no_event_loop();
 
+    // Two env columns in a wide (1400px) window: there is far more room than
+    // 2*floor, so the columns must STRETCH past the floor and together fill the
+    // band — no empty right-hand gutter (AC1). The old fixed-200 layout pinned
+    // each column at the floor and left the slack as a gutter (RED).
     let ui = matrix_window();
 
-    // --- (1) ALIGNMENT: header col N and body col N share the same per-column
-    // step (env-w), measured relative to each band's own column-0 origin. This
-    // is the renderer-independent statement of "header column N sits above body
-    // column N". ---
-    let h0 = header_x(&ui, 0);
-    let b0 = body_x(&ui, 0);
-    for col in 0..ENV_COUNT {
-        let h_off = header_x(&ui, col) - h0;
-        let b_off = body_x(&ui, col) - b0;
-        let want = col as f32 * ENV_W;
-        assert!(
-            (h_off - want).abs() <= 1.0,
-            "header column {col} offset {h_off} != {want} (env-w step) — header columns spread/misaligned"
-        );
-        assert!(
-            (b_off - want).abs() <= 1.0,
-            "body column {col} offset {b_off} != {want} (env-w step) — body columns spread/misaligned"
-        );
-        assert!(
-            (h_off - b_off).abs() <= 1.0,
-            "header col {col} (off {h_off}) and body col {col} (off {b_off}) must line up within 1px"
-        );
-    }
-
-    // --- (2) NO-SPREAD / FILLS WINDOW: with `alignment: start`, the env band's
-    // max-width stays infinite, so it stretches to fill the wide window — its
-    // width is far greater than the columns' intrinsic width (ENV_COUNT*env-w).
-    // Removing `alignment: start` (RED) collapses the band to that intrinsic
-    // width and the table no longer fills the window. ---
+    let col_w = body_col_w(&ui);
     let band_w = one_by_label(&ui, "envhead-band").size().width;
-    let intrinsic = ENV_COUNT as f32 * ENV_W; // 400px
-    eprintln!(
-        "env-head band width = {band_w} (intrinsic columns width = {intrinsic}); \
-         header col0.x={h0}, body col0.x={b0}"
-    );
+    eprintln!("stretch: col_w={col_w} band_w={band_w} floor={ENV_FLOOR}");
+
+    // (1) STRETCH: each column is meaningfully wider than the floor (the slack
+    // landed in the columns, not in a gutter).
     assert!(
-        band_w > intrinsic + 50.0,
-        "env band width {band_w} did not stretch past the columns' intrinsic \
-         width {intrinsic} — `alignment: start` missing? The band collapsed and \
-         the table stops filling the window (ADR 0020 regression)."
+        col_w > ENV_FLOOR + 50.0,
+        "env column width {col_w} did not stretch past the floor {ENV_FLOOR} — \
+         columns still pinned to the floor, leaving a right-hand gutter (AC1)"
     );
+
+    // (2) FILLS: the N columns together span the whole band (no gutter). With
+    // col_w = band/N above the floor, N*col_w == band within rounding.
+    let columns_w = col_w * ENV_COUNT as f32;
+    assert!(
+        (columns_w - band_w).abs() <= 2.0,
+        "columns span {columns_w} but the band is {band_w} — a gutter remains (AC1)"
+    );
+}
+
+#[test]
+fn env_columns_hold_floor_and_scroll_when_many() {
+    i_slint_backend_testing::init_no_event_loop();
+
+    // Eight env columns in a moderate (1000px) window: there is far LESS room than
+    // 8*floor, so the columns must NOT shrink below the floor — they hold it and
+    // the env region's content grows past the visible band (it scrolls). (AC2.)
+    const MANY: usize = 8;
+    let ui = matrix_window_n(MANY, 1000.0, 700.0);
+
+    let col_w = body_col_w(&ui);
+    let band_w = one_by_label(&ui, "envhead-band").size().width;
+    eprintln!("floor: col_w={col_w} band_w={band_w} floor={ENV_FLOOR}");
+
+    // (1) HOLDS THE FLOOR: each column is exactly the floor, not the squeezed
+    // band/N (~48px) it would be if the columns kept shrinking.
+    assert!(
+        (col_w - ENV_FLOOR).abs() <= 1.0,
+        "env column width {col_w} did not hold the floor {ENV_FLOOR} when many columns \
+         don't fit — columns shrank below the content floor (AC2)"
+    );
+
+    // (2) SCROLLS: the columns' total width exceeds the visible band, so there is
+    // a horizontal scroll region (the env viewport is wider than what's shown).
+    let columns_w = col_w * MANY as f32;
+    assert!(
+        columns_w > band_w + 50.0,
+        "columns span {columns_w} but the band is only {band_w} — the env region is \
+         not wider than the viewport, so it would not scroll horizontally (AC2)"
+    );
+}
+
+/// Assert the env-name header sits directly above its column's cells: the header
+/// band and the body share the SAME env-region origin (column 0 starts at the same
+/// absolute x) AND advance by the SAME per-column step. Equal origin + equal step
+/// ⇒ header column N lands exactly above body column N for all N (checked at the
+/// two always-visible leftmost columns; off-screen `for` columns aren't
+/// instantiated by the Flickable). The ORIGIN check is the regression guard: a
+/// frozen column that stretches (a VerticalLayout defaults to stretch 1) balloons
+/// to half the viewport and shoves the whole body env region sideways while the
+/// fixed-width header band stays put — a window-width-dependent drift that an
+/// equal-step-only check (which cancels any constant offset) silently passes.
+fn assert_header_body_aligned(ui: &MainWindow) {
+    let h0 = header_x(ui, 0);
+    let b0 = body_x(ui, 0);
+    assert!(
+        (h0 - b0).abs() <= 1.0,
+        "env header column 0 starts at x={h0} but body column 0 at x={b0} — the env \
+         region's origin differs between the bands, so every header sits off its own \
+         cells (AC3)"
+    );
+    let h_step = header_x(ui, 1) - header_x(ui, 0);
+    let b_step = body_x(ui, 1) - body_x(ui, 0);
+    assert!(
+        (h_step - b_step).abs() <= 1.0,
+        "header per-column step {h_step} != body per-column step {b_step} — the env \
+         header drifts across columns (AC3)"
+    );
+}
+
+#[test]
+fn env_header_and_body_columns_stay_aligned() {
+    i_slint_backend_testing::init_no_event_loop();
+
+    // AC3: the env-name header stays directly above its own column's cells at
+    // every width — columns STRETCH wide (1400) and narrower (1100), and HOLD THE
+    // FLOOR and scroll (8 cols / 1000). One `col-w` drives both bands and the
+    // frozen column is pinned, so neither the origin nor the step drifts.
+    assert_header_body_aligned(&matrix_window());
+    assert_header_body_aligned(&matrix_window_n(2, 1100.0, 700.0));
+    assert_header_body_aligned(&matrix_window_n(8, 1000.0, 700.0));
 }
 
 // --- Issue #38: STATE is the leftmost frozen column (left of ENTRY), and the
