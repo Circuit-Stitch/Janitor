@@ -369,8 +369,11 @@ export component MainWindow inherits Window {
                                         // Hover reveals the FULL (un-stripped) Entry
                                         // name — the safety net for a prefix-stripped
                                         // / elided ENTRY cell. Clicking copies the
-                                        // full name to the clipboard (#40, ADR 0005).
-                                        // Names are metadata, never Values.
+                                        // full name to the clipboard (#40, ADR 0005);
+                                        // copy is the authoritative full-name path —
+                                        // the in-cell preview elides past the column
+                                        // floor rather than hard-clipping. Names are
+                                        // metadata, never Values.
                                         if ehover.has-hover : Rectangle {
                                             background: root.dark ? #1b2330 : #e8ebf0;
                                             HorizontalLayout {
@@ -380,6 +383,7 @@ export component MainWindow inherits Window {
                                                     text: item.full-name;
                                                     color: root.dark ? white : #14161a;
                                                     font-size: root.name-fs;
+                                                    overflow: elide;
                                                     vertical-alignment: center;
                                                     accessible-label: "entry-full";
                                                 }

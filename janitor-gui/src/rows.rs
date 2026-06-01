@@ -98,7 +98,11 @@ pub fn split_name(name: &str) -> (&str, &str) {
 /// into the muted prefix + bold leaf. So `Some("database.*")` +
 /// `"database.primary.url"` renders as muted `"primary."` + bold `"url"`.
 pub fn display_name_parts<'a>(group_label: Option<&str>, name: &'a str) -> (&'a str, &'a str) {
-    split_name(cluster_relative_name(group_label, name))
+    let rel = cluster_relative_name(group_label, name);
+    // A member equal to its cluster's whole prefix (e.g. "database" under a
+    // separator-less "database*" label) strips to "" — fall back to the full name
+    // so the row never renders a blank ENTRY name.
+    split_name(if rel.is_empty() { name } else { rel })
 }
 
 #[cfg(test)]
@@ -287,6 +291,17 @@ mod tests {
         assert_eq!(
             display_name_parts(None, "database.primary.url"),
             ("database.primary.", "url")
+        );
+    }
+
+    #[test]
+    fn a_member_equal_to_its_cluster_prefix_keeps_the_full_name_not_a_blank() {
+        // "database" and "database.url" cluster under the separator-less label
+        // "database*"; the bare "database" member would strip to "" — fall back to
+        // the full name so the ENTRY cell never renders blank.
+        assert_eq!(
+            display_name_parts(Some("database*"), "database"),
+            ("", "database")
         );
     }
 }

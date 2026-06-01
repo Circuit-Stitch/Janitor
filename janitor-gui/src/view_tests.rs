@@ -193,6 +193,16 @@ fn state_column_is_frozen_left_of_entry() {
         state_cell < entry_cell,
         "STATE cell (x={state_cell}) must be left of ENTRY cell (x={entry_cell})"
     );
+
+    // STATE is the SOLE state carrier: assert the coloured glyph actually renders
+    // (= for the Aligned fixture row). A Text exposes its content as its implicit
+    // accessible-label, so finding "=" confirms the glyph is present — not just the
+    // cell. Without this, a dropped glyph would still pass the position checks.
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "=").count(),
+        1,
+        "the STATE column's glyph must render as the row's sole state carrier"
+    );
 }
 
 #[test]

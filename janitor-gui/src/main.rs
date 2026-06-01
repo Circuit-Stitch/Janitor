@@ -141,7 +141,9 @@ fn to_item_models(view: &MatrixView, grouped: bool) -> ModelRc<MatrixItemView> {
 /// Copy a (non-secret) Entry name to the OS clipboard, reusing the long-lived
 /// handle (ADR 0005; the name is metadata, so a plain copy with no auto-clear is
 /// right — that policy guards Values). Failures surface in the diagnostic log
-/// (ADR 0017) and never panic.
+/// (ADR 0017) and never panic. The `arboard` / OS-clipboard shell here is
+/// intentionally untested (ADR 0010 §5) — the branch logic is trivial and the
+/// behaviour lives entirely in the platform handle.
 fn copy_entry_name(name: &str) {
     CLIPBOARD.with(|slot| {
         let mut slot = slot.borrow_mut();
