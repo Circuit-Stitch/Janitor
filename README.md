@@ -3,6 +3,7 @@
 [![CI](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml)
 [![core coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=core&label=core%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 [![aws coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=aws&label=aws%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
+[![mock coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=mock&label=mock%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 
 > An ephemeral desktop client onto **AWS Secrets Manager**. It stores no secrets
 > and no credentials of its own — it borrows them on demand and forgets them.
@@ -91,15 +92,17 @@ write path or live-wired data flow exists yet.
 | `janitor-aws` ↔ GUI wiring (real data in the matrix) | ✅ Worker-threaded bridge + lazy sign-in; secrets stay in the worker; reveal round-trips; `JANITOR_MOCK=1` runs offline — [ADR 0012](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md) (live browser path human-gated) |
 | Non-stomping write engine | 📋 Designed — [ADR 0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md), not built |
 
-The workspace is three crates — `janitor-core` (offline, ≥80% coverage gate),
-`janitor-gui` (Slint), and `janitor-aws` (async AWS adapter). `cargo test
---workspace` runs them all; the coverage gate stays on `janitor-core`, where
-correctness is proven (ADR 0010 §5).
+The workspace is four crates — `janitor-core` (offline, ≥80% coverage gate),
+`janitor-gui` (Slint), `janitor-aws` (async AWS adapter, ≥80% gate on its
+library surface), and `janitor-mock` (the offline Provider — canned demo data,
+≥80% gate; ADR 0019). `cargo test --workspace` runs them all; the ≥80% coverage
+gates cover `core`, `aws`, and `mock`, where correctness is proven (ADR 0010 §5,
+ADR 0016).
 
 ## Build & test
 
-Standard Cargo across a three-crate workspace (`janitor-core`, `janitor-gui`,
-`janitor-aws`).
+Standard Cargo across a four-crate workspace (`janitor-core`, `janitor-gui`,
+`janitor-aws`, `janitor-mock`).
 
 ### Linux system dependencies
 
