@@ -242,7 +242,11 @@ export component MainWindow inherits Window {
                         horizontal-alignment: center; vertical-alignment: center;
                     }
                     env-head := Flickable {
-                        horizontal-stretch: 1;
+                        // Fixed at the env-column width so it stays aligned with
+                        // the body region; the trailing spacer below absorbs any
+                        // extra window width (and gives this band an infinite
+                        // max-width so the window can be widened freely).
+                        width: root.envs-w;
                         interactive: false;
                         viewport-x: env-body.viewport-x;
                         viewport-width: root.envs-w;
@@ -255,6 +259,7 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                    Rectangle { horizontal-stretch: 1; }
                 }
 
                 // Body: one vertical ScrollView holds both the frozen column and
