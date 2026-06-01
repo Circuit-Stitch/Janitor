@@ -13,48 +13,13 @@ use std::sync::Arc;
 
 use janitor_core::config::Mapping;
 
-use crate::select::{plan_selection, Selectable, SelectionPlan};
-use crate::session::FetchFailReason;
 use crate::types::{Credential, SsoToken};
 use crate::wire::SecretsApi;
 use crate::wire::{
     AccountCatalog, AccountSummary, RoleCredentialClient, RoleSummary, SecretSummary,
 };
-
-/// Which step of the walk produced an empty choice list. Carried by
-/// `Step::Empty` so the presenter can say "No accounts/roles/secrets you can
-/// access" without the machine knowing about phrasing (ADR 0013).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum What {
-    Accounts,
-    Roles,
-    Secrets,
-}
-
-/// What the wizard is currently asking, or its terminal outcome (ADR 0013).
-/// `Ask` is presenter-ready: `choices` are the `Selectable::label` lines to
-/// render in list order and `default` is the index to pre-select (the remembered
-/// pick, if still present); the typed items stay inside the machine so the user's
-/// pick comes back as a bare index via [`Discovery::advance`]. `what` lets the
-/// presenter title the list without knowing the variant. `Done` carries the
-/// fully-formed Mapping ready to append. `Empty`/`Failed` are masked terminal
-/// states (no SDK text).
-#[derive(Debug)]
-pub enum Step {
-    Ask {
-        what: What,
-        choices: Vec<String>,
-        default: Option<usize>,
-    },
-    Done(Mapping),
-    Empty(What),
-    Failed(FetchFailReason),
-    /// The SSO token is dead and could not be silently refreshed — a fresh
-    /// browser Sign-in is required. A distinct terminal state (not `Failed`) so
-    /// the presenter routes back to Sign-in rather than offering Back/Close
-    /// (ADR 0013).
-    Reauth,
-}
+use janitor_core::provider::{Step, What};
+use janitor_core::select::{plan_selection, Selectable, SelectionPlan};
 
 /// The choices the machine listed for the step it is currently blocked on, so
 /// [`Discovery::advance`] can resolve a chosen index back to the item without
@@ -274,6 +239,7 @@ fn pick<T>(mut items: Vec<T>, choice: usize) -> T {
 mod tests {
     use super::*;
     use crate::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient, FakeSecretsApi};
+    use janitor_core::provider::FetchFailReason;
     use std::time::{Duration, SystemTime};
 
     fn token() -> Arc<SsoToken> {

@@ -3259,6 +3259,7 @@ dependencies = [
 name = "janitor-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "directories",
  "secrecy",
  "serde",

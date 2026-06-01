@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use janitor_aws::authenticator::Authenticator;
 use janitor_aws::aws_impl::{AwsOidcClient, AwsRoleClient, AwsSecretsApi};
-use janitor_aws::discovery::{Step, What};
-use janitor_aws::session::{AppError, Session};
+use janitor_aws::session::Session;
 use janitor_aws::types::SystemClock;
 use janitor_core::compare::RowKey;
 use janitor_core::config::{Application, Config, Mapping};
+use janitor_core::provider::{AppError, Provider, Step, What};
 use janitor_core::view::MatrixView;
 
 /// UI → worker.
