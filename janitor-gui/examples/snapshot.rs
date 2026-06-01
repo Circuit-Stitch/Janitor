@@ -43,6 +43,7 @@ fn row(
     idx: i32,
     prefix: &str,
     leaf: &str,
+    full_name: &str,
     badge: &str,
     state: &str,
     glyph: &str,
@@ -54,6 +55,7 @@ fn row(
         row_index: idx,
         prefix: SharedString::from(prefix),
         leaf: SharedString::from(leaf),
+        full_name: SharedString::from(full_name),
         badge: SharedString::from(badge),
         state: SharedString::from(state),
         glyph: SharedString::from(glyph),
@@ -74,6 +76,9 @@ fn header(label: &str, count: i32) -> MatrixItemView {
 
 /// A representative 3-env matrix: two prefix clusters (dotted + underscore), lone
 /// rows, type badges, and Aligned/Drift/Gap states with present + absent cells.
+/// Grouped rows show the cluster-relative name (prefix omitted, #40) the way
+/// `to_item_models` renders them; `full_name` is the un-stripped name revealed on
+/// hover / copied on click.
 fn sample_matrix() -> ModelRc<MatrixItemView> {
     let p = || {
         vec![
@@ -86,8 +91,9 @@ fn sample_matrix() -> ModelRc<MatrixItemView> {
         header("database.*", 2),
         row(
             0,
-            "database.primary.",
+            "primary.",
             "url",
+            "database.primary.url",
             "STRING",
             "Drift",
             "≠",
@@ -100,8 +106,9 @@ fn sample_matrix() -> ModelRc<MatrixItemView> {
         ),
         row(
             1,
-            "database.primary.",
+            "primary.",
             "pass",
+            "database.primary.pass",
             "STRING",
             "Aligned",
             "=",
@@ -109,11 +116,22 @@ fn sample_matrix() -> ModelRc<MatrixItemView> {
             p(),
         ),
         header("GITHUB_APP_*", 2),
-        row(2, "GITHUB_APP_", "ID", "NUMBER", "Aligned", "=", false, p()),
+        row(
+            2,
+            "",
+            "ID",
+            "GITHUB_APP_ID",
+            "NUMBER",
+            "Aligned",
+            "=",
+            false,
+            p(),
+        ),
         row(
             3,
-            "GITHUB_APP_",
+            "",
             "KEY",
+            "GITHUB_APP_KEY",
             "STRING",
             "Gap",
             "∅",
@@ -124,13 +142,24 @@ fn sample_matrix() -> ModelRc<MatrixItemView> {
             4,
             "",
             "STRIPE_KEY",
+            "STRIPE_KEY",
             "STRING",
             "Gap",
             "∅",
             false,
             vec![present("36", "7711cc"), absent(), absent()],
         ),
-        row(5, "", "LOG_LEVEL", "STRING", "Aligned", "=", false, p()),
+        row(
+            5,
+            "",
+            "LOG_LEVEL",
+            "LOG_LEVEL",
+            "STRING",
+            "Aligned",
+            "=",
+            false,
+            p(),
+        ),
     ];
     ModelRc::from(Rc::new(VecModel::from(items)))
 }

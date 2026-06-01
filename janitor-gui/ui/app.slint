@@ -17,6 +17,7 @@ export struct MatrixItemView {
     row-index: int,       // data row: index into MatrixView.rows (reveal coords)
     prefix: string,       // data row: muted name prefix (incl. trailing separator)
     leaf: string,         // data row: bold final segment
+    full-name: string,    // data row: complete Entry name (hover reveal / copy, #40)
     badge: string,        // data row: STRING/NUMBER/… ("" = none)
     state: string,        // data row: "Aligned"/"Drift"/"Gap"
     glyph: string,        // data row: order-independent =/≠/∅
@@ -63,6 +64,9 @@ export component MainWindow inherits Window {
     in property <string> revealed-text;
 
     callback reveal-cell(int, int);
+    // Copy a row's full Entry name to the OS clipboard (#40, ADR 0005). The name
+    // is metadata, never a Value.
+    callback copy-entry(string);
     callback select-app(int);
     // Auth / load state (driven by the worker). status: one of
     // "unauth" | "signing" | "loading" | "loaded" | "error".
@@ -333,6 +337,7 @@ export component MainWindow inherits Window {
                                         min-width: root.entry-w; max-width: root.entry-w;
                                         accessible-role: text;
                                         accessible-label: "entry-cell";
+                                        clip: true;
                                         VerticalLayout {
                                             padding: root.row-pad;
                                             HorizontalLayout {
@@ -360,6 +365,29 @@ export component MainWindow inherits Window {
                                                 }
                                                 Rectangle { horizontal-stretch: 1; }
                                             }
+                                        }
+                                        // Hover reveals the FULL (un-stripped) Entry
+                                        // name — the safety net for a prefix-stripped
+                                        // / elided ENTRY cell. Clicking copies the
+                                        // full name to the clipboard (#40, ADR 0005).
+                                        // Names are metadata, never Values.
+                                        if ehover.has-hover : Rectangle {
+                                            background: root.dark ? #1b2330 : #e8ebf0;
+                                            HorizontalLayout {
+                                                padding-left: root.row-pad;
+                                                padding-right: root.row-pad;
+                                                Text {
+                                                    text: item.full-name;
+                                                    color: root.dark ? white : #14161a;
+                                                    font-size: root.name-fs;
+                                                    vertical-alignment: center;
+                                                    accessible-label: "entry-full";
+                                                }
+                                            }
+                                        }
+                                        ehover := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.copy-entry(item.full-name); }
                                         }
                                     }
                                 }

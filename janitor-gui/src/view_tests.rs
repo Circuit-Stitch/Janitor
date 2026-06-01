@@ -219,3 +219,72 @@ fn entry_cell_is_single_line_with_no_state_word() {
         "ENTRY cell height {h} is not single-line (expected ~30px; two-line was ~49px)"
     );
 }
+
+// --- Issue #40: a grouped/elided ENTRY name is safe because hovering reveals the
+// full (un-stripped) name and clicking copies it. ---
+
+/// A one-row matrix whose row carries an explicit `full_name` (and the
+/// prefix/leaf it would render when prefix-stripped).
+fn one_row_matrix(full_name: &str, prefix: &str, leaf: &str) -> MainWindow {
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_pane(SharedString::from("matrix"));
+    ui.set_environments(ModelRc::from(Rc::new(VecModel::from(vec![
+        SharedString::from("prod"),
+    ]))));
+    let cells = vec![CellView {
+        absent: false,
+        dots: SharedString::from("··"),
+        length: SharedString::from("2"),
+        hex: SharedString::from("ab"),
+    }];
+    let item = MatrixItemView {
+        is_header: false,
+        row_index: 0,
+        prefix: SharedString::from(prefix),
+        leaf: SharedString::from(leaf),
+        full_name: SharedString::from(full_name),
+        state: SharedString::from("Aligned"),
+        glyph: SharedString::from("="),
+        cells: ModelRc::from(Rc::new(VecModel::from(cells))),
+        ..Default::default()
+    };
+    ui.set_items(ModelRc::from(Rc::new(VecModel::from(vec![item]))));
+    ui.window().set_size(LogicalSize::new(1000.0, 400.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    ui
+}
+
+#[test]
+fn entry_hover_reveals_full_name_and_click_copies_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    // A grouped row would show only "primary.url"; the un-stripped name is the full one.
+    let ui = one_row_matrix("database.primary.url", "primary.", "url");
+
+    let copied = Rc::new(std::cell::RefCell::new(String::new()));
+    {
+        let copied = copied.clone();
+        ui.on_copy_entry(move |name| *copied.borrow_mut() = name.to_string());
+    }
+
+    // The full-name overlay is hidden until the cell is hovered.
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "entry-full").count(),
+        0,
+        "the full-name overlay must stay hidden until the ENTRY cell is hovered"
+    );
+
+    // mock_single_click routes through window hit-testing: it moves the pointer to
+    // the cell centre (→ hover) before press/release (→ the copy-entry callback).
+    one_by_label(&ui, "entry-cell").mock_single_click(slint::platform::PointerEventButton::Left);
+
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "entry-full").count(),
+        1,
+        "hovering the ENTRY cell must reveal the full (un-stripped) Entry name"
+    );
+    assert_eq!(
+        *copied.borrow(),
+        "database.primary.url",
+        "clicking the ENTRY name must copy the full Entry name to the clipboard"
+    );
+}
