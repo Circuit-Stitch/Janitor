@@ -13,6 +13,7 @@
 //! its own module, so the network stays mockable and the coverage gate stays
 //! reachable. Do not wire the SDK directly into the modules here.
 
+pub mod cluster;
 pub mod compare;
 pub mod config;
 pub mod mock;

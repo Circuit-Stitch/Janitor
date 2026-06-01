@@ -4,7 +4,7 @@
 //! [`reveal_value`] against the still-owned Sets, never through this DTO.
 
 use crate::compare::{Cell, Comparison, EntryState, RowKey};
-use crate::secret::{SecretShape, Value};
+use crate::secret::{LeafKind, SecretShape, Value};
 
 /// An owned, non-secret matrix ready to map onto view models.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,14 +21,25 @@ pub struct MatrixRow {
     /// Display name (`EntryName` text, or `"(whole set)"`).
     pub name: String,
     pub state: EntryState,
+    /// Representative JSON leaf type for the row's type badge — the kind of the
+    /// row's first present cell (`None` for a Binary whole-set row, which has no
+    /// leaf type). Kind disagreement across Environments is already Drift, so a
+    /// single representative is enough for the badge (issue #20).
+    pub kind: Option<LeafKind>,
     pub cells: Vec<MatrixCell>,
 }
 
 /// One projected cell — masked only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatrixCell {
-    /// Present: byte length, row-local equality group, and a cosmetic hex tag.
-    Present { len: usize, group: u32, hex: String },
+    /// Present: byte length, row-local equality group, a cosmetic hex tag, and
+    /// the JSON leaf type (`None` for a Binary cell, which has no leaf type).
+    Present {
+        len: usize,
+        group: u32,
+        hex: String,
+        kind: Option<LeafKind>,
+    },
     /// Missing in this Environment.
     Absent,
 }
@@ -43,28 +54,40 @@ pub fn project(comparison: &Comparison) -> MatrixView {
                 RowKey::Entry(n) => n.as_str().to_string(),
                 RowKey::WholeSet => "(whole set)".to_string(),
             };
-            let cells = row
+            let cells: Vec<MatrixCell> = row
                 .cells
                 .iter()
                 .map(|cell| match cell {
                     // `group.0` is pub(crate) on GroupId — readable here in-crate.
-                    Cell::Text { len, group, .. } => MatrixCell::Present {
+                    Cell::Text { value, len, group } => MatrixCell::Present {
                         len: *len,
                         group: group.0,
                         hex: hex_tag(&name, group.0),
+                        kind: Some(value.kind()),
                     },
                     Cell::Binary { len, group } => MatrixCell::Present {
                         len: *len,
                         group: group.0,
                         hex: hex_tag(&name, group.0),
+                        kind: None,
                     },
                     Cell::Absent => MatrixCell::Absent,
                 })
                 .collect();
+            // Badge kind: the first present cell's leaf type (None when the only
+            // present cells are Binary).
+            let kind = cells
+                .iter()
+                .find_map(|c| match c {
+                    MatrixCell::Present { kind, .. } => Some(*kind),
+                    MatrixCell::Absent => None,
+                })
+                .flatten();
             MatrixRow {
                 key: row.key.clone(),
                 name,
                 state: row.state,
+                kind,
                 cells,
             }
         })
@@ -89,6 +112,17 @@ pub fn reveal_value<'a>(
         (RowKey::Entry(name), SecretShape::Json(map)) => map.get(name),
         (RowKey::WholeSet, SecretShape::Raw(value)) => Some(value),
         _ => None,
+    }
+}
+
+/// The frozen STATE-column glyph for a whole-row [`EntryState`] (ADR 0014):
+/// `=` Aligned, `≠` Drift, `∅` Gap. Order-independent — computed by the engine
+/// across all columns, never a per-pair comparator.
+pub fn state_glyph(state: EntryState) -> &'static str {
+    match state {
+        EntryState::Aligned => "=",
+        EntryState::Drift => "≠",
+        EntryState::Gap => "∅",
     }
 }
 
@@ -287,6 +321,57 @@ mod tests {
             vec!["ccc", "aaa", "bbb"],
             "Gap, then Drift, then Aligned"
         );
+    }
+
+    #[test]
+    fn row_and_cell_carry_representative_leaf_kind_for_the_badge() {
+        use crate::secret::LeafKind;
+        let sets = [
+            env("prod", r#"{"port":5432,"name":"svc"}"#),
+            env("staging", r#"{"port":5432,"name":"svc"}"#),
+        ];
+        let view = project(&Comparison::build(&sets));
+
+        let port = find(&view, "port");
+        assert_eq!(port.kind, Some(LeafKind::Number), "row badge kind");
+        match &port.cells[0] {
+            MatrixCell::Present { kind, .. } => {
+                assert_eq!(*kind, Some(LeafKind::Number), "cell carries its kind")
+            }
+            _ => panic!("expected Present"),
+        }
+
+        let name = find(&view, "name");
+        assert_eq!(name.kind, Some(LeafKind::String));
+    }
+
+    #[test]
+    fn raw_whole_set_is_string_kind_and_binary_has_no_kind() {
+        // A Raw set is a String Value; a Binary set has no JSON leaf type, so its
+        // row and cell carry no kind (the badge renders nothing).
+        let raw = [env("prod", "tok-aaaa")];
+        let rv = project(&Comparison::build(&raw));
+        assert_eq!(rv.rows[0].kind, Some(crate::secret::LeafKind::String));
+
+        let bin = [(
+            "prod".to_string(),
+            SecretShape::from_secret_binary(vec![1, 2, 3, 4]),
+        )];
+        let bv = project(&Comparison::build(&bin));
+        assert_eq!(bv.rows[0].kind, None);
+        assert!(matches!(
+            bv.rows[0].cells[0],
+            MatrixCell::Present { kind: None, .. }
+        ));
+    }
+
+    #[test]
+    fn state_glyph_maps_the_whole_row_entry_state() {
+        // ADR 0014: the frozen STATE column shows one order-independent glyph per
+        // row, straight from the engine's EntryState — not a pairwise comparator.
+        assert_eq!(state_glyph(EntryState::Aligned), "=");
+        assert_eq!(state_glyph(EntryState::Drift), "≠");
+        assert_eq!(state_glyph(EntryState::Gap), "∅");
     }
 
     #[test]
