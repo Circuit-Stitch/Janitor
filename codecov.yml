@@ -8,8 +8,8 @@ coverage:
 
 comment: false
 
-# Two per-crate flags back the two README badges. Paths scope each flag to its
-# crate; janitor-gui is intentionally absent (no badge, no coverage — ADR 0003).
+# Per-crate flags back the README badges. Paths scope each flag to its crate;
+# janitor-gui is intentionally absent (no badge, no coverage — ADR 0003).
 flags:
   core:
     paths:
@@ -17,3 +17,6 @@ flags:
   aws:
     paths:
       - janitor-aws/
+  mock:
+    paths:
+      - janitor-mock/
