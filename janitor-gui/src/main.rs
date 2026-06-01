@@ -1,5 +1,6 @@
 slint::include_modules!();
 mod pane;
+mod rows;
 mod worker;
 
 use std::cell::RefCell;
@@ -18,9 +19,10 @@ use janitor_core::mock::MockSource;
 use janitor_core::secret::SecretShape;
 use janitor_core::source::SecretSource;
 use janitor_core::view::{
-    project, reveal_value, sort_rows, MatrixCell, MatrixRow, MatrixView, SortKey,
+    project, reveal_value, sort_rows, state_glyph, MatrixCell, MatrixView, SortKey,
 };
 
+use rows::{matrix_items, MatrixItem};
 use worker::{Command, Event};
 
 /// Where matrix data comes from. Both arms feed the one `apply_event` path.
@@ -160,56 +162,63 @@ fn dots(len: usize) -> String {
     "·".repeat(len.min(40))
 }
 
-/// The 2-env equality glyph; blank for N != 2.
-fn glyph_for(row: &MatrixRow) -> &'static str {
-    if row.cells.len() != 2 {
-        return "";
-    }
-    match (&row.cells[0], &row.cells[1]) {
-        (MatrixCell::Absent, _) | (_, MatrixCell::Absent) => "ø",
-        (MatrixCell::Present { group: a, .. }, MatrixCell::Present { group: b, .. }) => {
-            if a == b {
-                "="
-            } else {
-                "≠"
-            }
-        }
-    }
+/// Map a row's masked cells into Slint cell models.
+fn to_cell_views(cells: &[MatrixCell]) -> ModelRc<CellView> {
+    let cells: Vec<CellView> = cells
+        .iter()
+        .map(|c| match c {
+            MatrixCell::Present { len, hex, .. } => CellView {
+                absent: false,
+                dots: dots(*len).into(),
+                length: len.to_string().into(),
+                hex: hex.clone().into(),
+            },
+            MatrixCell::Absent => CellView {
+                absent: true,
+                dots: SharedString::new(),
+                length: SharedString::new(),
+                hex: SharedString::new(),
+            },
+        })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(cells)))
 }
 
-/// Map an owned `MatrixView` into Slint row models.
-fn to_row_models(view: &MatrixView) -> ModelRc<RowView> {
-    let rows: Vec<RowView> = view
-        .rows
-        .iter()
-        .map(|r| {
-            let cells: Vec<CellView> = r
-                .cells
-                .iter()
-                .map(|c| match c {
-                    MatrixCell::Present { len, hex, .. } => CellView {
-                        absent: false,
-                        dots: dots(*len).into(),
-                        length: len.to_string().into(),
-                        hex: hex.clone().into(),
-                    },
-                    MatrixCell::Absent => CellView {
-                        absent: true,
-                        dots: SharedString::new(),
-                        length: SharedString::new(),
-                        hex: SharedString::new(),
-                    },
-                })
-                .collect();
-            RowView {
-                name: r.name.clone().into(),
-                state: state_label(r.state).into(),
-                glyph: glyph_for(r).into(),
-                cells: ModelRc::from(Rc::new(VecModel::from(cells))),
+/// Map an owned `MatrixView` into the flat list of table items the view renders:
+/// prefix-cluster headers interleaved with data rows (per the pure `matrix_items`
+/// seam), each row carrying its `MatrixView` index for reveal, the muted-prefix /
+/// bold-leaf name split, its `LeafKind` badge, the order-independent state glyph,
+/// and its zebra parity. `grouped` toggles clustering (default on, issue #20).
+fn to_item_models(view: &MatrixView, grouped: bool) -> ModelRc<MatrixItemView> {
+    let names: Vec<&str> = view.rows.iter().map(|r| r.name.as_str()).collect();
+    let items: Vec<MatrixItemView> = matrix_items(&names, grouped)
+        .into_iter()
+        .map(|item| match item {
+            MatrixItem::Header { label, count } => MatrixItemView {
+                is_header: true,
+                label: label.into(),
+                count: count as i32,
+                ..Default::default()
+            },
+            MatrixItem::Row { index, zebra } => {
+                let r = &view.rows[index];
+                let (prefix, leaf) = rows::split_name(&r.name);
+                MatrixItemView {
+                    is_header: false,
+                    row_index: index as i32,
+                    prefix: prefix.into(),
+                    leaf: leaf.into(),
+                    badge: rows::badge_label(r.kind).into(),
+                    state: state_label(r.state).into(),
+                    glyph: state_glyph(r.state).into(),
+                    zebra,
+                    cells: to_cell_views(&r.cells),
+                    ..Default::default()
+                }
             }
         })
         .collect();
-    ModelRc::from(Rc::new(VecModel::from(rows)))
+    ModelRc::from(Rc::new(VecModel::from(items)))
 }
 
 fn state_label(state: EntryState) -> &'static str {
@@ -233,6 +242,8 @@ struct Preferences {
     sort: SortKey,
     auto_hide_secs: u64,
     dark: bool,
+    /// Prefix-cluster grouping toggle — default on (issue #20).
+    grouped: bool,
 }
 
 struct AppState {
@@ -705,7 +716,7 @@ fn push_matrix(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     {
         let st = state.borrow();
         ui.set_environments(env_models(&st.view));
-        ui.set_rows(to_row_models(&st.view));
+        ui.set_items(to_item_models(&st.view, st.prefs.grouped));
         ui.set_apps(app_models(&st.config, st.selected, &st.view, &st.status));
     }
     // The app-set may have changed (add/remove), which flips the empty-state.
@@ -805,6 +816,7 @@ fn main() -> Result<(), slint::PlatformError> {
             sort: SortKey::Name,
             auto_hide_secs: 5,
             dark: true,
+            grouped: true,
         },
         view: MatrixView {
             environments: Vec::new(),
@@ -839,6 +851,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sso_start_url(st.config.sso_start_url.as_str().into());
         ui.set_sso_region(st.config.sso_region.as_str().into());
         ui.set_dark(st.prefs.dark);
+        ui.set_grouped(st.prefs.grouped);
         ui.set_status(st.status.as_str().into());
     }
     push_matrix(&ui, &state);
@@ -1051,6 +1064,16 @@ fn main() -> Result<(), slint::PlatformError> {
         let state = state.clone();
         ui.on_set_auto_hide(move |secs| {
             state.borrow_mut().prefs.auto_hide_secs = secs.max(1) as u64;
+        });
+    }
+    // Prefix-cluster grouping toggle (default on). Re-pushes the item models so
+    // headers appear/disappear and zebra restripes.
+    {
+        let ui_weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_set_grouped(move |grouped| {
+            state.borrow_mut().prefs.grouped = grouped;
+            push_matrix(&ui_weak.unwrap(), &state);
         });
     }
 

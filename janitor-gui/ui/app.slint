@@ -7,10 +7,20 @@ export struct CellView {
     hex: string,
 }
 
-export struct RowView {
-    name: string,
-    state: string,
-    glyph: string,
+// One rendered line of the matrix: a prefix-cluster header, or a data row.
+// Assembled in Rust (`rows::matrix_items`) so the view stays logic-free.
+export struct MatrixItemView {
+    // Header vs data row. Header uses `label` + `count`; a data row uses the rest.
+    is-header: bool,
+    label: string,        // header: cluster label, e.g. "database.*"
+    count: int,           // header: member count
+    row-index: int,       // data row: index into MatrixView.rows (reveal coords)
+    prefix: string,       // data row: muted name prefix (incl. trailing separator)
+    leaf: string,         // data row: bold final segment
+    badge: string,        // data row: STRING/NUMBER/… ("" = none)
+    state: string,        // data row: "Aligned"/"Drift"/"Gap"
+    glyph: string,        // data row: order-independent =/≠/∅
+    zebra: bool,          // data row: shaded stripe (resets per group)
     cells: [CellView],
 }
 
@@ -29,6 +39,14 @@ export struct EnvRow {
     permission_set: string,
 }
 
+// Shared palette helpers so per-row colour logic isn't duplicated or threaded
+// through brittle `parent.parent` chains. State lives in the dot/glyph only.
+export global Palette {
+    pure public function dot-color(state: string) -> color {
+        return state == "Gap" ? #6b7280 : state == "Drift" ? #e0a356 : #5db07a;
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Janitor";
     preferred-width: 1100px;
@@ -36,7 +54,7 @@ export component MainWindow inherits Window {
     background: root.dark ? #14161a : #f4f5f7;
 
     in property <[string]> environments;
-    in property <[RowView]> rows;
+    in property <[MatrixItemView]> items;
     in property <[AppItem]> apps;
 
     in property <int> revealed-row: -1;
@@ -69,9 +87,29 @@ export component MainWindow inherits Window {
 
     in property <bool> dark: true;
     in-out property <int> auto-hide-secs: 5;
+    in-out property <bool> grouped: true;
     callback set-theme(bool);
     callback set-sort(int);
     callback set-auto-hide(int);
+    callback set-grouped(bool);
+
+    // --- Matrix table metrics: row height derives from font-size + padding (no
+    // magic 48px); column widths drive the frozen/scroll split. ---
+    property <length> name-fs: 14px;
+    property <length> sub-fs: 11px;
+    property <length> row-pad: 8px;
+    property <length> row-h: root.name-fs + root.sub-fs + 3 * root.row-pad;
+    property <length> header-h: root.sub-fs + 2 * root.row-pad;
+    property <length> entry-w: 300px;
+    property <length> state-w: 46px;
+    property <length> env-w: 200px;
+    property <length> envs-w: root.env-w * environments.length;
+    // Stripe shades + chrome. State never tints the row — it lives in the dot /
+    // glyph / pill only.
+    property <color> stripe-a: root.dark ? #15181d : #ffffff;
+    property <color> stripe-b: root.dark ? #191d24 : #f0f2f5;
+    property <color> header-bg: root.dark ? #0e1115 : #e4e7eb;
+    property <color> grid: root.dark ? #23272f : #d8dce2;
 
     HorizontalLayout {
         // Sidebar
@@ -160,56 +198,194 @@ export component MainWindow inherits Window {
 
             if root.pane == "matrix" : VerticalLayout {
                 spacing: 6px;
+
+                // Group-by-prefix toggle (default on).
                 HorizontalLayout {
-                    spacing: 12px;
-                    Text { text: "ENTRY"; color: #8a8f98; width: 320px; }
-                    for env in environments : Text {
-                        text: env;
-                        color: #c8ccd4;
-                        horizontal-stretch: 1;
+                    spacing: 8px;
+                    Text {
+                        text: "Group by prefix";
+                        color: #8a8f98;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    Switch {
+                        checked: root.grouped;
+                        toggled => { root.set-grouped(self.checked); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                // Header band: frozen ENTRY + STATE, then env names that scroll
+                // horizontally in lockstep with the body (viewport-x bound below).
+                HorizontalLayout {
+                    Text {
+                        text: "ENTRY"; color: #8a8f98; font-size: 11px;
+                        min-width: root.entry-w; max-width: root.entry-w;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "STATE"; color: #8a8f98; font-size: 11px;
+                        min-width: root.state-w; max-width: root.state-w;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    env-head := Flickable {
+                        interactive: false;
+                        viewport-x: env-body.viewport-x;
+                        viewport-width: root.envs-w;
+                        viewport-height: self.height;
+                        HorizontalLayout {
+                            for env in environments : Text {
+                                text: env; color: #c8ccd4; font-size: 11px;
+                                min-width: root.env-w; max-width: root.env-w;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                 }
 
+                // Body: one vertical ScrollView holds both the frozen column and
+                // the horizontally-flickable env region, so they scroll vertically
+                // together; only the env region scrolls horizontally.
                 ScrollView {
-                    VerticalLayout {
-                        spacing: 2px;
-                        for row[i] in rows : HorizontalLayout {
-                            spacing: 12px;
-                            VerticalLayout {
-                                width: 320px;
-                                Text { text: row.name; color: white; overflow: elide; }
-                                Text {
-                                    text: row.state + "   " + row.glyph;
-                                    color: row.state == "Gap" ? #6b7280
-                                         : row.state == "Drift" ? #e0a356
-                                         : #5db07a;
-                                    font-size: 11px;
+                    vertical-stretch: 1;
+                    HorizontalLayout {
+                        // FROZEN: ENTRY (2-line) + STATE glyph, per item.
+                        VerticalLayout {
+                            for item[i] in items : Rectangle {
+                                height: item.is-header ? root.header-h : root.row-h;
+                                background: item.is-header ? root.header-bg
+                                    : (item.zebra ? root.stripe-b : root.stripe-a);
+                                // Grid baseline.
+                                Rectangle {
+                                    y: parent.height - 1px; height: 1px;
+                                    background: root.grid;
+                                }
+                                if item.is-header : HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px;
+                                    Text {
+                                        text: item.label + "   " + item.count;
+                                        color: #8a8f98; font-size: root.sub-fs;
+                                        font-weight: 700; vertical-alignment: center;
+                                    }
+                                }
+                                if !item.is-header : HorizontalLayout {
+                                    // ENTRY cell: dot + prefix.leaf + badge, state word.
+                                    Rectangle {
+                                        min-width: root.entry-w; max-width: root.entry-w;
+                                        VerticalLayout {
+                                            padding: root.row-pad;
+                                            spacing: 3px;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                Rectangle {
+                                                    min-width: 8px; max-width: 8px;
+                                                    height: 8px; border-radius: 4px;
+                                                    background: Palette.dot-color(item.state);
+                                                }
+                                                Text {
+                                                    text: item.prefix; color: #6b7280;
+                                                    font-size: root.name-fs; overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                                Text {
+                                                    text: item.leaf; color: root.dark ? white : #14161a;
+                                                    font-size: root.name-fs; font-weight: 700;
+                                                    overflow: elide; vertical-alignment: center;
+                                                }
+                                                if item.badge != "" : Rectangle {
+                                                    background: root.dark ? #232a36 : #dfe4ec;
+                                                    border-radius: 3px;
+                                                    HorizontalLayout {
+                                                        padding-left: 5px; padding-right: 5px;
+                                                        Text {
+                                                            text: item.badge; color: #9aa0aa;
+                                                            font-size: 9px; vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                                Rectangle { horizontal-stretch: 1; }
+                                            }
+                                            Text {
+                                                text: item.state;
+                                                color: Palette.dot-color(item.state);
+                                                font-size: root.sub-fs;
+                                            }
+                                        }
+                                    }
+                                    // STATE glyph column.
+                                    Rectangle {
+                                        min-width: root.state-w; max-width: root.state-w;
+                                        Text {
+                                            text: item.glyph;
+                                            color: Palette.dot-color(item.state);
+                                            font-size: 16px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
                                 }
                             }
-                            for cell[j] in row.cells : Rectangle {
-                                horizontal-stretch: 1;
-                                property <bool> is-revealed:
-                                    root.revealed-row == i && root.revealed-col == j;
-                                background: touch.has-hover ? #1b1e24 : transparent;
-                                touch := TouchArea {
-                                    clicked => { root.reveal-cell(i, j); }
-                                }
-                                HorizontalLayout {
-                                    padding: 6px;
-                                    spacing: 8px;
-                                    if cell.absent : Text {
-                                        text: "— absent";
-                                        color: #4b5563;
-                                        horizontal-stretch: 1;
+                        }
+                        // ENV: horizontally-flickable cells, aligned row-for-row.
+                        env-body := Flickable {
+                            horizontal-stretch: 1;
+                            viewport-width: root.envs-w;
+                            viewport-height: self.height;
+                            VerticalLayout {
+                                for item[i] in items : Rectangle {
+                                    height: item.is-header ? root.header-h : root.row-h;
+                                    background: item.is-header ? root.header-bg
+                                        : (item.zebra ? root.stripe-b : root.stripe-a);
+                                    Rectangle {
+                                        y: parent.height - 1px; height: 1px;
+                                        background: root.grid;
                                     }
-                                    if !cell.absent : Text {
-                                        text: is-revealed ? root.revealed-text : cell.dots;
-                                        color: is-revealed ? #ffd479 : #6b7280;
-                                        overflow: elide;
-                                        horizontal-stretch: 1;
+                                    if !item.is-header : HorizontalLayout {
+                                        for cell[j] in item.cells : Rectangle {
+                                            min-width: root.env-w; max-width: root.env-w;
+                                            property <bool> is-revealed:
+                                                root.revealed-row == item.row-index
+                                                && root.revealed-col == j;
+                                            HorizontalLayout {
+                                                padding: root.row-pad;
+                                                spacing: 8px;
+                                                if cell.absent : Text {
+                                                    text: "— absent"; color: #4b5563;
+                                                    horizontal-stretch: 1;
+                                                    vertical-alignment: center;
+                                                }
+                                                if !cell.absent : Rectangle {
+                                                    min-width: 6px; max-width: 6px;
+                                                    height: 6px; border-radius: 3px;
+                                                    background: Palette.dot-color(item.state);
+                                                }
+                                                if !cell.absent : Text {
+                                                    text: is-revealed ? root.revealed-text : cell.dots;
+                                                    color: is-revealed ? #ffd479 : #6b7280;
+                                                    overflow: elide; horizontal-stretch: 1;
+                                                    vertical-alignment: center;
+                                                }
+                                                if !cell.absent : Text {
+                                                    text: cell.length; color: #6b7280;
+                                                    vertical-alignment: center;
+                                                }
+                                                if !cell.absent : Text {
+                                                    text: cell.hex; color: #9aa0aa;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            // Hover / reveal as a brightness delta
+                                            // painted on top, so it reads on both
+                                            // stripe shades (no fixed color).
+                                            Rectangle {
+                                                background: is-revealed ? #ffffff2e
+                                                    : (touch.has-hover ? #ffffff14 : transparent);
+                                            }
+                                            touch := TouchArea {
+                                                clicked => { root.reveal-cell(item.row-index, j); }
+                                            }
+                                        }
                                     }
-                                    if !cell.absent : Text { text: cell.length; color: #6b7280; }
-                                    if !cell.absent : Text { text: cell.hex; color: #9aa0aa; }
                                 }
                             }
                         }
