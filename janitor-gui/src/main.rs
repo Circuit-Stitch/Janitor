@@ -12,11 +12,10 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use janitor_aws::discovery::What;
-use janitor_aws::session::AppError;
 use janitor_core::compare::{Comparison, EntryState};
 use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::mock::MockSource;
+use janitor_core::provider::{AppError, What};
 use janitor_core::secret::SecretShape;
 use janitor_core::source::SecretSource;
 use janitor_core::view::{

@@ -1,43 +1,39 @@
-//! `Session` (GUI↔AWS bridge): lazy browser sign-in + per-Application,
-//! multi-Environment fetch, behind the same ADR 0010 §5 seam the rest of the
-//! crate uses. Lives in the GUI's worker thread; never crosses threads. All
-//! orchestration here is unit-tested against the `wire::fakes`; only the real
-//! adapters + browser are untested shell.
+//! `Session` (GUI↔AWS bridge): the first [`Provider`](janitor_core::provider)
+//! implementation — lazy browser sign-in + per-Application, multi-Environment
+//! fetch, behind the same ADR 0010 §5 seam the rest of the crate uses. Lives in
+//! the GUI's worker thread; never crosses threads. All orchestration here is
+//! unit-tested against the `wire::fakes`; only the real adapters + browser are
+//! untested shell.
+//!
+//! The crate's rich internal error taxonomy (`SessionError`, `SignInError`) stays
+//! here — it never crosses the port. `Session` masks it into the agnostic
+//! `core::provider` types at the boundary: `SessionError -> FetchFailReason` (per
+//! fetch) and `SignInError -> SignInFailed` (per sign-in), the pattern ADR 0019
+//! prescribes.
 
-use crate::error::SessionError;
+use std::sync::Arc;
 
-/// Why one Environment's fetch failed — a masked, owned classification of
-/// `SessionError` (no SDK text; THREAT-MODEL). `Copy` so it is trivial to carry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FetchFailReason {
-    /// A fresh browser Sign-in is required (dead/again-rejected token).
-    NeedsSignIn,
-    /// AWS refused under policy.
-    AccessDenied,
-    /// The secret id/region does not resolve.
-    NotFound,
-    /// Throttled or transient.
-    Throttled,
-    /// Content we cannot handle (e.g. binary for an op that needs text).
-    Unsupported,
-    /// Anything else (the scrubbed `Sdk` catch-all).
-    Other,
-}
+use async_trait::async_trait;
+use janitor_core::compare::{Comparison, RowKey};
+use janitor_core::config::{Application, Mapping};
+use janitor_core::provider::{
+    AppError, Failure, FetchFailReason, Loaded, Provider, SignInFailed, Step,
+};
+use janitor_core::secret::SecretShape;
+use janitor_core::select::{plan_selection, SelectionPlan};
+use janitor_core::view::{project, reveal_value};
 
-impl FetchFailReason {
-    /// A short, user-facing phrase. Never contains SDK/secret text.
-    pub fn describe(self) -> &'static str {
-        match self {
-            FetchFailReason::NeedsSignIn => "session expired — sign in again",
-            FetchFailReason::AccessDenied => "access denied",
-            FetchFailReason::NotFound => "secret not found",
-            FetchFailReason::Throttled => "throttled, try again",
-            FetchFailReason::Unsupported => "unsupported secret content",
-            FetchFailReason::Other => "AWS error",
-        }
-    }
-}
+use crate::broker::CredentialBroker;
+use crate::discovery::Discovery;
+use crate::error::{SessionError, SignInError};
+use crate::secrets::SecretsClient;
+use crate::source::{AuthenticatedSource, Reauth};
+use crate::types::{Clock, SsoToken};
+use crate::wire::{AccountCatalog, RoleCredentialClient, SecretsApi};
 
+/// Mask a per-fetch `SessionError` into the agnostic [`FetchFailReason`] (no SDK
+/// text; THREAT-MODEL). The impl lives in `aws` because `SessionError` does — the
+/// port type stays provider-agnostic and never learns the AWS taxonomy.
 impl From<&SessionError> for FetchFailReason {
     fn from(e: &SessionError) -> Self {
         match e {
@@ -55,62 +51,14 @@ impl From<&SessionError> for FetchFailReason {
     }
 }
 
-/// One Environment's failure within a whole-Application load: the Environment
-/// name, the classified `reason` (drives control flow + a fallback label), and
-/// the real, error-safe `detail` (AWS `code: message`; ADR 0017). `detail` is
-/// what the banner and Diagnostic Log show — never a Value/Credential/token.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Failure {
-    pub environment: String,
-    pub reason: FetchFailReason,
-    pub detail: String,
-}
-
-/// A whole-Application load failure: at least one Environment failed, so no
-/// matrix is shown (spec Decision 8 — never a partial matrix, never a fake Gap).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppError {
-    pub failures: Vec<Failure>,
-}
-
-impl AppError {
-    /// The synthetic "you must sign in first" error (no real Environment failed).
-    pub fn needs_sign_in() -> Self {
-        AppError {
-            failures: vec![Failure {
-                environment: "(sign-in)".to_string(),
-                reason: FetchFailReason::NeedsSignIn,
-                detail: "a fresh Sign-in is required".to_string(),
-            }],
-        }
+/// Mask a `SignInError` into the agnostic [`SignInFailed`] at the port boundary
+/// (ADR 0019). `SignInError`'s `Display` is already error-safe (static phrases /
+/// scrubbed `Sdk` label, never secret material), so the wrapped message is safe
+/// for the GUI banner; the browser/loopback *variants* never cross the port.
+impl From<SignInError> for SignInFailed {
+    fn from(e: SignInError) -> Self {
+        SignInFailed::new(e.to_string())
     }
-}
-
-use std::sync::Arc;
-
-use janitor_core::compare::Comparison;
-use janitor_core::compare::RowKey;
-use janitor_core::config::{Application, Mapping};
-use janitor_core::secret::SecretShape;
-use janitor_core::view::{project, reveal_value, MatrixView};
-
-use crate::broker::CredentialBroker;
-use crate::discovery::{Discovery, Step};
-use crate::error::SignInError;
-use crate::secrets::SecretsClient;
-use crate::select::{plan_selection, SelectionPlan};
-use crate::source::{AuthenticatedSource, Reauth};
-use crate::types::{Clock, SsoToken};
-use crate::wire::{AccountCatalog, RoleCredentialClient, SecretsApi};
-
-/// A successful `Session::load`: the masked matrix plus any Mappings whose
-/// `permission_set` was auto-corrected this load (ADR 0018 stale-role recovery).
-/// `corrected` is empty on the common path; when non-empty the GUI persists those
-/// permission-set changes to Config (locations only).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Loaded {
-    pub view: MatrixView,
-    pub corrected: Vec<Mapping>,
 }
 
 /// The outcome of re-resolving an account's entitled roles during recovery.
@@ -238,11 +186,27 @@ impl Session {
         self.facade.is_some()
     }
 
+    /// On a discovery `Step::Reauth` (a dead SSO token the facade could not
+    /// silently refresh), drop the cached sign-in + any in-progress walk so the
+    /// next `sign_in()` re-opens the browser instead of reusing the dead token.
+    /// No-op for any other Step.
+    fn reset_if_reauth(&mut self, step: &Step) {
+        if matches!(step, Step::Reauth) {
+            self.facade = None;
+            self.token = None;
+            self.discovery = None;
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for Session {
     /// Idempotent browser Sign-in: builds the broker + facade on first call
     /// from a fresh SSO token; a no-op once signed in (so it doubles as
     /// `ensure_signed_in`). The initial token comes through the same `Reauth`
     /// seam the facade uses for re-Sign-in, which is what makes this fakeable.
-    pub async fn sign_in(&mut self) -> Result<(), crate::error::SignInError> {
+    /// A failed Sign-in is masked into the agnostic [`SignInFailed`].
+    async fn sign_in(&mut self) -> Result<(), SignInFailed> {
         if self.facade.is_some() {
             return Ok(());
         }
@@ -264,57 +228,6 @@ impl Session {
         Ok(())
     }
 
-    /// Begin a guided `Discovery` walk for one new Environment (ADR 0013):
-    /// ensure signed in, then build and start the machine on the Session's SSO
-    /// token. The returned `Step` is the first `Ask`/terminal state; subsequent
-    /// picks go through [`advance_discovery`](Self::advance_discovery). A failed
-    /// Sign-in surfaces as `Err` (the worker maps it to "sign in again").
-    ///
-    /// `region` is the resolved browse region (`config.secret_region` else
-    /// `sso_region`); `remembered` is `config.last_pick`.
-    pub async fn begin_discovery(
-        &mut self,
-        environment: String,
-        region: String,
-        remembered: Option<Mapping>,
-    ) -> Result<Step, SignInError> {
-        self.sign_in().await?;
-        let token = Arc::clone(self.token.as_ref().expect("token set by sign_in"));
-        let mut discovery = Discovery::new(
-            environment,
-            region,
-            token,
-            Arc::clone(&self.catalog),
-            Arc::clone(&self.role_client),
-            Arc::clone(&self.secrets_api),
-            remembered,
-        );
-        let step = discovery.start().await;
-        self.discovery = Some(discovery);
-        self.reset_if_reauth(&step);
-        Ok(step)
-    }
-
-    /// Feed the user's chosen index into the in-progress `Discovery`. `None` if
-    /// no walk is in progress (a presenter bug — there is nothing to advance).
-    pub async fn advance_discovery(&mut self, choice: usize) -> Option<Step> {
-        let step = self.discovery.as_mut()?.advance(choice).await;
-        self.reset_if_reauth(&step);
-        Some(step)
-    }
-
-    /// On a discovery `Step::Reauth` (a dead SSO token the facade could not
-    /// silently refresh), drop the cached sign-in + any in-progress walk so the
-    /// next `sign_in()` re-opens the browser instead of reusing the dead token.
-    /// No-op for any other Step.
-    fn reset_if_reauth(&mut self, step: &Step) {
-        if matches!(step, Step::Reauth) {
-            self.facade = None;
-            self.token = None;
-            self.discovery = None;
-        }
-    }
-
     /// Load one Application: ensure signed in, fetch every Environment, and —
     /// if ANY Environment fails — return a whole-app error naming the failures
     /// (spec Decision 8). On full success, cache the Sets and return the masked
@@ -329,7 +242,7 @@ impl Session {
     /// fetch **once**. Zero / many / same-as-stored roles, or a re-list error, keep
     /// the original denial. At most one list + one retry per Environment — never a
     /// loop, never an auto-pick among several roles.
-    pub async fn load(&mut self, app: &Application) -> Result<Loaded, AppError> {
+    async fn load(&mut self, app: &Application) -> Result<Loaded, AppError> {
         self.sign_in()
             .await
             .map_err(|_| AppError::needs_sign_in())?;
@@ -407,8 +320,47 @@ impl Session {
     /// as an owned `String` so plaintext crosses to the UI thread only here and
     /// only on explicit request (ADR 0003). `None` if the cell is gone/absent/
     /// binary.
-    pub fn reveal(&self, key: &RowKey, col: usize) -> Option<String> {
+    fn reveal(&self, key: &RowKey, col: usize) -> Option<String> {
         reveal_value(&self.cached, key, col).map(|v| v.expose().to_string())
+    }
+
+    /// Begin a guided `Discovery` walk for one new Environment (ADR 0013):
+    /// ensure signed in, then build and start the machine on the Session's SSO
+    /// token. The returned `Step` is the first `Ask`/terminal state; subsequent
+    /// picks go through [`advance_discovery`](Self::advance_discovery). A failed
+    /// Sign-in surfaces as `Err` (masked; the worker maps it to "sign in again").
+    ///
+    /// `region` is the resolved browse region (`config.secret_region` else
+    /// `sso_region`); `remembered` is `config.last_pick`.
+    async fn begin_discovery(
+        &mut self,
+        environment: String,
+        region: String,
+        remembered: Option<Mapping>,
+    ) -> Result<Step, SignInFailed> {
+        self.sign_in().await?;
+        let token = Arc::clone(self.token.as_ref().expect("token set by sign_in"));
+        let mut discovery = Discovery::new(
+            environment,
+            region,
+            token,
+            Arc::clone(&self.catalog),
+            Arc::clone(&self.role_client),
+            Arc::clone(&self.secrets_api),
+            remembered,
+        );
+        let step = discovery.start().await;
+        self.discovery = Some(discovery);
+        self.reset_if_reauth(&step);
+        Ok(step)
+    }
+
+    /// Feed the user's chosen index into the in-progress `Discovery`. `None` if
+    /// no walk is in progress (a presenter bug — there is nothing to advance).
+    async fn advance_discovery(&mut self, choice: usize) -> Option<Step> {
+        let step = self.discovery.as_mut()?.advance(choice).await;
+        self.reset_if_reauth(&step);
+        Some(step)
     }
 }
 
@@ -504,10 +456,28 @@ mod tests {
     }
 
     #[test]
-    fn needs_sign_in_names_a_synthetic_environment() {
-        let e = AppError::needs_sign_in();
-        assert_eq!(e.failures.len(), 1);
-        assert_eq!(e.failures[0].reason, FetchFailReason::NeedsSignIn);
+    fn sign_in_error_maps_to_the_agnostic_port_type_preserving_its_safe_display() {
+        // The boundary masks the rich SignInError into the opaque port type. Its
+        // Display is already error-safe (static phrases / scrubbed Sdk label), so
+        // the wrapped message is the SAME string the GUI banner showed before this
+        // refactor — no behavior change. The browser/loopback *variants* (the type
+        // a file Provider would never produce) stay inside `aws` and never cross.
+        for e in [
+            SignInError::NoLoopbackPort,
+            SignInError::StateMismatch,
+            SignInError::Network,
+            SignInError::Sdk {
+                context: "TokenEndpoint".into(),
+            },
+        ] {
+            let expected = e.to_string();
+            let masked: SignInFailed = e.into();
+            assert_eq!(
+                masked.to_string(),
+                expected,
+                "the port preserves the error-safe banner string verbatim"
+            );
+        }
     }
 
     #[tokio::test]
@@ -876,14 +846,6 @@ mod tests {
         let s = session(reauth, role, api);
         let key = RowKey::Entry(EntryName::from_path(&["A".to_string()]));
         assert!(s.reveal(&key, 0).is_none(), "nothing cached yet");
-    }
-
-    #[test]
-    fn matrixview_and_shape_are_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<MatrixView>();
-        assert_send::<SecretShape>();
-        assert_send::<AppError>();
     }
 
     #[tokio::test]

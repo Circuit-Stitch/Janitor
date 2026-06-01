@@ -9,7 +9,8 @@
 
 use std::io::{self, BufRead, Write};
 
-use crate::discovery::{Discovery, Step, What};
+use crate::discovery::Discovery;
+use janitor_core::provider::{Step, What};
 
 /// Drive `discovery` to a terminal `Step`, presenting each `Ask` as a numbered
 /// menu written to `output` and resolved by a line read from `input`. Returns
@@ -96,7 +97,6 @@ fn parse_choice(line: &str, n: usize, default: Option<usize>) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::Step;
     use crate::types::SsoToken;
     use crate::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient, FakeSecretsApi};
     use crate::wire::{AccountSummary, RoleSummary, SecretSummary};
@@ -262,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_and_failed_walks_pass_their_terminal_step_through() {
-        use crate::session::FetchFailReason;
+        use janitor_core::provider::FetchFailReason;
         // No accounts → Empty(Accounts), surfaced for the caller to message.
         let mut empty = Discovery::new(
             "prod".into(),

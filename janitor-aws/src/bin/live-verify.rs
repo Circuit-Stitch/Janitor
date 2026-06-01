@@ -26,13 +26,14 @@ use std::sync::Arc;
 use janitor_aws::authenticator::Authenticator;
 use janitor_aws::aws_impl::{AwsOidcClient, AwsRoleClient, AwsSecretsApi};
 use janitor_aws::broker::CredentialBroker;
-use janitor_aws::discovery::{Discovery, Step, What};
+use janitor_aws::discovery::Discovery;
 use janitor_aws::presenter::drive_discovery;
 use janitor_aws::secrets::SecretsClient;
 use janitor_aws::source::AuthenticatedSource;
 use janitor_aws::types::SystemClock;
 use janitor_core::compare::Comparison;
 use janitor_core::config::Config;
+use janitor_core::provider::{Step, What};
 use janitor_core::view::project;
 
 fn arg(flag: &str) -> Option<String> {

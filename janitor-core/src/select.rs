@@ -1,8 +1,9 @@
 //! Selection logic for the guided flow (ADR 0011): given a list of discovered
 //! choices (accounts / roles / secrets) and an optionally-remembered prior pick,
 //! decide whether to auto-pick, error on emptiness, or ask — and, when asking,
-//! delegate to a `Chooser` seam. All pure/sync and fully tested; the only
-//! untested piece is the real stdin `Chooser` in the binary.
+//! delegate to a `Chooser` seam. All pure/sync and fully tested. The pure
+//! 0/1/many + remembered-default resolver is the one Discovery primitive proven
+//! generic by use, so it lives in `core` (ADR 0019) and every Provider shares it.
 
 /// Anything the guided flow can choose among. `key` is the stable identity used
 /// to match a remembered pick; `label` is the human menu line.

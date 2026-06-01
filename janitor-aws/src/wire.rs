@@ -6,8 +6,8 @@
 use async_trait::async_trait;
 
 use crate::error::{SessionError, SignInError};
-use crate::select::Selectable;
 use crate::types::{Credential, SsoToken};
+use janitor_core::select::Selectable;
 
 /// A public-client registration from `RegisterClient`. The `client_secret` is a
 /// public-client secret (not confidential — PKCE is what protects the flow), but
