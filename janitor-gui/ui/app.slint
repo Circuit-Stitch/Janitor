@@ -50,6 +50,10 @@ export global Palette {
 
 export component MainWindow inherits Window {
     title: "Janitor";
+    // Runtime window icon (taskbar / alt-tab / title bar). A generated PNG, not
+    // the dense ~1.75 MiB source SVG — see ADR 0022. icon.svg is the source of
+    // truth; janitor-gui/assets/gen-icons.sh regenerates this set.
+    icon: @image-url("../assets/icons/256.png");
     min-width: 800px;
     preferred-width: 1100px;
     preferred-height: 720px;
@@ -835,6 +839,7 @@ export component MainWindow inherits Window {
 // role / secret are discovered).
 export component ManageWindow inherits Window {
     title: "Manage Application";
+    icon: @image-url("../assets/icons/256.png"); // match MainWindow (ADR 0022)
     preferred-width: 620px;
     preferred-height: 440px;
     background: #14161a;

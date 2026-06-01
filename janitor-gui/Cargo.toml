@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "Janitor's thin Slint view over janitor-core (ADR 0003)."
+authors = ["Kyle Falconer <kfalconer@gmail.com>"]
+homepage = "https://github.com/Circuit-Stitch/Janitor"
+repository = "https://github.com/Circuit-Stitch/Janitor"
 build = "build.rs"
 
 [dependencies]
@@ -21,7 +24,67 @@ tracing-subscriber = "0.3"
 [build-dependencies]
 slint-build = "1"
 
+# Windows-only: embeds the multi-res .ico into the .exe (ADR 0022). Absent off
+# Windows, so the Linux/macOS build never sees it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dev-dependencies]
 # Internal Slint crate (no semver guarantee) — pinned to match slint 1.16.1.
 # Provides the headless testing backend + ElementHandle query API (ADR 0021).
 i-slint-backend-testing = "=1.16.1"
+
+# ── Packaging (ADR 0022) ─────────────────────────────────────────────────────
+# Split by necessity: cargo-packager owns deb + AppImage + signed Windows; it has
+# no rpm format, so the Fedora-native rpm is owned by cargo-generate-rpm below.
+# icon.svg is the source of truth; assets/gen-icons.sh regenerates the committed
+# raster set that both tools consume.
+
+[package.metadata.packager]
+product-name = "Janitor"
+identifier = "com.circuitstitch.apps.janitor"
+category = "Utility"
+# Build the release binary before packaging (cargo-packager does not build).
+before-packaging-command = "cargo build --release -p janitor-gui"
+icons = [
+    "assets/icons/32.png",
+    "assets/icons/128.png",
+    "assets/icons/256.png",
+    "assets/icons/512.png",
+    "assets/icons/icon.ico",
+]
+
+[package.metadata.packager.deb]
+# Debian-world runtime package names — deliberately different from the Fedora
+# Requires below (the reason rpm can't be built in the Debian world; ADR 0022).
+depends = ["libfontconfig1", "libxkbcommon0", "libxcb1", "libgl1"]
+
+# Windows installers (nsis/wix) are produced in CI only, and Azure Trusted Signing
+# is wired there — never here. No unsigned Windows artifact is ever published, so
+# the signing config lands with the (deferred) CI release workflow, not locally.
+
+# ── Fedora rpm (cargo-generate-rpm) ──────────────────────────────────────────
+# Build from the workspace root after a release build:
+#   cargo build --release -p janitor-gui && cargo generate-rpm -p janitor-gui
+# `source` paths are workspace-root-relative (the binary lives in the shared
+# workspace target/).
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/janitor-gui", dest = "/usr/bin/janitor-gui", mode = "0755" },
+    { source = "janitor-gui/assets/com.circuitstitch.apps.janitor.desktop", dest = "/usr/share/applications/com.circuitstitch.apps.janitor.desktop", mode = "0644" },
+    { source = "janitor-gui/assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.circuitstitch.apps.janitor.svg", mode = "0644" },
+    { source = "janitor-gui/assets/icons/16.png", dest = "/usr/share/icons/hicolor/16x16/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
+    { source = "janitor-gui/assets/icons/32.png", dest = "/usr/share/icons/hicolor/32x32/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
+    { source = "janitor-gui/assets/icons/48.png", dest = "/usr/share/icons/hicolor/48x48/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
+    { source = "janitor-gui/assets/icons/64.png", dest = "/usr/share/icons/hicolor/64x64/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
+    { source = "janitor-gui/assets/icons/128.png", dest = "/usr/share/icons/hicolor/128x128/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
+    { source = "janitor-gui/assets/icons/256.png", dest = "/usr/share/icons/hicolor/256x256/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
+    { source = "janitor-gui/assets/icons/512.png", dest = "/usr/share/icons/hicolor/512x512/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
+]
+
+# Fedora runtime package names (contrast the deb `depends` above).
+[package.metadata.generate-rpm.requires]
+fontconfig = "*"
+libxkbcommon = "*"
+libxcb = "*"
+mesa-libGL = "*"

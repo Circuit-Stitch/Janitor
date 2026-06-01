@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Janitor
+GenericName=Secrets drift inspector
+Comment=Ephemeral client for AWS Secrets Manager — masked drift detection across environments
+Exec=janitor-gui
+Icon=com.circuitstitch.apps.janitor
+Terminal=false
+Categories=Utility;
+StartupWMClass=janitor-gui
