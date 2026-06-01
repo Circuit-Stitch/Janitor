@@ -249,16 +249,20 @@ export component MainWindow inherits Window {
                         horizontal-alignment: center; vertical-alignment: center;
                     }
                     env-head := Flickable {
-                        // Fixed at the env-column width so it stays aligned with
-                        // the body region; the trailing spacer below absorbs any
-                        // extra window width (and gives this band an infinite
-                        // max-width so the window can be widened freely).
-                        width: root.envs-w;
+                        // Mirror the body's env region (horizontal-stretch +
+                        // viewport-width = envs-w) so the header band and body
+                        // share one per-column origin and scroll in lockstep.
+                        // `horizontal-stretch` keeps the band's max-width infinite
+                        // so the window still widens freely (ADR 0020); `alignment:
+                        // start` on the inner row pins the fixed-width columns to a
+                        // common left origin in both bands.
+                        horizontal-stretch: 1;
                         interactive: false;
                         viewport-x: env-body.viewport-x;
                         viewport-width: root.envs-w;
                         viewport-height: self.height;
                         HorizontalLayout {
+                            alignment: start;
                             for env in environments : Text {
                                 text: env; color: #c8ccd4; font-size: 11px;
                                 min-width: root.env-w; max-width: root.env-w;
@@ -266,7 +270,6 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    Rectangle { horizontal-stretch: 1; }
                 }
 
                 // Body: one vertical ScrollView holds both the frozen column and
@@ -367,6 +370,10 @@ export component MainWindow inherits Window {
                                         background: root.grid;
                                     }
                                     if !item.is-header : HorizontalLayout {
+                                        // Pin the fixed-width env columns to a left
+                                        // origin so they line up with the header band
+                                        // (which does the same) at every width.
+                                        alignment: start;
                                         for cell[j] in item.cells : Rectangle {
                                             min-width: root.env-w; max-width: root.env-w;
                                             property <bool> is-revealed:
