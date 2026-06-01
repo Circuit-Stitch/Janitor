@@ -414,10 +414,25 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             corrected,
             app_name,
         } => {
-            // Persist any auto-corrected permission sets (ADR 0018) into the
-            // Application they were loaded for, before rendering.
+            // Drop a stale in-flight load whose app was switched away mid-load:
+            // apply the view (and corrections) ONLY to the Application it was
+            // loaded for. For distinct names this name check suffices; for two
+            // same-named Applications the identity match inside `fold_corrections`
+            // is the backstop that prevents a wrong-app Config write.
+            let is_current = {
+                let st = state.borrow();
+                st.config
+                    .applications
+                    .get(st.selected)
+                    .map(|a| a.name == app_name)
+                    .unwrap_or(false)
+            };
+            if !is_current {
+                return;
+            }
+            // Persist any auto-corrected permission sets (ADR 0018) before render.
             if !corrected.is_empty() {
-                fold_corrections(state, &app_name, &corrected);
+                fold_corrections(state, &corrected);
             }
             let sort = state.borrow().prefs.sort;
             sort_rows(&mut view, sort);
@@ -497,25 +512,23 @@ fn on_env_discovered(ui: &MainWindow, state: &Rc<RefCell<AppState>>, mapping: Ma
     }
 }
 
-/// Persist auto-corrected permission sets (ADR 0018) into the Application they
-/// were loaded for. **App-name-guarded:** if the user switched the selected app
-/// mid-load, the corrections are dropped rather than written to the wrong
-/// Application — they are an optimization, never worth clobbering the wrong
-/// Config. Location-only edit (`set_permission_set`), mock-guarded save, then a
-/// Manage-window refresh so an open editor shows the corrected role.
-fn fold_corrections(state: &Rc<RefCell<AppState>>, app_name: &str, corrected: &[Mapping]) {
+/// Persist auto-corrected permission sets (ADR 0018) into the selected (= loaded,
+/// guarded by the caller) Application. Each correction is applied by full target
+/// **identity** (`apply_corrected_role` matches env name + account + secret), so a
+/// same-named Environment in another Application can never be mis-written even if
+/// the by-name caller guard is fooled by two identically-named Applications.
+/// Mock-guarded save, then a Manage-window refresh so an open editor shows the
+/// corrected role.
+fn fold_corrections(state: &Rc<RefCell<AppState>>, corrected: &[Mapping]) {
     let changed = {
         let mut st = state.borrow_mut();
         let selected = st.selected;
         let Some(app) = st.config.applications.get_mut(selected) else {
             return;
         };
-        if app.name != app_name {
-            return; // sidebar switched mid-load — don't write to the wrong app
-        }
         let mut changed = false;
         for c in corrected {
-            if app.set_permission_set(&c.environment, &c.permission_set) {
+            if app.apply_corrected_role(c) {
                 changed = true;
             }
         }

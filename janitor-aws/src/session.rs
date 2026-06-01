@@ -333,10 +333,11 @@ impl Session {
         self.sign_in()
             .await
             .map_err(|_| AppError::needs_sign_in())?;
-        // Arc clones for recovery's `list_account_roles`, taken before the `&mut
-        // self.facade` borrow below so they don't conflict (disjoint handles).
+        // Arc clone for recovery's `list_account_roles`, taken before the `&mut
+        // self.facade` borrow below so it doesn't conflict (disjoint handle). The
+        // recovery *token* is read from the facade at recovery time — see below —
+        // not captured here, so it reflects any re-Sign-in the fetch performed.
         let catalog = Arc::clone(&self.catalog);
-        let token = Arc::clone(self.token.as_ref().expect("token set by sign_in"));
         let facade = self.facade.as_mut().expect("facade exists after sign_in");
 
         let mut sets: Vec<(String, SecretShape)> = Vec::new();
@@ -352,6 +353,9 @@ impl Session {
                         account = %m.account_id,
                         "role not entitled — attempting auto-correct"
                     );
+                    // Re-list under the facade's LIVE token (post any re-Sign-in
+                    // this fetch did), not a token captured before the fetch.
+                    let token = facade.current_token();
                     match recover_role(catalog.as_ref(), &token, &m.account_id).await {
                         // Exactly one entitled role, different from the stored one:
                         // the unambiguous correction. Rewrite + retry ONCE.
@@ -832,6 +836,36 @@ mod tests {
         assert_eq!(loaded.corrected[0].environment, "prod");
         assert_eq!(loaded.corrected[0].permission_set, "PowerUser");
         assert_eq!(catalog.role_call_count(), 1, "only one env needed recovery");
+    }
+
+    #[tokio::test]
+    async fn recovery_after_a_resign_in_uses_the_live_token() {
+        // A dead token then a de-assigned role in ONE fetch: the facade re-signs-in
+        // (fresh token), the retry mint returns RoleNotEntitled, and recovery must
+        // re-list under the facade's LIVE token (current_token), not the one
+        // captured before the fetch — and still succeed. (The fakes ignore the
+        // token value, so this guards the control flow / accessor wiring.)
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![
+            Err(SessionError::ReauthRequired), // dead token
+            role_not_entitled(),               // post-re-sign-in: role de-assigned
+            cred_ok(),                         // corrected role mints
+        ]));
+        let api = Arc::new(FakeSecretsApi::new(vec![secret_json(r#"{"A":"1"}"#)]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["PowerUser"])]));
+        let mut s = Session::new(
+            reauth.clone(),
+            role.clone(),
+            api,
+            catalog.clone(),
+            Arc::new(FakeClock::at(0)),
+        );
+        let loaded = s.load(&one_env("app/prod")).await.unwrap();
+        assert_eq!(loaded.corrected.len(), 1);
+        assert_eq!(loaded.corrected[0].permission_set, "PowerUser");
+        assert_eq!(reauth.count(), 2, "initial sign-in + one re-sign-in");
+        assert_eq!(catalog.role_call_count(), 1, "recovery re-listed once");
+        assert_eq!(role.call_count(), 3, "dead + de-assigned + corrected mint");
     }
 
     #[tokio::test]

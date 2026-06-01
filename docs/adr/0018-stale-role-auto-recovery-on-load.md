@@ -35,10 +35,11 @@ gave the banner real detail but no programmatic hook.
   to `AccessDenied`, so an *un*-recovered denial still surfaces as "access denied"
   — no user-visible change on the give-up path.
 
-- **Recovery lives in `Session::load`**, which already owns the live SSO token and
-  the `AccountCatalog`. On a per-Environment `RoleNotEntitled`, it re-resolves the
-  account's entitled roles via `list_account_roles` (no browser) and the shared
-  pure `select::plan_selection`, then:
+- **Recovery lives in `Session::load`**, which already owns the `AccountCatalog`.
+  On a per-Environment `RoleNotEntitled`, it re-resolves the account's entitled
+  roles via `list_account_roles` (no browser) — under the facade's **live** token
+  (`AuthenticatedSource::current_token`, post any re-Sign-in this fetch did, not a
+  token captured before it) — and the shared pure `select::plan_selection`, then:
   - **exactly one entitled role, different from the stored one** → rewrite that
     Environment's `Mapping.permission_set` and **retry the fetch once**; on success
     the corrected Mapping rides out in `Loaded { view, corrected }`.
@@ -57,10 +58,14 @@ gave the banner real detail but no programmatic hook.
   interactive "choose among several roles" path stays a future Manage-window flow,
   never a load-time decision.
 
-- **`corrected` persists through the GUI**, app-name-guarded against a mid-load
-  sidebar switch, via a new location-only `Application::set_permission_set`
-  (never `add_environment`, so it cannot create or stomp a Mapping) + the existing
-  mock-guarded `Config::save`.
+- **`corrected` persists through the GUI** via a location-only
+  `Application::apply_corrected_role`, which matches the Environment by **full
+  target identity** (name + `account_id` + `secret_id`) — so a same-named
+  Environment in another Application can never be mis-written (Application names
+  are not unique) — and never `add_environment`, so it cannot create or stomp a
+  Mapping; then the mock-guarded `Config::save`. A stale in-flight load whose app
+  was switched away mid-load is dropped by a by-name guard on the loaded result,
+  so neither the view nor the corrections land on the wrong Application.
 
 ## Consequences
 
