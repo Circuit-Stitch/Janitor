@@ -2,6 +2,8 @@ slint::include_modules!();
 mod logpane;
 mod pane;
 mod rows;
+#[cfg(test)]
+mod view_tests;
 mod worker;
 
 use std::cell::{Cell, RefCell};
