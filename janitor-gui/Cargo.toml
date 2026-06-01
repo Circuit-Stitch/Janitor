@@ -11,6 +11,8 @@ janitor-core = { path = "../janitor-core" }
 janitor-aws = { path = "../janitor-aws" }
 slint = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [build-dependencies]
 slint-build = "1"

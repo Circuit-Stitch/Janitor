@@ -49,6 +49,10 @@ _Avoid_: token, key (a Credential is not a Secret; the SSO token is the Sign-in 
 The user's saved, non-secret settings: Applications, Mappings, regions, and SSO start URL. The only data Janitor writes to disk (plaintext, OS config dir). Holds locations, never Values.
 _Avoid_: settings, preferences (use Config)
 
+**Diagnostic Log**:
+Janitor's *only* diagnostic surface: an in-app, in-memory panel showing AWS error detail and lifecycle/metadata events, filtered by level (Info/Warn/Error). Never written to disk and never emitted to stdout/stderr — those are cross-process channels a sibling could scrape, so even non-secret recon signal stays out of them. Holds error-safe signal only (codes, messages, ARNs, Entry Names, counts), never Values, Credentials, or the SSO token. The process is otherwise silent on the terminal.
+_Avoid_: console output, stderr, log file (Janitor emits none — the panel is the only surface)
+
 **Discovery**:
 The post-Sign-in process of browsing which AWS accounts, roles (permission sets), and Secret Sets the signed-in user can actually reach, to assemble an Application's Mappings without hand-typing account IDs or ARNs. Walks account → role → Secret Set, auto-selecting whenever there is exactly one choice and asking only when there are several. Yields locations (a Mapping), never Values.
 _Avoid_: scan, import (use Discovery)

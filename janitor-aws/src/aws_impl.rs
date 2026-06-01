@@ -8,6 +8,8 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
+use aws_smithy_runtime_api::client::result::SdkError;
+use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 
 use crate::error::{SessionError, SignInError};
 use crate::types::{Credential, SsoToken};
@@ -74,13 +76,13 @@ impl OidcClient for AwsOidcClient {
         for uri in redirect_uris {
             req = req.redirect_uris(uri.clone());
         }
+        tracing::info!(target: "janitor::aws", issuer_url, "RegisterClient");
         let out = req.send().await.map_err(|e| {
-            // Milestone B diagnostic (ADR 0010 §5/§9): RegisterClient is a
-            // PRE-AUTH call — no SSO token or role credential is in play, so its
-            // error body carries no secret material and is safe to print. This
-            // de-blinds the issuer/registration step during live-verify; the
-            // returned error stays the scrubbed `Sdk` variant.
-            eprintln!("RegisterClient error: {e:?}");
+            // RegisterClient is a PRE-AUTH call — no SSO token or role credential
+            // is in play, so its error body carries no secret material. Log the
+            // real detail; the returned error stays the scrubbed `Sdk` variant.
+            let detail = err_detail(&e);
+            tracing::warn!(target: "janitor::aws", op = "RegisterClient", "RegisterClient failed — {detail}");
             SignInError::Sdk {
                 context: "RegisterClient".into(),
             }
@@ -107,10 +109,11 @@ impl OidcClient for AwsOidcClient {
             .send()
             .await
             .map_err(|e| {
-                // Milestone B diagnostic (ADR 0010 §5): CreateToken errors are
-                // grant/PKCE validation failures (e.g. invalid_grant); no
-                // success token exists on the error path, so printing is safe.
-                eprintln!("CreateToken error: {e:?}");
+                // CreateToken errors are grant/PKCE validation failures (e.g.
+                // invalid_grant); no success token exists on the error path, so
+                // the detail is safe to log.
+                let detail = err_detail(&e);
+                tracing::warn!(target: "janitor::aws", op = "CreateToken", "CreateToken failed — {detail}");
                 SignInError::TokenEndpoint
             })?;
         let access = out
@@ -157,6 +160,12 @@ impl RoleCredentialClient for AwsRoleClient {
             .send()
             .await
             .map_err(map_role_err)?;
+        tracing::info!(
+            target: "janitor::aws",
+            account_id,
+            role = permission_set,
+            "GetRoleCredentials ok"
+        );
         let rc = out.role_credentials().ok_or(SessionError::Sdk {
             context: "GetRoleCredentials(empty)".into(),
         })?;
@@ -227,16 +236,100 @@ impl AccountCatalog for AwsRoleClient {
     }
 }
 
-/// Map a GetRoleCredentials SDK error to our taxonomy. Conservative for now:
-/// everything → scrubbed Sdk (live-verify, Task 14, refines this). Uses
-/// `discriminant` to avoid printing any error body.
-fn map_role_err<E: std::fmt::Debug, R: std::fmt::Debug>(
-    e: aws_smithy_runtime_api::client::result::SdkError<E, R>,
-) -> SessionError {
-    let label = format!("{:?}", std::mem::discriminant(&e));
-    SessionError::Sdk {
-        context: format!("GetRoleCredentials:{label}"),
+/// An error-safe "Code: message" extracted from an SDK error.
+///
+/// SAFE TO LOG/SURFACE: an SDK *error* response carries only an error code, a
+/// human message, and sometimes an ARN / calling-principal — it can never carry
+/// a secret Value (those appear only in a *success* body) nor the SSO token /
+/// minted role credentials. Any secret *names/locations* it includes are already
+/// in the user's Config (THREAT-MODEL: Config is a plaintext recon map). So
+/// unlike a success body, this is fine for the diagnostic log and the banner.
+fn err_detail<E, R>(e: &SdkError<E, R>) -> String
+where
+    E: ProvideErrorMetadata,
+{
+    if let Some(svc) = e.as_service_error() {
+        let code = svc.code().unwrap_or("Unknown");
+        return match svc.message() {
+            Some(m) => format!("{code}: {m}"),
+            None => code.to_string(),
+        };
     }
+    match e {
+        SdkError::TimeoutError(_) => "request timed out".to_string(),
+        SdkError::DispatchFailure(_) => "network/dispatch failure".to_string(),
+        SdkError::ConstructionFailure(_) => "request construction failure".to_string(),
+        SdkError::ResponseError(_) => "unexpected response".to_string(),
+        _ => "unknown error".to_string(),
+    }
+}
+
+/// Classify an AWS error *code* into our taxonomy. A dead/expired SSO token must
+/// become [`SessionError::ReauthRequired`] so the facade re-Signs-in (ADR 0010
+/// §4); everything else stays a scrubbed `Sdk` carrying the real, error-safe
+/// detail so it reaches the diagnostic log and the banner. Pure — unit-tested.
+fn classify_aws(op: &str, code: Option<&str>, detail: String) -> SessionError {
+    let is_role = op == "GetRoleCredentials";
+    match code {
+        // ONLY a genuinely invalid/expired SSO token at the role step warrants a
+        // re-Sign-in. A `ForbiddenException` ("No access") / `AccessDeniedException`
+        // there is a *permanent entitlement denial* (the user lacks this permission
+        // set on this account); routing it to re-Sign-in would loop the browser for
+        // an error re-auth can never fix — so it falls through to `Sdk` below,
+        // terminal, carrying the real detail to the banner + log.
+        Some("UnauthorizedException") | Some("ExpiredTokenException") if is_role => {
+            SessionError::ReauthRequired
+        }
+        // Role-step entitlement denial: the user lacks this permission set on this
+        // account. A distinct variant (ADR 0018) so `Session::load` can attempt one
+        // in-session role re-resolution + retry before surfacing it. Carries the
+        // real detail forward (like `Sdk`) for the banner + log.
+        Some("ForbiddenException") | Some("AccessDeniedException") | Some("AccessDenied")
+            if is_role =>
+        {
+            SessionError::RoleNotEntitled { context: detail }
+        }
+        // Secret-step access-denied stays `AccessDenied` so the facade can force ONE
+        // credential re-mint (a stale cached cred AWS now rejects) before giving up
+        // (ADR 0010 §4).
+        Some("AccessDeniedException") | Some("AccessDenied") => SessionError::AccessDenied,
+        Some("ResourceNotFoundException") => SessionError::NotFound,
+        Some("ThrottlingException")
+        | Some("TooManyRequestsException")
+        | Some("ThrottledException") => SessionError::Throttled,
+        // Everything else — including role-step denials — keeps the real,
+        // error-safe detail verbatim (not a bare discriminant).
+        _ => SessionError::Sdk { context: detail },
+    }
+}
+
+/// Map an SDK error: log the real (error-safe) detail under `target =
+/// "janitor::aws"`, then classify it. The log line is what feeds the GUI log
+/// pane and stderr; the returned `SessionError` carries the same detail onward.
+fn map_aws_err<E, R>(op: &str, e: SdkError<E, R>) -> SessionError
+where
+    E: ProvideErrorMetadata,
+{
+    let code = e
+        .as_service_error()
+        .and_then(|s| s.code())
+        .map(str::to_string);
+    let detail = err_detail(&e);
+    tracing::warn!(
+        target: "janitor::aws",
+        op,
+        code = code.as_deref().unwrap_or("-"),
+        "{op} failed — {detail}"
+    );
+    classify_aws(op, code.as_deref(), detail)
+}
+
+/// Map a GetRoleCredentials SDK error (see [`map_aws_err`]).
+fn map_role_err<E, R>(e: SdkError<E, R>) -> SessionError
+where
+    E: ProvideErrorMetadata,
+{
+    map_aws_err("GetRoleCredentials", e)
 }
 
 /// Real Secrets Manager client (`GetSecretValue`) using the injected Credential.
@@ -280,6 +373,14 @@ impl SecretsApi for AwsSecretsApi {
             .send()
             .await
             .map_err(map_secret_err)?;
+        // Metadata only: which secret + whether it was string or binary. NEVER
+        // the Value — that is the one field on this success path that is secret.
+        tracing::info!(
+            target: "janitor::aws",
+            secret_id,
+            kind = if out.secret_binary().is_some() { "binary" } else { "string" },
+            "GetSecretValue ok"
+        );
         Ok(RawSecret {
             secret_string: out.secret_string().map(|s| s.to_string()),
             secret_binary: out.secret_binary().map(|b| b.as_ref().to_vec()),
@@ -330,27 +431,90 @@ impl SecretsApi for AwsSecretsApi {
     }
 }
 
-/// Map a GetSecretValue SDK error to our taxonomy. Conservative for now;
-/// live-verify (Task 14) refines into NotFound/AccessDenied/Throttled.
-fn map_secret_err<E: std::fmt::Debug, R: std::fmt::Debug>(
-    e: aws_smithy_runtime_api::client::result::SdkError<E, R>,
-) -> SessionError {
-    // Milestone B diagnostic (ADR 0010 §5): a GetSecretValue ERROR response
-    // never carries the secret value (that appears only on a SUCCESS output),
-    // so its Debug — error code + message + ARN/principal, i.e. locations and
-    // identity, never values — is safe to surface on stderr for the
-    // human-gated live-verify. Lets us see the real code (AccessDenied vs
-    // DecryptionFailure vs NotFound) instead of an opaque discriminant.
-    eprintln!("GetSecretValue error: {e:?}");
-    let label = format!("{:?}", std::mem::discriminant(&e));
-    SessionError::Sdk {
-        context: format!("GetSecretValue:{label}"),
-    }
+/// Map a GetSecretValue SDK error (see [`map_aws_err`]). The error body carries
+/// the code (AccessDenied vs DecryptionFailure vs ResourceNotFound vs Throttling)
+/// and message — never the Value — so the real detail is logged and surfaced.
+fn map_secret_err<E, R>(e: SdkError<E, R>) -> SessionError
+where
+    E: ProvideErrorMetadata,
+{
+    map_aws_err("GetSecretValue", e)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::authorize_endpoint;
+    use super::{authorize_endpoint, classify_aws};
+    use crate::error::SessionError;
+
+    #[test]
+    fn only_token_invalidity_at_role_step_routes_to_reauth() {
+        // A genuinely invalid/expired SSO token → re-Sign-in.
+        for code in ["UnauthorizedException", "ExpiredTokenException"] {
+            assert!(
+                matches!(
+                    classify_aws("GetRoleCredentials", Some(code), "d".into()),
+                    SessionError::ReauthRequired
+                ),
+                "{code} at role step should be ReauthRequired"
+            );
+        }
+    }
+
+    #[test]
+    fn role_step_entitlement_denials_are_role_not_entitled_keeping_detail() {
+        // Re-auth-loop regression guard + the recovery trigger (ADR 0018):
+        // ForbiddenException ("No access") and AccessDenied at the role step are
+        // entitlement denials → `RoleNotEntitled` (which arms one in-session role
+        // re-resolution + retry), carrying the real detail — NOT `ReauthRequired`
+        // (which loops the browser) and NOT bare `AccessDenied`.
+        for code in ["ForbiddenException", "AccessDeniedException"] {
+            match classify_aws(
+                "GetRoleCredentials",
+                Some(code),
+                format!("{code}: No access"),
+            ) {
+                SessionError::RoleNotEntitled { context } => {
+                    assert_eq!(context, format!("{code}: No access"));
+                }
+                other => panic!("{code} at role step must be RoleNotEntitled, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn secret_step_codes_classify_into_taxonomy() {
+        assert!(matches!(
+            classify_aws("GetSecretValue", Some("AccessDeniedException"), "d".into()),
+            SessionError::AccessDenied
+        ));
+        assert!(matches!(
+            classify_aws(
+                "GetSecretValue",
+                Some("ResourceNotFoundException"),
+                "d".into()
+            ),
+            SessionError::NotFound
+        ));
+        assert!(matches!(
+            classify_aws("GetSecretValue", Some("ThrottlingException"), "d".into()),
+            SessionError::Throttled
+        ));
+    }
+
+    #[test]
+    fn unknown_codes_keep_the_real_detail_not_a_discriminant() {
+        // The whole point of ADR 0017: an unclassified error carries its real,
+        // error-safe detail onward (to the banner + Diagnostic Log), verbatim.
+        let e = classify_aws(
+            "GetSecretValue",
+            Some("DecryptionFailure"),
+            "DecryptionFailure: KMS denied".into(),
+        );
+        match e {
+            SessionError::Sdk { context } => assert_eq!(context, "DecryptionFailure: KMS denied"),
+            other => panic!("expected Sdk carrying detail, got {other:?}"),
+        }
+    }
 
     #[test]
     fn authorize_endpoint_prefers_response_when_present() {

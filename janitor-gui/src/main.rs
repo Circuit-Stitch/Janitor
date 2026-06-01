@@ -1,9 +1,10 @@
 slint::include_modules!();
+mod logpane;
 mod pane;
 mod rows;
 mod worker;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::env;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -290,7 +291,16 @@ fn dispatch(ui: &MainWindow, state: &Rc<RefCell<AppState>>, cmd: Command) {
                     *cached.borrow_mut() = sets;
                     v
                 };
-                apply_event(ui, state, Event::AppLoaded(view));
+                // Mock never fails a fetch, so there is nothing to auto-correct.
+                apply_event(
+                    ui,
+                    state,
+                    Event::AppLoaded {
+                        view,
+                        corrected: Vec::new(),
+                        app_name: app.name.clone(),
+                    },
+                );
             }
             Command::Reveal { row, col, key } => {
                 let revealed: Option<String> = {
@@ -399,7 +409,16 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             set_status(ui, state, "error", &format!("Sign-in failed: {msg}"))
         }
         Event::AppLoading => set_status(ui, state, "loading", ""),
-        Event::AppLoaded(mut view) => {
+        Event::AppLoaded {
+            mut view,
+            corrected,
+            app_name,
+        } => {
+            // Persist any auto-corrected permission sets (ADR 0018) into the
+            // Application they were loaded for, before rendering.
+            if !corrected.is_empty() {
+                fold_corrections(state, &app_name, &corrected);
+            }
             let sort = state.borrow().prefs.sort;
             sort_rows(&mut view, sort);
             state.borrow_mut().view = view;
@@ -475,6 +494,38 @@ fn on_env_discovered(ui: &MainWindow, state: &Rc<RefCell<AppState>>, mapping: Ma
         if let Some(app) = app {
             dispatch(ui, state, Command::LoadApp(app));
         }
+    }
+}
+
+/// Persist auto-corrected permission sets (ADR 0018) into the Application they
+/// were loaded for. **App-name-guarded:** if the user switched the selected app
+/// mid-load, the corrections are dropped rather than written to the wrong
+/// Application — they are an optimization, never worth clobbering the wrong
+/// Config. Location-only edit (`set_permission_set`), mock-guarded save, then a
+/// Manage-window refresh so an open editor shows the corrected role.
+fn fold_corrections(state: &Rc<RefCell<AppState>>, app_name: &str, corrected: &[Mapping]) {
+    let changed = {
+        let mut st = state.borrow_mut();
+        let selected = st.selected;
+        let Some(app) = st.config.applications.get_mut(selected) else {
+            return;
+        };
+        if app.name != app_name {
+            return; // sidebar switched mid-load — don't write to the wrong app
+        }
+        let mut changed = false;
+        for c in corrected {
+            if app.set_permission_set(&c.environment, &c.permission_set) {
+                changed = true;
+            }
+        }
+        if changed && !matches!(st.backend, Backend::Mock { .. }) {
+            let _ = st.config.save();
+        }
+        changed
+    };
+    if changed {
+        refresh_manage_window(state);
     }
 }
 
@@ -683,11 +734,12 @@ fn clear_manage_choice() {
     });
 }
 
-/// "<env>: <reason>; …" — no SDK text (reasons come from the tested describe()).
+/// "<env>: <real AWS detail>; …". ADR 0017: the banner shows the real, error-safe
+/// `code: message` (never a Value/Credential/token), not just the masked phrase.
 fn banner(err: &AppError) -> String {
     err.failures
         .iter()
-        .map(|(env, r)| format!("{env}: {}", r.describe()))
+        .map(|f| format!("{}: {}", f.environment, f.detail))
         .collect::<Vec<_>>()
         .join("; ")
 }
@@ -795,6 +847,11 @@ fn schedule_auto_hide(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Install the Diagnostic Log first (ADR 0017): global tracing sink into an
+    // in-memory buffer + the no-op panic hook (zero stdout/stderr). Done before
+    // the worker spawns so its first events are captured.
+    let log = logpane::install();
+
     let ui = MainWindow::new()?;
 
     let mock = env::var("JANITOR_MOCK").is_ok() || env::args().any(|a| a == "--mock");
@@ -1075,6 +1132,56 @@ fn main() -> Result<(), slint::PlatformError> {
             state.borrow_mut().prefs.grouped = grouped;
             push_matrix(&ui_weak.unwrap(), &state);
         });
+    }
+
+    // Diagnostic Log (ADR 0017): the level dropdown sets the max verbosity shown;
+    // Clear empties the buffer. Both mark the view dirty so the next poll
+    // re-renders. Default is the most verbose level (show everything).
+    let log_filter = Rc::new(Cell::new(logpane::FilterLevel::MAX));
+    let log_dirty = Rc::new(Cell::new(true));
+    {
+        let log_filter = log_filter.clone();
+        let log_dirty = log_dirty.clone();
+        ui.on_set_log_filter(move |level| {
+            log_filter.set(logpane::FilterLevel::from_ui(level));
+            log_dirty.set(true);
+        });
+    }
+    {
+        let log = log.clone();
+        let log_dirty = log_dirty.clone();
+        ui.on_clear_log(move || {
+            if let Ok(mut buf) = log.lock() {
+                buf.clear();
+            }
+            log_dirty.set(true);
+        });
+    }
+    // Poll the in-memory buffer into the panel's text. Low frequency (400ms) and
+    // version-gated, so an idle Session does no work. Kept alive for the run.
+    let log_timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        let log = log.clone();
+        let log_filter = log_filter.clone();
+        let log_dirty = log_dirty.clone();
+        let last_version = Cell::new(u64::MAX);
+        log_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(400),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let (ver, text) = match log.lock() {
+                    Ok(buf) => (buf.version, buf.render(log_filter.get())),
+                    Err(_) => return,
+                };
+                if log_dirty.get() || last_version.get() != ver {
+                    log_dirty.set(false);
+                    last_version.set(ver);
+                    ui.set_log_text(text.into());
+                }
+            },
+        );
     }
 
     let run_result = ui.run();

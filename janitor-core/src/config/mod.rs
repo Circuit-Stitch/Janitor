@@ -68,6 +68,25 @@ impl Application {
             self.environments.remove(index);
         }
     }
+
+    /// Update ONLY the `permission_set` of the Environment named `environment`,
+    /// leaving account/region/secret_id untouched. Returns whether a matching
+    /// Environment was found. Used by stale-role auto-recovery (ADR 0018) to
+    /// persist a corrected role — a location-only edit, never an account/secret
+    /// retarget and never an append (so it cannot create or stomp a Mapping).
+    pub fn set_permission_set(&mut self, environment: &str, permission_set: &str) -> bool {
+        match self
+            .environments
+            .iter_mut()
+            .find(|m| m.environment == environment)
+        {
+            Some(m) => {
+                m.permission_set = permission_set.to_string();
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Which concrete AWS Secret Set backs one Environment of an Application.
@@ -274,6 +293,33 @@ mod tests {
         };
         app.remove_environment(5);
         assert_eq!(app.environments.len(), 1);
+    }
+
+    #[test]
+    fn set_permission_set_updates_only_the_matching_env_location() {
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod"), mapping("staging")],
+        };
+        assert!(app.set_permission_set("staging", "PowerUser"));
+        let staging = &app.environments[1];
+        assert_eq!(staging.permission_set, "PowerUser");
+        // Only permission_set moved; the other locations are untouched.
+        assert_eq!(staging.account_id, "111111111111");
+        assert_eq!(staging.region, "us-east-1");
+        assert_eq!(staging.secret_id, "myapp/staging");
+        // prod is untouched.
+        assert_eq!(app.environments[0].permission_set, "ReadOnly");
+    }
+
+    #[test]
+    fn set_permission_set_is_a_noop_for_a_missing_env() {
+        let mut app = Application {
+            name: "myapp".into(),
+            environments: vec![mapping("prod")],
+        };
+        assert!(!app.set_permission_set("nope", "PowerUser"));
+        assert_eq!(app.environments[0].permission_set, "ReadOnly");
     }
 
     #[test]

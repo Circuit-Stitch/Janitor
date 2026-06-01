@@ -33,6 +33,13 @@ pub enum SessionError {
     /// AWS refused the operation under policy; not retryable, not re-auth.
     #[error("access denied for this Mapping")]
     AccessDenied,
+    /// The signed-in user is not entitled to the Mapping's permission set on its
+    /// account — `GetRoleCredentials` returned Forbidden/AccessDenied (ADR 0018).
+    /// Distinct from `AccessDenied` because it arms one in-session role
+    /// re-resolution + retry in `Session::load`; `context` is the scrubbed,
+    /// error-safe AWS `code: message` (never a Value/Credential/token).
+    #[error("not entitled to this role: {context}")]
+    RoleNotEntitled { context: String },
     /// The secret id/region does not resolve to a Set.
     #[error("no secret found for this Mapping")]
     NotFound,
@@ -63,6 +70,18 @@ mod tests {
         };
         let shown = format!("{e} | {e:?}");
         assert!(shown.contains("GetSecretValue"));
+        assert!(!shown.contains("hunter2"), "no secret leaked");
+    }
+
+    #[test]
+    fn role_not_entitled_display_carries_no_secret() {
+        // Same scrubbed contract as Sdk: context is an error-safe code+message,
+        // never a planted secret.
+        let e = SessionError::RoleNotEntitled {
+            context: "ForbiddenException: No access".into(),
+        };
+        let shown = format!("{e} | {e:?}");
+        assert!(shown.contains("ForbiddenException"));
         assert!(!shown.contains("hunter2"), "no secret leaked");
     }
 
