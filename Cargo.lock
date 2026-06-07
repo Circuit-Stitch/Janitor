@@ -3429,6 +3429,7 @@ dependencies = [
  "janitor-aws-auth",
  "janitor-core",
  "janitor-mock",
+ "janitor-ssm",
  "slint",
  "slint-build",
  "tokio",
@@ -3451,8 +3452,13 @@ dependencies = [
 name = "janitor-ssm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "janitor-aws-auth",
  "janitor-core",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]

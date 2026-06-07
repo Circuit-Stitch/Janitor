@@ -3,11 +3,35 @@ name = "janitor-ssm"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-description = "Janitor's remote-.env-over-SSM Provider (ADR 0025): a pure .env → SecretShape parser today; the SSM Discovery tail + transport land in later slices."
+description = "Janitor's remote-.env-over-SSM Provider (ADR 0025): the SSM Discovery tail (instance → .env path → read+parse) over the shared janitor-aws-auth base, plus a pure .env → SecretShape parser. The concrete SSM transport lands in a later slice (B4)."
 
-# Skeleton slice (#63): depends on janitor-core ONLY. The janitor-aws-auth
-# dependency arrives with the SSM tail (B3); this crate must never depend on
-# janitor-aws (ADR 0025 — peer Provider, not a subtype).
+# Second real Provider (ADR 0025). Depends on janitor-core (domain + Provider
+# port) and the shared janitor-aws-auth base (Sign-in, account/role catalog,
+# credential broker, the AWS error taxonomy) — NEVER on janitor-aws (a peer
+# Provider, not a subtype; ADR 0024/0025). The concrete SSM SDK transport behind
+# `RemoteFileReader`/`InstanceCatalog` is the untested shell deferred to B4, so
+# this crate currently holds only tested logic and keeps its coverage pristine.
+[features]
+# Exposes `wire::fakes` (the SSM-tail test doubles) to dependent crates' tests —
+# the GUI worker's offline end-to-end test reuses them via a dev-dependency —
+# without shipping them in normal builds (ADR 0024). The crate's own tests reach
+# them through the `test` cfg (see `wire`).
+test-support = []
+
 [dependencies]
 janitor-core = { path = "../janitor-core" }
+janitor-aws-auth = { path = "../janitor-aws-auth" }
+async-trait = "0.1"
 thiserror = "2"
+tracing = "0.1"
+# Holds the whole-file `.env` plaintext (take()n out of the zeroize-on-drop
+# RawSecret) in a Zeroizing buffer during parse, so it is scrubbed on drop
+# (THREAT-MODEL / ADR 0024).
+zeroize = "1"
+
+[dev-dependencies]
+# Front-half test doubles (`wire::fakes`) for the SsmDiscovery / SsmProvider /
+# SsmSource tests (ADR 0024): FakeReauth, FakeAccountCatalog, FakeRoleClient,
+# FakeClock. Never compiled into a normal build.
+janitor-aws-auth = { path = "../janitor-aws-auth", features = ["test-support"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
