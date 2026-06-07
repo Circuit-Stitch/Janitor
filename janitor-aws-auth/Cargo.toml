@@ -31,4 +31,11 @@ async-trait = "0.1"
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }
+# Replay-transport shell coverage (ADR 0027): StaticReplayClient drives the real
+# ssooidc/sso SDK clients against canned HTTP, so aws_impl's SDK-wrap + error
+# mapping run in CI without live AWS. `http` builds the canned request/response
+# pairs. Never compiled into a normal build. (`aws-smithy-types`, for `SdkBody`,
+# is already a normal dependency above.)
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+http = "1"

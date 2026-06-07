@@ -61,6 +61,33 @@ impl AwsOidcClient {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl AwsOidcClient {
+    /// Build against an injected HTTP client — a `StaticReplayClient` in tests —
+    /// so `register_client`/`create_token` run their real (de)serialization +
+    /// error mapping without live AWS (ADR 0027). Identical to [`new`] except the
+    /// transport is injected and retries are disabled (so a single canned error
+    /// event isn't consumed by the SDK's internal throttle retry).
+    ///
+    /// [`new`]: AwsOidcClient::new
+    pub async fn with_http_client(
+        region: String,
+        http: impl aws_smithy_runtime_api::client::http::HttpClient + 'static,
+    ) -> Self {
+        let conf = aws_config::defaults(BehaviorVersion::latest())
+            .region(aws_config::Region::new(region.clone()))
+            .no_credentials()
+            .http_client(http)
+            .retry_config(aws_smithy_types::retry::RetryConfig::disabled())
+            .load()
+            .await;
+        AwsOidcClient {
+            inner: aws_sdk_ssooidc::Client::new(&conf),
+            region,
+        }
+    }
+}
+
 #[async_trait]
 impl OidcClient for AwsOidcClient {
     async fn register_client(
@@ -139,6 +166,31 @@ impl AwsRoleClient {
         let conf = aws_config::defaults(BehaviorVersion::latest())
             .region(aws_config::Region::new(region))
             .no_credentials()
+            .load()
+            .await;
+        AwsRoleClient {
+            inner: aws_sdk_sso::Client::new(&conf),
+        }
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl AwsRoleClient {
+    /// Build against an injected HTTP client (a `StaticReplayClient` in tests) so
+    /// `get_role_credentials`/`list_accounts`/`list_account_roles` run their real
+    /// (de)serialization, pagination, and error mapping without live AWS
+    /// (ADR 0027). Identical to [`new`] except for the injected transport and
+    /// disabled retries.
+    ///
+    /// [`new`]: AwsRoleClient::new
+    pub async fn with_http_client(
+        region: String,
+        http: impl aws_smithy_runtime_api::client::http::HttpClient + 'static,
+    ) -> Self {
+        let conf = aws_config::defaults(BehaviorVersion::latest())
+            .region(aws_config::Region::new(region))
+            .no_credentials()
+            .http_client(http)
+            .retry_config(aws_smithy_types::retry::RetryConfig::disabled())
             .load()
             .await;
         AwsRoleClient {
@@ -436,5 +488,300 @@ mod tests {
             authorize_endpoint(Some(""), "us-east-1"),
             "https://oidc.us-east-1.amazonaws.com/authorize"
         );
+    }
+
+    #[test]
+    fn non_service_sdk_errors_map_to_scrubbed_sdk_with_safe_detail() {
+        // Transport-level failures (no HTTP response, so no error code) flow
+        // through `err_detail`'s non-service arms into a scrubbed `Sdk` carrying a
+        // safe, body-free label — the only `err_detail` branches the replay tests
+        // (which always return a response) can't reach.
+        use super::map_aws_err;
+        use aws_smithy_runtime_api::client::result::{ConnectorError, SdkError};
+        type OpErr = aws_sdk_ssooidc::operation::create_token::CreateTokenError;
+        type Resp = aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+
+        let cases: Vec<(SdkError<OpErr, Resp>, &str)> = vec![
+            (SdkError::timeout_error("slow"), "request timed out"),
+            (
+                SdkError::dispatch_failure(ConnectorError::io("boom".into())),
+                "network/dispatch failure",
+            ),
+            (
+                SdkError::construction_failure("bad"),
+                "request construction failure",
+            ),
+        ];
+        for (err, expected) in cases {
+            match map_aws_err("GetSecretValue", err) {
+                SessionError::Sdk { context } => assert_eq!(context, expected),
+                other => panic!("expected scrubbed Sdk, got {other:?}"),
+            }
+        }
+    }
+}
+
+// ---- Replay-transport coverage of the SDK-wrap (ADR 0027 Layer 1) ------------
+//
+// `StaticReplayClient` answers the real ssooidc/sso SDK clients with canned HTTP,
+// so `register_client`/`create_token`/`get_role_credentials`/`list_*` run their
+// real (de)serialization, pagination, and the `SdkError → map_aws_err`
+// classification — no live AWS. Error responses carry the exact `x-amzn-errortype`
+// shapes from the ADR 0010 §5 verify list, so the classification is exercised
+// against genuine `SdkError`s, not a hand-written code string (which the pure-fn
+// tests above already cover).
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+    use aws_smithy_types::body::SdkBody;
+
+    /// A 200 response with a JSON body the SDK will deserialize.
+    fn ok_json(body: &str) -> ReplayEvent {
+        ReplayEvent::new(
+            http::Request::builder()
+                .uri("https://replay.test/")
+                .body(SdkBody::empty())
+                .unwrap(),
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(SdkBody::from(body.to_owned()))
+                .unwrap(),
+        )
+    }
+
+    /// A restJson1 error response: status + `x-amzn-errortype` is how the SDK
+    /// resolves the error code that `classify_aws` switches on.
+    fn err_json(status: u16, code: &str) -> ReplayEvent {
+        ReplayEvent::new(
+            http::Request::builder()
+                .uri("https://replay.test/")
+                .body(SdkBody::empty())
+                .unwrap(),
+            http::Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .header("x-amzn-errortype", code)
+                .body(SdkBody::from(format!(
+                    "{{\"__type\":\"{code}\",\"message\":\"{code} (replayed)\"}}"
+                )))
+                .unwrap(),
+        )
+    }
+
+    async fn oidc(events: Vec<ReplayEvent>) -> AwsOidcClient {
+        AwsOidcClient::with_http_client("us-east-1".into(), StaticReplayClient::new(events)).await
+    }
+    async fn role(events: Vec<ReplayEvent>) -> AwsRoleClient {
+        AwsRoleClient::with_http_client("us-east-1".into(), StaticReplayClient::new(events)).await
+    }
+    fn dummy_token() -> SsoToken {
+        SsoToken::new(
+            "sso-token".into(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
+        )
+    }
+    fn registration() -> ClientRegistration {
+        ClientRegistration {
+            client_id: "c".into(),
+            client_secret: "s".into(),
+            authorization_endpoint: "https://oidc.us-east-1.amazonaws.com/authorize".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_client_maps_success_fields() {
+        let body = r#"{"clientId":"cid","clientSecret":"sec","authorizationEndpoint":"https://oidc.eu-west-1.amazonaws.com/authorize"}"#;
+        let reg = oidc(vec![ok_json(body)])
+            .await
+            .register_client(
+                "https://identitycenter.amazonaws.com/ssoins-x",
+                &["http://127.0.0.1/oauth/callback".into()],
+            )
+            .await
+            .expect("register");
+        assert_eq!(reg.client_id, "cid");
+        assert_eq!(reg.client_secret, "sec");
+        assert_eq!(
+            reg.authorization_endpoint,
+            "https://oidc.eu-west-1.amazonaws.com/authorize"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_client_derives_authorize_endpoint_when_null() {
+        // AWS returns a null authorizationEndpoint for some instances (Milestone
+        // B); the wrap derives the regional endpoint from the client's region.
+        let body = r#"{"clientId":"cid","clientSecret":"sec","authorizationEndpoint":null}"#;
+        let reg = oidc(vec![ok_json(body)])
+            .await
+            .register_client("iss", &["http://127.0.0.1/oauth/callback".into()])
+            .await
+            .expect("register");
+        assert_eq!(
+            reg.authorization_endpoint,
+            "https://oidc.us-east-1.amazonaws.com/authorize"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_client_scrubs_errors_to_sdk_context() {
+        // RegisterClient is pre-auth; any failure collapses to the scrubbed
+        // `Sdk { context: "RegisterClient" }` (the real detail is logged, not returned).
+        // `ClientRegistration` is intentionally non-Debug (it holds a client
+        // secret), so match rather than `expect_err`.
+        let result = oidc(vec![err_json(400, "InvalidClientMetadataException")])
+            .await
+            .register_client("iss", &["http://127.0.0.1/oauth/callback".into()])
+            .await;
+        match result {
+            Err(SignInError::Sdk { context }) => assert_eq!(context, "RegisterClient"),
+            Err(other) => panic!("expected scrubbed Sdk, got {other:?}"),
+            Ok(_) => panic!("expected register failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_token_extracts_access_token() {
+        let body = r#"{"accessToken":"AT-123","tokenType":"Bearer","expiresIn":3600}"#;
+        let token = oidc(vec![ok_json(body)])
+            .await
+            .create_token(TokenExchange {
+                registration: &registration(),
+                code: "code",
+                code_verifier: "ver",
+                redirect_uri: "http://127.0.0.1:1/oauth/callback",
+            })
+            .await
+            .expect("token");
+        assert_eq!(token.expose(), "AT-123");
+    }
+
+    #[tokio::test]
+    async fn create_token_maps_invalid_grant_to_token_endpoint() {
+        let err = oidc(vec![err_json(400, "InvalidGrantException")])
+            .await
+            .create_token(TokenExchange {
+                registration: &registration(),
+                code: "bad",
+                code_verifier: "ver",
+                redirect_uri: "http://127.0.0.1:1/oauth/callback",
+            })
+            .await
+            .expect_err("grant fails");
+        assert!(matches!(err, SignInError::TokenEndpoint));
+    }
+
+    #[tokio::test]
+    async fn get_role_credentials_maps_fields_and_reads_expiration() {
+        // expiration is epoch+10_000s (in millis) — proves it is read from the
+        // response, never a hardcoded 1h (ADR 0010 verify list).
+        let exp_ms = 10_000_000u64;
+        let body = format!(
+            r#"{{"roleCredentials":{{"accessKeyId":"AKIA","secretAccessKey":"SECRET","sessionToken":"SESSION","expiration":{exp_ms}}}}}"#
+        );
+        let cred = role(vec![ok_json(&body)])
+            .await
+            .get_role_credentials(&dummy_token(), "111122223333", "ReadOnly", "us-east-1")
+            .await
+            .expect("creds");
+        assert_eq!(cred.access_key_id(), "AKIA");
+        assert_eq!(cred.secret_access_key(), "SECRET");
+        assert_eq!(cred.session_token(), "SESSION");
+        // The parsed 10_000s expiration drives staleness: fresh well before it,
+        // stale just under the skew window.
+        let skew = Duration::from_secs(60);
+        assert!(!cred.is_stale(SystemTime::UNIX_EPOCH + Duration::from_secs(5_000), skew));
+        assert!(cred.is_stale(SystemTime::UNIX_EPOCH + Duration::from_secs(9_999), skew));
+    }
+
+    #[tokio::test]
+    async fn get_role_credentials_dead_token_is_reauth_required() {
+        let err = role(vec![err_json(401, "UnauthorizedException")])
+            .await
+            .get_role_credentials(&dummy_token(), "111", "ReadOnly", "us-east-1")
+            .await
+            .expect_err("dead token");
+        assert!(matches!(err, SessionError::ReauthRequired));
+    }
+
+    #[tokio::test]
+    async fn get_role_credentials_forbidden_is_role_not_entitled() {
+        // ForbiddenException isn't modeled for GetRoleCredentials, so the SDK
+        // surfaces it as an unhandled service error — but the x-amzn-errortype
+        // code still drives classification to RoleNotEntitled (ADR 0018), NOT a
+        // browser-looping ReauthRequired.
+        let err = role(vec![err_json(403, "ForbiddenException")])
+            .await
+            .get_role_credentials(&dummy_token(), "111", "Denied", "us-east-1")
+            .await
+            .expect_err("not entitled");
+        match err {
+            SessionError::RoleNotEntitled { context } => {
+                assert!(
+                    context.contains("ForbiddenException"),
+                    "detail kept: {context}"
+                );
+            }
+            other => panic!("expected RoleNotEntitled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_role_credentials_not_found_and_throttle_classify() {
+        let nf = role(vec![err_json(404, "ResourceNotFoundException")])
+            .await
+            .get_role_credentials(&dummy_token(), "111", "R", "us-east-1")
+            .await
+            .expect_err("nf");
+        assert!(matches!(nf, SessionError::NotFound));
+        // A single 429 suffices because the test constructor disables retries.
+        let throttled = role(vec![err_json(429, "TooManyRequestsException")])
+            .await
+            .get_role_credentials(&dummy_token(), "111", "R", "us-east-1")
+            .await
+            .expect_err("throttle");
+        assert!(matches!(throttled, SessionError::Throttled));
+    }
+
+    #[tokio::test]
+    async fn list_accounts_follows_pagination() {
+        let page1 = r#"{"accountList":[{"accountId":"111","accountName":"Prod","emailAddress":"p@x"}],"nextToken":"NEXT"}"#;
+        let page2 = r#"{"accountList":[{"accountId":"222","accountName":"Dev"}],"nextToken":null}"#;
+        let accounts = role(vec![ok_json(page1), ok_json(page2)])
+            .await
+            .list_accounts(&dummy_token())
+            .await
+            .expect("accounts");
+        assert_eq!(accounts.len(), 2, "both pages walked");
+        assert_eq!(accounts[0].id, "111");
+        assert_eq!(accounts[0].name, "Prod");
+        assert_eq!(accounts[1].id, "222");
+        assert_eq!(accounts[1].name, "Dev");
+    }
+
+    #[tokio::test]
+    async fn list_account_roles_maps_role_names() {
+        let body = r#"{"roleList":[{"roleName":"ReadOnly","accountId":"111"},{"roleName":"Admin","accountId":"111"}],"nextToken":null}"#;
+        let roles = role(vec![ok_json(body)])
+            .await
+            .list_account_roles(&dummy_token(), "111")
+            .await
+            .expect("roles");
+        let names: Vec<&str> = roles.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["ReadOnly", "Admin"]);
+    }
+
+    #[tokio::test]
+    async fn list_accounts_propagates_dead_token() {
+        // The account/role enumeration reuses GetRoleCredentials' error mapping,
+        // so a dead token surfaces as ReauthRequired here too.
+        let err = role(vec![err_json(401, "UnauthorizedException")])
+            .await
+            .list_accounts(&dummy_token())
+            .await
+            .expect_err("dead token");
+        assert!(matches!(err, SessionError::ReauthRequired));
     }
 }

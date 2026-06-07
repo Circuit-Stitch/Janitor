@@ -155,3 +155,9 @@ one prediction that did not hold:
    therefore **blocked on a follow-up effort to cover the shared auth shell with
    live-AWS integration tests** (the long-term direction ADR 0016 already named);
    the `janitor-aws-auth` coverage CI step is wired at ≥80% and is RED until then.
+
+   **Resolved by [ADR 0027](0027-covering-the-shared-auth-shell-with-replay-and-live-tests.md):**
+   the shell is now covered in CI by replay-transport (`StaticReplayClient`) +
+   local-socket tests, with an env-gated live-AWS suite confirming the canned
+   shapes against a real org. The crate is at **~89% lines**, the CI step is
+   GREEN, and #61's coverage blocker is closed.

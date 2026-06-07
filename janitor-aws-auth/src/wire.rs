@@ -313,6 +313,83 @@ pub mod fakes {
         }
     }
 
+    /// A scripted OIDC client for driving `Authenticator::sign_in_once` end-to-end
+    /// without AWS (ADR 0027). `register_client` yields a fixed registration (or
+    /// fails); `create_token` records the auth code it was handed (proving the
+    /// loopback round-trip fed it through) and yields a fresh token (or fails).
+    pub struct FakeOidcClient {
+        pub authorization_endpoint: String,
+        pub register_fails: bool,
+        pub token_fails: bool,
+        pub register_calls: Mutex<u32>,
+        pub token_calls: Mutex<u32>,
+        pub seen_code: Mutex<Option<String>>,
+    }
+    impl FakeOidcClient {
+        fn build(register_fails: bool, token_fails: bool) -> Self {
+            FakeOidcClient {
+                // The host is irrelevant to the fake browser-opener, which reads
+                // the loopback `redirect_uri` out of the authorize URL's query.
+                authorization_endpoint: "https://oidc.example/authorize".into(),
+                register_fails,
+                token_fails,
+                register_calls: Mutex::new(0),
+                token_calls: Mutex::new(0),
+                seen_code: Mutex::new(None),
+            }
+        }
+        pub fn ok() -> Self {
+            Self::build(false, false)
+        }
+        pub fn failing_register() -> Self {
+            Self::build(true, false)
+        }
+        pub fn failing_token() -> Self {
+            Self::build(false, true)
+        }
+        pub fn register_count(&self) -> u32 {
+            *self.register_calls.lock().unwrap()
+        }
+        pub fn token_count(&self) -> u32 {
+            *self.token_calls.lock().unwrap()
+        }
+        pub fn seen_code(&self) -> Option<String> {
+            self.seen_code.lock().unwrap().clone()
+        }
+    }
+    #[async_trait]
+    impl OidcClient for FakeOidcClient {
+        async fn register_client(
+            &self,
+            _issuer_url: &str,
+            _redirect_uris: &[String],
+        ) -> Result<ClientRegistration, SignInError> {
+            *self.register_calls.lock().unwrap() += 1;
+            if self.register_fails {
+                return Err(SignInError::Sdk {
+                    context: "RegisterClient".into(),
+                });
+            }
+            Ok(ClientRegistration {
+                client_id: "fake-client-id".into(),
+                client_secret: "fake-client-secret".into(),
+                authorization_endpoint: self.authorization_endpoint.clone(),
+            })
+        }
+
+        async fn create_token(&self, ex: TokenExchange<'_>) -> Result<SsoToken, SignInError> {
+            *self.token_calls.lock().unwrap() += 1;
+            *self.seen_code.lock().unwrap() = Some(ex.code.to_string());
+            if self.token_fails {
+                return Err(SignInError::TokenEndpoint);
+            }
+            Ok(SsoToken::new(
+                "fake-access-token".into(),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(28800),
+            ))
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
