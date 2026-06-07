@@ -384,7 +384,10 @@ fn value_cell_reveals_while_held_and_hides_on_release() {
     // Press and hold: move to the cell (→ hover) then press (→ reveal-cell). The
     // worker reply lands as revealed-* for (row 0, col 0).
     window.dispatch_event(WindowEvent::PointerMoved { position: pos });
-    window.dispatch_event(WindowEvent::PointerPressed { position: pos, button: PointerEventButton::Left });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: pos,
+        button: PointerEventButton::Left,
+    });
     ui.set_revealed_row(0);
     ui.set_revealed_col(0);
     ui.set_revealed_text("SECRETVAL".into());
@@ -399,7 +402,10 @@ fn value_cell_reveals_while_held_and_hides_on_release() {
     );
 
     // Release: the up handler zeroes revealed-* → the gate closes → plaintext gone.
-    window.dispatch_event(WindowEvent::PointerReleased { position: pos, button: PointerEventButton::Left });
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: pos,
+        button: PointerEventButton::Left,
+    });
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
 
     assert_eq!(
