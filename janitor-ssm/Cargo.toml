@@ -1,0 +1,13 @@
+[package]
+name = "janitor-ssm"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Janitor's remote-.env-over-SSM Provider (ADR 0025): a pure .env → SecretShape parser today; the SSM Discovery tail + transport land in later slices."
+
+# Skeleton slice (#63): depends on janitor-core ONLY. The janitor-aws-auth
+# dependency arrives with the SSM tail (B3); this crate must never depend on
+# janitor-aws (ADR 0025 — peer Provider, not a subtype).
+[dependencies]
+janitor-core = { path = "../janitor-core" }
+thiserror = "2"

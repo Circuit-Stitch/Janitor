@@ -67,6 +67,12 @@ jobs:
       - name: Coverage — janitor-mock (≥80% lines)
         run: cargo llvm-cov --package janitor-mock --all-features --fail-under-lines 80 --lcov --output-path lcov-mock.info
 
+      # janitor-ssm is the second real Provider (the remote-.env-over-SSM crate,
+      # ADR 0025). Today it holds only the pure `parse_dotenv`; `src/bin/` is
+      # dropped to match the aws gate for the human-gated harness that lands later.
+      - name: Coverage — janitor-ssm (≥80% lines)
+        run: cargo llvm-cov --package janitor-ssm --all-features --ignore-filename-regex 'src/bin/' --fail-under-lines 80 --lcov --output-path lcov-ssm.info
+
       # janitor-aws-auth is the shared Identity Center auth base (ADR 0024), gated
       # on its *library* surface like janitor-aws. It has no src/bin/ harnesses,
       # but it carries the ADR 0010 §5 SDK/browser shell
@@ -115,4 +121,12 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov-mock.info
           flags: mock
+          fail_ci_if_error: false
+
+      - name: Upload janitor-ssm coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-ssm.info
+          flags: ssm
           fail_ci_if_error: false
