@@ -5,6 +5,7 @@
 [![aws coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=aws&label=aws%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 [![aws-auth coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=aws-auth&label=aws-auth%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 [![mock coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=mock&label=mock%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
+[![ssm coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=ssm&label=ssm%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 
 > An ephemeral desktop client onto **AWS Secrets Manager**. It stores no secrets
 > and no credentials of its own — it borrows them on demand and forgets them.

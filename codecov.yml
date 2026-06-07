@@ -23,3 +23,6 @@ flags:
   mock:
     paths:
       - janitor-mock/
+  ssm:
+    paths:
+      - janitor-ssm/
