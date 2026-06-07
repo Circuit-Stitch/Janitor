@@ -30,8 +30,12 @@ _Avoid_: project, service, app group (use Application)
 The saved record, inside an Application, of which concrete AWS secret (account + region + name/ARN + permission set) backs a given Environment. Plain data in Config; the thing that prevents Janitor from ever guessing which secret an Environment refers to.
 
 **Provider**:
-The external system that supplies the Secret Sets an Application compares, reached through one substitutable boundary. AWS Secrets Manager is the first Provider; a mock Provider stands in for it offline, and others (another cloud's secret store, or a Terraform / docker-compose file checked for Entry presence) are anticipated. The boundary speaks only the comparison domain (Applications, Mappings, the masked matrix) — never a Provider's internal vocabulary (AWS accounts, roles, SSO). A Provider may not support every capability: one without authentication treats Sign-in as a no-op, one that only knows Entry presence cannot reveal a Value.
+The external system that supplies the Secret Sets an Application compares, reached through one substitutable boundary. AWS Secrets Manager is the first Provider; a mock Provider stands in for it offline; the second real Provider reads a `.env` Secret Set off a remote Instance over SSM. Others (another cloud's secret store, or a Terraform / docker-compose file checked for Entry presence) are anticipated. The boundary speaks only the comparison domain (Applications, Mappings, the masked matrix) — never a Provider's internal vocabulary (AWS accounts, roles, SSO, SSM instances). A Provider may not support every capability: one without authentication treats Sign-in as a no-op, one that only knows Entry presence cannot reveal a Value.
 _Avoid_: backend, source, adapter (use Provider; "source" is the retired sync seam, "backend" is GUI plumbing)
+
+**Instance**:
+A remote machine (an EC2 instance registered with AWS Systems Manager) whose filesystem holds a `.env` file that Janitor treats as a Secret Set. For the remote-`.env` Provider, the Instance plus a file path is *where the Set lives* — the Discovery pick (after account → role) that precedes choosing the `.env` path, and the SSM equivalent of choosing a Secrets Manager secret.
+_Avoid_: host, server, box (use Instance; it is specifically an SSM-managed instance)
 
 **Comparison Columns**:
 The chosen, ordered subset of an Application's Environments currently shown as columns in the matrix. A *view* selection over the Application's Environments — not the same as which Environments are configured. Taking a column "out of the comparison" hides that Environment from the view; it stays configured and can be brought back. Persisted in Config (locations only — Environment identifiers, never Values).

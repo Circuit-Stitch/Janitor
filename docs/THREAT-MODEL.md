@@ -16,8 +16,10 @@ visibility** across Environments.
 
 ## Assets
 
-- **Values** — secret material fetched from AWS. Highest-value asset. Ephemeral,
-  memory-only, zeroized; never written to disk.
+- **Values** — secret material fetched from AWS, whether from Secrets Manager or
+  read as a remote `.env` off an Instance over SSM. Highest-value asset.
+  Ephemeral, memory-only, zeroized; never written to disk on the operator's
+  machine.
 - **Credentials / SSO token** — ephemeral AWS auth. Memory-only; never cached.
 - **Config** — a *map of where secrets live* (accounts, regions, secret names,
   SSO URL). No Values. Written to disk as plaintext.
@@ -81,8 +83,24 @@ visibility** across Environments.
   live (not their Values). An attacker reading it learns secret names/locations,
   not secrets. Encrypting it was considered and deferred (ADR-pending if revisited).
 - **AWS-side authorization.** Janitor enforces nothing AWS doesn't; least
-  privilege is the IAM policy's job (v1 read path needs only
-  `GetSecretValue` / `ListSecrets` / `DescribeSecret`).
+  privilege is the IAM policy's job (the Secrets Manager read path needs only
+  `GetSecretValue` / `ListSecrets` / `DescribeSecret`; the remote-`.env` path adds
+  `ssm:DescribeInstanceInformation` + `ssm:StartSession` scoped to the target
+  instances and the `AWS-StartNonInteractiveCommand` document — see
+  `docs/iam_setup.md`).
+- **SSM session logging to AWS storage.** The remote-`.env` Provider reads the
+  file over an SSM Session Manager session. Session Manager can be configured
+  **account-wide** to archive session data — including the streamed file
+  contents — to **S3 / CloudWatch Logs**; this is the operator's AWS-side config,
+  which Janitor cannot disable. Janitor *detects* the setting and *warns* (in the
+  Diagnostic Log and the discovery wizard) so the operator knows the read will be
+  logged, but it cannot prevent it. Accepted residual risk, sibling to the AWS
+  24h version-retention note: the secret already lives in the customer's AWS
+  account; Janitor surfaces the exposure rather than defending below it. (Why
+  not `SendCommand`: its inline output truncates at ~2500 chars, so reading a
+  larger `.env` would force output to S3 — a disk write to *read* a secret;
+  Session Manager streams arbitrary sizes with archival being opt-in/detectable.
+  See [ADR 0025](adr/0025-remote-dotenv-over-ssm-provider.md).)
 - **Being a secret store or backup.** Janitor has no storage of record; AWS is the
   source of truth.
 
