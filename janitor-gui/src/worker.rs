@@ -12,11 +12,15 @@ use janitor_aws::aws_impl::AwsSecretsApi;
 use janitor_aws::session::Session;
 use janitor_aws_auth::authenticator::Authenticator;
 use janitor_aws_auth::aws_impl::{AwsOidcClient, AwsRoleClient};
-use janitor_aws_auth::types::SystemClock;
+use janitor_aws_auth::error::SessionError;
+use janitor_aws_auth::types::{Credential, SystemClock};
+use janitor_aws_auth::wire::RawSecret;
 use janitor_core::compare::RowKey;
 use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::provider::{AppError, Provider, Step, What};
 use janitor_core::view::MatrixView;
+use janitor_ssm::wire::{InstanceCatalog, InstanceSummary, RemoteFileReader};
+use janitor_ssm::SsmProvider;
 
 /// UI → worker.
 pub enum Command {
@@ -119,6 +123,16 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Aws,
+    /// The remote-`.env`-over-SSM Provider (ADR 0025). Constructs the real
+    /// front-half shell; its SSM tail (instance discovery + file read) is the
+    /// B4-deferred transport, so until then the tail seams refuse. The offline
+    /// end-to-end path is exercised by the worker tests against the fakes.
+    ///
+    /// `build_provider` already constructs it, but `main` does not *select* it
+    /// yet (the user-facing selector lands in B4 with the real transport) — hence
+    /// the allow: the arm is wired ahead of its composition-root entry point.
+    #[allow(dead_code)]
+    SsmDotenv,
     Mock,
 }
 
@@ -154,6 +168,7 @@ pub fn spawn(
 async fn build_provider(kind: ProviderKind, config: &Config) -> Box<dyn Provider> {
     match kind {
         ProviderKind::Aws => Box::new(build_session(config).await),
+        ProviderKind::SsmDotenv => Box::new(build_ssm_session(config).await),
         ProviderKind::Mock => Box::new(janitor_mock::MockProvider::new()),
     }
 }
@@ -178,6 +193,67 @@ async fn build_session(config: &Config) -> Session {
         role_client,
         clock,
     )
+}
+
+/// Build the remote-`.env`-over-SSM Provider (ADR 0025). The front half is the
+/// same real shell as `build_session` (browser Sign-in + the account/role
+/// catalog + credential minting); the SSM tail — `DescribeInstanceInformation`
+/// and the Session Manager file read — is the transport spiked and chosen in B4
+/// (ADR 0025 §3), so until then it is the [`UnimplementedSsmTail`] placeholder
+/// that refuses with a masked error. The Provider therefore signs in for real but
+/// cannot list/read yet; the offline end-to-end walk is exercised by the worker
+/// tests against the `janitor-ssm` fakes (#64).
+async fn build_ssm_session(config: &Config) -> SsmProvider {
+    let oidc = Arc::new(AwsOidcClient::new(config.sso_region.clone()).await);
+    let role_client = Arc::new(AwsRoleClient::new(config.sso_region.clone()).await);
+    let clock = Arc::new(SystemClock);
+    let authenticator = Arc::new(Authenticator::new(oidc, config.sso_start_url.clone()));
+    let tail = Arc::new(UnimplementedSsmTail);
+    // `AwsRoleClient` implements both `RoleCredentialClient` and `AccountCatalog`;
+    // the single `tail` Arc serves both SSM-tail seams.
+    SsmProvider::new(
+        authenticator,
+        role_client.clone(),
+        role_client,
+        tail.clone(),
+        tail,
+        clock,
+    )
+}
+
+/// B4 placeholder for the SSM tail seams (ADR 0025 §3): the real
+/// `DescribeInstanceInformation` + Session Manager transport land in a later
+/// slice. It refuses every call with a masked, error-safe [`SessionError`] (no
+/// SDK text), so the SsmDotenv Provider is constructible and signs in but its
+/// tail is inert until B4. Untested I/O-boundary shell (ADR 0010 §5).
+struct UnimplementedSsmTail;
+
+#[async_trait::async_trait]
+impl InstanceCatalog for UnimplementedSsmTail {
+    async fn describe_instances(
+        &self,
+        _cred: &Credential,
+        _region: &str,
+    ) -> Result<Vec<InstanceSummary>, SessionError> {
+        Err(SessionError::Sdk {
+            context: "SSM instance discovery not implemented (B4)".into(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteFileReader for UnimplementedSsmTail {
+    async fn read_file(
+        &self,
+        _cred: &Credential,
+        _instance_id: &str,
+        _region: &str,
+        _path: &str,
+    ) -> Result<RawSecret, SessionError> {
+        Err(SessionError::Sdk {
+            context: "SSM file read not implemented (B4)".into(),
+        })
+    }
 }
 
 /// Map a `Discovery` `Step` to the UI Event the worker relays. `Ask` carries the
@@ -609,5 +685,147 @@ mod tests {
             "the typed path round-tripped into the discovered Mapping"
         );
         assert_eq!(mapping.environment, "prod");
+    }
+
+    /// Build a fully-faked `SsmProvider` for the offline end-to-end worker test
+    /// (#64 / ADR 0025): the SSM-tail doubles plus the reused front-half doubles,
+    /// all from each crate's `test-support` feature (never a normal build). Seeds a
+    /// single account/role/instance (so the walk auto-collapses straight to the
+    /// path `Input`) and the scripted reads the discovery validation + the two-env
+    /// load consume in order.
+    fn faked_ssm_provider() -> janitor_ssm::SsmProvider {
+        use janitor_aws_auth::wire::fakes::{
+            CredSpec, FakeAccountCatalog, FakeClock, FakeReauth, FakeRoleClient,
+        };
+        use janitor_aws_auth::wire::{AccountSummary, RawSecret, RoleSummary};
+        use janitor_ssm::wire::fakes::{FakeInstanceCatalog, FakeRemoteFileReader};
+        use janitor_ssm::wire::InstanceSummary;
+        use std::time::Duration;
+
+        let cred = || {
+            Ok(CredSpec {
+                expires_in: Duration::from_secs(3600),
+                tag: "t",
+            })
+        };
+        let dotenv = |t: &str| {
+            Ok(RawSecret {
+                secret_string: Some(t.to_string()),
+                secret_binary: None,
+            })
+        };
+        janitor_ssm::SsmProvider::new(
+            Arc::new(FakeReauth::ok()),
+            // discovery mint + one load mint (the broker caches the second env).
+            Arc::new(FakeRoleClient::new(vec![cred(), cred()])),
+            Arc::new(FakeAccountCatalog::new(
+                vec![Ok(vec![AccountSummary {
+                    id: "111".into(),
+                    name: "Prod".into(),
+                }])],
+                vec![Ok(vec![RoleSummary {
+                    name: "ReadOnly".into(),
+                }])],
+            )),
+            Arc::new(FakeInstanceCatalog::new(vec![Ok(vec![InstanceSummary {
+                id: "i-0abc".into(),
+                name: "web".into(),
+            }])])),
+            // reads, in order: discovery validation, then load prod + staging.
+            Arc::new(FakeRemoteFileReader::new(vec![
+                dotenv("A=1"),
+                dotenv("A=1\nB=x"),
+                dotenv("A=1"),
+            ])),
+            Arc::new(FakeClock::at(0)),
+        )
+    }
+
+    #[tokio::test]
+    async fn run_loop_drives_the_ssm_provider_offline_through_discovery_into_a_masked_matrix() {
+        use janitor_core::compare::EntryState;
+        // The whole remote-`.env` Provider end to end, offline against the fakes,
+        // through the same worker `Command`/`Event` loop the real GUI uses (#64):
+        // Sign-in → the free-text path Input → an EnvDiscovered Mapping carrying
+        // `<instance>:<path>` → a whole-Application load into a masked Aligned/Gap
+        // matrix — with no AWS or remote-Instance access.
+        let mut provider = faked_ssm_provider();
+
+        // The discovered "prod" Mapping (i-0abc, /app/.env) plus a hand-built
+        // "staging" on another instance — the load fans out over both.
+        let app = Application {
+            name: "app".into(),
+            environments: vec![
+                Mapping {
+                    environment: "prod".into(),
+                    account_id: "111".into(),
+                    region: "us-east-1".into(),
+                    secret_id: "i-0abc:/app/.env".into(),
+                    permission_set: "ReadOnly".into(),
+                },
+                Mapping {
+                    environment: "staging".into(),
+                    account_id: "111".into(),
+                    region: "us-east-1".into(),
+                    secret_id: "i-stg:/app/.env".into(),
+                    permission_set: "ReadOnly".into(),
+                },
+            ],
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::SignIn).unwrap();
+        tx.send(Command::BeginDiscovery {
+            environment: "prod".into(),
+            region: "us-east-1".into(),
+            remembered: None,
+        })
+        .unwrap();
+        tx.send(Command::ProvideInput("/app/.env".into())).unwrap();
+        tx.send(Command::LoadApp(app)).unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+        let events = events.lock().unwrap();
+
+        // Signed in offline (instant), no browser.
+        assert!(
+            events.iter().any(|e| matches!(e, Event::SignedIn)),
+            "the SSM Provider signs in through the port"
+        );
+        // The walk auto-collapsed the single account/role/instance straight to the
+        // free-text path question.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::DiscoveryInput {
+                    what: What::FilePath,
+                    ..
+                }
+            )),
+            "the walk poses the free-text .env path Input"
+        );
+        // The typed path round-tripped into a discovered Mapping at <instance>:<path>.
+        let discovered = events.iter().find_map(|e| match e {
+            Event::EnvDiscovered(m) => Some(m.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            discovered.map(|m| m.secret_id),
+            Some("i-0abc:/app/.env".to_string()),
+            "discovery yields the <instance-id>:<path> location"
+        );
+        // The whole-Application load projected a masked matrix: A aligned, B a Gap.
+        let view = events.iter().find_map(|e| match e {
+            Event::AppLoaded { view, .. } => Some(view.clone()),
+            _ => None,
+        });
+        let view = view.expect("the load surfaced AppLoaded");
+        assert_eq!(view.environments, vec!["prod", "staging"]);
+        let state = |name: &str| view.rows.iter().find(|r| r.name == name).map(|r| r.state);
+        assert_eq!(state("A"), Some(EntryState::Aligned));
+        assert_eq!(state("B"), Some(EntryState::Gap), "B present only in prod");
     }
 }
