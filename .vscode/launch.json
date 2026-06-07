@@ -1,0 +1,46 @@
+{
+  // Debug/run Janitor under VS Code. These use CodeLLDB (vadimcn.vscode-lldb) —
+  // see .vscode/extensions.json. CodeLLDB runs `cargo build` for the GUI, then
+  // launches the resulting binary under the debugger (breakpoints work).
+  //
+  // No debugger extension? Use the "Run Janitor …" tasks in tasks.json instead
+  // (Terminal → Run Task), which just `cargo run` in the integrated terminal.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Janitor — real AWS (browser sign-in)",
+      "cargo": {
+        "args": ["build", "--bin=janitor-gui", "--package=janitor-gui"],
+        "filter": { "name": "janitor-gui", "kind": "bin" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Janitor — mock (offline, no AWS)",
+      "cargo": {
+        "args": ["build", "--bin=janitor-gui", "--package=janitor-gui"],
+        "filter": { "name": "janitor-gui", "kind": "bin" }
+      },
+      "args": [],
+      "env": { "JANITOR_MOCK": "1" },
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Janitor — SSM remote .env (browser sign-in)",
+      "cargo": {
+        "args": ["build", "--bin=janitor-gui", "--package=janitor-gui"],
+        "filter": { "name": "janitor-gui", "kind": "bin" }
+      },
+      "args": [],
+      "env": { "JANITOR_SSM": "1" },
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
