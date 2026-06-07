@@ -334,6 +334,13 @@ impl Provider for Session {
         self.reset_if_reauth(&step);
         Some(step)
     }
+
+    /// The Secrets Manager walk never poses a free-text `Step::Input` (only
+    /// account/role/secret `Ask`s), so there is nothing to feed text into — the
+    /// additive `Input` rail (#62 / ADR 0025) is a no-op for this Provider.
+    async fn provide_input(&mut self, _text: String) -> Option<Step> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -883,5 +890,16 @@ mod tests {
         let api = Arc::new(FakeSecretsApi::new(vec![]));
         let mut s = session(reauth, role, api);
         assert!(s.advance_discovery(0).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn provide_input_is_always_none_the_sm_walk_poses_no_input_step() {
+        // The Secrets Manager walk only ever poses account/role/secret `Ask`s, so
+        // the additive free-text `Input` rail (#62 / ADR 0025) is a no-op here.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![]));
+        let api = Arc::new(FakeSecretsApi::new(vec![]));
+        let mut s = session(reauth, role, api);
+        assert!(s.provide_input("/app/.env".into()).await.is_none());
     }
 }

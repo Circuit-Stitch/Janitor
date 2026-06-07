@@ -107,14 +107,20 @@ pub struct Loaded {
     pub corrected: Vec<Mapping>,
 }
 
-/// Which step of the guided walk produced an empty choice list. Carried by
-/// `Step::Empty` so the presenter can say "No accounts/roles/secrets you can
-/// access" without the machine knowing about phrasing (ADR 0013).
+/// Which step of the guided walk produced an empty choice list, or which kind of
+/// question an `Ask`/`Input` is posing. Carried by `Step::Empty`/`Ask`/`Input` so
+/// the presenter can title the prompt or say "No accounts/roles/secrets you can
+/// access" without the machine knowing about phrasing (ADR 0013). `Instances` and
+/// `FilePath` are the remote-`.env`-over-SSM tail's labels (ADR 0025): `Instances`
+/// titles the managed-Instance pick, `FilePath` titles the free-text `.env`-path
+/// `Input`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum What {
     Accounts,
     Roles,
     Secrets,
+    Instances,
+    FilePath,
 }
 
 /// What the guided walk is currently asking, or its terminal outcome (ADR 0013).
@@ -124,12 +130,24 @@ pub enum What {
 /// back as a bare index. `what` lets the presenter title the list without knowing
 /// the variant. `Done` carries the fully-formed Mapping ready to append.
 /// `Empty`/`Failed` are masked terminal states (no Provider-internal text).
+///
+/// `Input` is the free-text counterpart of `Ask` (ADR 0025): instead of picking
+/// one of N `choices`, the user types a value (e.g. a remote `.env` path). Its
+/// `prompt` is the presenter-ready question line and `default` is the remembered
+/// text to pre-fill — a path string, **not** an `Ask`'s `Option<usize>` index.
+/// The typed value comes back via [`Provider::provide_input`]. No Provider in this
+/// slice emits `Input`; it is the enabling rail the SSM Provider (#64) will ride.
 #[derive(Debug)]
 pub enum Step {
     Ask {
         what: What,
         choices: Vec<String>,
         default: Option<usize>,
+    },
+    Input {
+        what: What,
+        prompt: String,
+        default: Option<String>,
     },
     Done(Mapping),
     Empty(What),
@@ -175,6 +193,12 @@ pub trait Provider: Send {
     /// Feed the user's chosen index into the in-progress walk. `None` if no walk
     /// is in progress.
     async fn advance_discovery(&mut self, choice: usize) -> Option<Step>;
+
+    /// Feed the user's typed text into a walk paused on a [`Step::Input`] (ADR 0025),
+    /// the free-text counterpart of `advance_discovery`. `None` if no walk is in
+    /// progress (or the Provider never poses an `Input` — the default for every
+    /// Provider in this slice). The text is a location (a path), never a Value.
+    async fn provide_input(&mut self, text: String) -> Option<Step>;
 }
 
 #[cfg(test)]

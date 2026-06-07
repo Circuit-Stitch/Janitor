@@ -1004,8 +1004,14 @@ export component ManageWindow inherits Window {
     in property <string> choice-prompt;
     in property <[string]> choices;
     in property <int> choice-default;
+    // Pending free-text Input (ADR 0025): prompt ("" hides the field) and the
+    // remembered default *path* to pre-fill the text field with. Mutually
+    // exclusive with the choice picker above (one question at a time).
+    in property <string> input-prompt;
+    in property <string> input-default;
     callback add-env-discover(string); // env name only → Discovery fills the rest
     callback pick-choice(int);         // chosen index → AdvanceDiscovery
+    callback provide-input(string);    // typed path → ProvideInput
     callback back-discovery();         // dismiss a terminal message to adjust/retry
     callback remove-env(int);
     callback rename-app(string);       // new name → Config::rename_application
@@ -1082,6 +1088,23 @@ export component ManageWindow inherits Window {
             for label[i] in root.choices : Button {
                 text: (i == root.choice-default ? "● " : "○ ") + label;
                 clicked => { root.pick-choice(i); }
+            }
+        }
+
+        // Guided free-text Input (ADR 0025): a text field pre-filled with the
+        // remembered path default. Enter or Submit sends the typed path back via
+        // `provide-input`. Mutually exclusive with the choice picker above.
+        if root.input-prompt != "" : VerticalLayout {
+            spacing: 4px;
+            Text { text: root.input-prompt; color: #cdd3db; }
+            HorizontalLayout {
+                spacing: 8px;
+                input-field := LineEdit {
+                    text: root.input-default;
+                    horizontal-stretch: 1;
+                    accepted => { root.provide-input(self.text); }
+                }
+                Button { text: "Submit"; clicked => { root.provide-input(input-field.text); } }
             }
         }
 

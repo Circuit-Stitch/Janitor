@@ -3423,6 +3423,7 @@ name = "janitor-gui"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "async-trait",
  "i-slint-backend-testing",
  "janitor-aws",
  "janitor-aws-auth",

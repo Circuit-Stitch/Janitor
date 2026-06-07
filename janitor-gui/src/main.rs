@@ -402,6 +402,18 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             labels,
             default,
         } => set_manage_choice(what, labels, default),
+        // A free-text Input step (ADR 0025): render the prompt as a text field
+        // pre-filled with the remembered path default. The prompt carries the
+        // question, so `what` is not needed for titling — it is logged as a safe
+        // diagnostic (an enum kind, never a path/Value) to keep the DTO honest.
+        Event::DiscoveryInput {
+            what,
+            prompt,
+            default,
+        } => {
+            tracing::debug!(target: "janitor::gui", ?what, "discovery asks for free-text input");
+            set_manage_input(prompt, default);
+        }
         Event::DiscoveryFailed(msg) => {
             clear_manage_choice();
             set_manage_terminal(&format!("Could not add: {msg}"))
@@ -521,6 +533,10 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
         win.on_pick_choice(move |index| advance_discovery(&state, index as usize));
     }
     {
+        let state = state.clone();
+        win.on_provide_input(move |text| provide_input(&state, text.to_string()));
+    }
+    {
         // Back from a terminal message: dismiss it (and any stale choice) so the
         // user can re-enter an Environment name and try again. Nothing is
         // appended or saved (only a `Done` walk does that).
@@ -581,6 +597,15 @@ fn advance_discovery(state: &Rc<RefCell<AppState>>, choice: usize) {
     clear_manage_choice();
     set_manage_status("Discovering…");
     dispatch(state, Command::AdvanceDiscovery { choice });
+}
+
+/// Feed the user's typed text back into a walk paused on a `Step::Input`
+/// (ADR 0025) — the free-text counterpart of `advance_discovery`. The text is a
+/// location (a path), never a Value. Clears the field while the next step resolves.
+fn provide_input(state: &Rc<RefCell<AppState>>, text: String) {
+    clear_manage_choice();
+    set_manage_status("Discovering…");
+    dispatch(state, Command::ProvideInput(text));
 }
 
 /// Remove an Environment from the **bound** Application, persist, refresh.
@@ -661,6 +686,10 @@ fn set_manage_choice(what: What, labels: Vec<String>, default: Option<usize>) {
         What::Accounts => "Choose an account:",
         What::Roles => "Choose a role:",
         What::Secrets => "Choose a secret:",
+        What::Instances => "Choose an instance:",
+        // `FilePath` is posed as a free-text `Input`, not a list `Ask`, so it
+        // never reaches the picker; present for exhaustiveness only.
+        What::FilePath => "Choose a path:",
     };
     let rows: Vec<SharedString> = labels.into_iter().map(Into::into).collect();
     MANAGE.with(|m| {
@@ -673,13 +702,32 @@ fn set_manage_choice(what: What, labels: Vec<String>, default: Option<usize>) {
     });
 }
 
-/// Hide the picker (a terminal Step arrived, or a new walk began).
+/// Render a pending free-text Input (ADR 0025) as a text field pre-filled with the
+/// remembered path `default`. Mutually exclusive with the choice picker, so this
+/// also clears any pending choice. `prompt`/`default` are locations, never Values.
+fn set_manage_input(prompt: String, default: Option<String>) {
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            win.set_discovery_status("".into());
+            win.set_choice_prompt("".into());
+            win.set_choices(ModelRc::from(Rc::new(VecModel::<SharedString>::default())));
+            win.set_choice_default(-1);
+            win.set_input_prompt(prompt.into());
+            win.set_input_default(default.unwrap_or_default().into());
+        }
+    });
+}
+
+/// Hide both the picker and the text field (a terminal Step arrived, or a new
+/// walk began) — the guided question is mutually exclusive, so both are cleared.
 fn clear_manage_choice() {
     MANAGE.with(|m| {
         if let Some(win) = m.borrow().as_ref() {
             win.set_choice_prompt("".into());
             win.set_choices(ModelRc::from(Rc::new(VecModel::<SharedString>::default())));
             win.set_choice_default(-1);
+            win.set_input_prompt("".into());
+            win.set_input_default("".into());
         }
     });
 }
