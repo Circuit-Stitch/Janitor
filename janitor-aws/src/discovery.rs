@@ -13,13 +13,12 @@ use std::sync::Arc;
 
 use janitor_core::config::Mapping;
 
-use crate::types::{Credential, SsoToken};
-use crate::wire::SecretsApi;
-use crate::wire::{
-    AccountCatalog, AccountSummary, RoleCredentialClient, RoleSummary, SecretSummary,
-};
+use janitor_aws_auth::types::{Credential, SsoToken};
+use janitor_aws_auth::wire::{AccountCatalog, AccountSummary, RoleCredentialClient, RoleSummary};
 use janitor_core::provider::{Step, What};
 use janitor_core::select::{plan_selection, Selectable, SelectionPlan};
+
+use crate::wire::{SecretSummary, SecretsApi};
 
 /// The choices the machine listed for the step it is currently blocked on, so
 /// [`Discovery::advance`] can resolve a chosen index back to the item without
@@ -221,9 +220,9 @@ fn ask<T: Selectable>(what: What, items: &[T], default: Option<usize>) -> Step {
 /// presenter routes back to Sign-in; everything else becomes a masked,
 /// retryable `Failed` carrying only the tested `FetchFailReason` (no SDK text —
 /// THREAT-MODEL).
-fn terminal_for(e: &crate::error::SessionError) -> Step {
+fn terminal_for(e: &janitor_aws_auth::error::SessionError) -> Step {
     match e {
-        crate::error::SessionError::ReauthRequired => Step::Reauth,
+        janitor_aws_auth::error::SessionError::ReauthRequired => Step::Reauth,
         _ => Step::Failed(e.into()),
     }
 }
@@ -238,7 +237,8 @@ fn pick<T>(mut items: Vec<T>, choice: usize) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient, FakeSecretsApi};
+    use crate::wire::fakes::FakeSecretsApi;
+    use janitor_aws_auth::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient};
     use janitor_core::provider::FetchFailReason;
     use std::time::{Duration, SystemTime};
 
@@ -263,7 +263,7 @@ mod tests {
             arn: arn.into(),
         }
     }
-    fn cred_ok() -> Result<CredSpec, crate::error::SessionError> {
+    fn cred_ok() -> Result<CredSpec, janitor_aws_auth::error::SessionError> {
         Ok(CredSpec {
             expires_in: Duration::from_secs(3600),
             tag: "t",
@@ -580,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_error_is_failed_with_a_masked_reason() {
-        use crate::error::SessionError;
+        use janitor_aws_auth::error::SessionError;
         // The Sdk catch-all carries a context label; it must NOT reach the
         // user-facing reason (THREAT-MODEL — no SDK text leaks).
         let cat = Arc::new(FakeAccountCatalog::new(
@@ -609,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn reauth_required_listing_accounts_is_reauth_step() {
-        use crate::error::SessionError;
+        use janitor_aws_auth::error::SessionError;
         // A dead SSO token surfaces as a distinct terminal `Reauth` (not a
         // `Failed` Back/Close message) so the GUI can route back to Sign-in.
         let cat = Arc::new(FakeAccountCatalog::new(
@@ -632,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn access_denied_listing_roles_is_failed_with_that_reason() {
-        use crate::error::SessionError;
+        use janitor_aws_auth::error::SessionError;
         // A non-reauth SessionError at the role stage is a retryable, masked
         // Failed carrying the matching reason — not Reauth, not a leak.
         let cat = Arc::new(FakeAccountCatalog::new(
@@ -658,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn throttled_listing_secrets_is_failed_with_that_reason_no_leak() {
-        use crate::error::SessionError;
+        use janitor_aws_auth::error::SessionError;
         // Account + role auto-pick, credential mints; the secret listing is
         // throttled → Failed(Throttled), and even an Sdk context never leaks.
         let cat = Arc::new(FakeAccountCatalog::new(
@@ -687,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn reauth_required_listing_roles_is_reauth_step() {
-        use crate::error::SessionError;
+        use janitor_aws_auth::error::SessionError;
         // Account auto-picks (singleton); the role listing then finds the token
         // dead → Reauth, not Failed.
         let cat = Arc::new(FakeAccountCatalog::new(
@@ -710,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn reauth_required_minting_credentials_is_reauth_step() {
-        use crate::error::SessionError;
+        use janitor_aws_auth::error::SessionError;
         // Account + role auto-pick; minting the role credential to list secrets
         // hits a dead token → Reauth.
         let cat = Arc::new(FakeAccountCatalog::new(
@@ -733,7 +733,7 @@ mod tests {
 
     #[tokio::test]
     async fn reauth_required_listing_secrets_is_reauth_step() {
-        use crate::error::SessionError;
+        use janitor_aws_auth::error::SessionError;
         // Account + role auto-pick and the credential mints; listing secrets
         // then finds the token dead → Reauth.
         let cat = Arc::new(FakeAccountCatalog::new(

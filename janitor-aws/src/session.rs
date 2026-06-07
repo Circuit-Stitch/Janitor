@@ -5,11 +5,11 @@
 //! unit-tested against the `wire::fakes`; only the real adapters + browser are
 //! untested shell.
 //!
-//! The crate's rich internal error taxonomy (`SessionError`, `SignInError`) stays
-//! here — it never crosses the port. `Session` masks it into the agnostic
-//! `core::provider` types at the boundary: `SessionError -> FetchFailReason` (per
-//! fetch) and `SignInError -> SignInFailed` (per sign-in), the pattern ADR 0019
-//! prescribes.
+//! The rich AWS error taxonomy (`SessionError`, `SignInError`) lives in
+//! `janitor-aws-auth` and never crosses the port: `Session` masks it into the
+//! agnostic `core::provider` types at the boundary (`SessionError ->
+//! FetchFailReason` per fetch, `SignInError -> SignInFailed` per sign-in) via the
+//! `From` impls the base defines (ADR 0019 / ADR 0024).
 
 use std::sync::Arc;
 
@@ -23,43 +23,15 @@ use janitor_core::secret::SecretShape;
 use janitor_core::select::{plan_selection, SelectionPlan};
 use janitor_core::view::{project, reveal_value};
 
-use crate::broker::CredentialBroker;
+use janitor_aws_auth::broker::CredentialBroker;
+use janitor_aws_auth::error::SessionError;
+use janitor_aws_auth::types::{Clock, SsoToken};
+use janitor_aws_auth::wire::{AccountCatalog, Reauth, RoleCredentialClient};
+
 use crate::discovery::Discovery;
-use crate::error::{SessionError, SignInError};
 use crate::secrets::SecretsClient;
-use crate::source::{AuthenticatedSource, Reauth};
-use crate::types::{Clock, SsoToken};
-use crate::wire::{AccountCatalog, RoleCredentialClient, SecretsApi};
-
-/// Mask a per-fetch `SessionError` into the agnostic [`FetchFailReason`] (no SDK
-/// text; THREAT-MODEL). The impl lives in `aws` because `SessionError` does — the
-/// port type stays provider-agnostic and never learns the AWS taxonomy.
-impl From<&SessionError> for FetchFailReason {
-    fn from(e: &SessionError) -> Self {
-        match e {
-            SessionError::ReauthRequired => FetchFailReason::NeedsSignIn,
-            SessionError::AccessDenied => FetchFailReason::AccessDenied,
-            // An un-recovered role denial surfaces as plain "access denied" — the
-            // recovery attempt (ADR 0018) is upstream in `Session::load`; by the
-            // time it becomes a `Failure`, recovery has already declined/failed.
-            SessionError::RoleNotEntitled { .. } => FetchFailReason::AccessDenied,
-            SessionError::NotFound => FetchFailReason::NotFound,
-            SessionError::Throttled => FetchFailReason::Throttled,
-            SessionError::Unsupported => FetchFailReason::Unsupported,
-            SessionError::Sdk { .. } => FetchFailReason::Other,
-        }
-    }
-}
-
-/// Mask a `SignInError` into the agnostic [`SignInFailed`] at the port boundary
-/// (ADR 0019). `SignInError`'s `Display` is already error-safe (static phrases /
-/// scrubbed `Sdk` label, never secret material), so the wrapped message is safe
-/// for the GUI banner; the browser/loopback *variants* never cross the port.
-impl From<SignInError> for SignInFailed {
-    fn from(e: SignInError) -> Self {
-        SignInFailed::new(e.to_string())
-    }
-}
+use crate::source::AuthenticatedSource;
+use crate::wire::SecretsApi;
 
 /// The outcome of re-resolving an account's entitled roles during recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,10 +339,12 @@ impl Provider for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::fakes::{
-        CredSpec, FakeAccountCatalog, FakeClock, FakeReauth, FakeRoleClient, FakeSecretsApi,
+    use crate::wire::fakes::FakeSecretsApi;
+    use crate::wire::SecretSummary;
+    use janitor_aws_auth::wire::fakes::{
+        CredSpec, FakeAccountCatalog, FakeClock, FakeReauth, FakeRoleClient,
     };
-    use crate::wire::{AccountSummary, RawSecret, RoleSummary, SecretSummary};
+    use janitor_aws_auth::wire::{AccountSummary, RawSecret, RoleSummary};
     use janitor_core::compare::{EntryState, RowKey};
     use janitor_core::config::{Application, Mapping};
     use janitor_core::secret::EntryName;
@@ -408,77 +382,9 @@ mod tests {
         Session::new(reauth, role, api, catalog, Arc::new(FakeClock::at(0)))
     }
 
-    #[test]
-    fn maps_every_session_error_to_a_reason() {
-        assert_eq!(
-            FetchFailReason::from(&SessionError::ReauthRequired),
-            FetchFailReason::NeedsSignIn
-        );
-        assert_eq!(
-            FetchFailReason::from(&SessionError::AccessDenied),
-            FetchFailReason::AccessDenied
-        );
-        // An un-recovered role denial surfaces as plain "access denied".
-        assert_eq!(
-            FetchFailReason::from(&SessionError::RoleNotEntitled {
-                context: "Forbidden".into()
-            }),
-            FetchFailReason::AccessDenied
-        );
-        assert_eq!(
-            FetchFailReason::from(&SessionError::NotFound),
-            FetchFailReason::NotFound
-        );
-        assert_eq!(
-            FetchFailReason::from(&SessionError::Throttled),
-            FetchFailReason::Throttled
-        );
-        assert_eq!(
-            FetchFailReason::from(&SessionError::Unsupported),
-            FetchFailReason::Unsupported
-        );
-        assert_eq!(
-            FetchFailReason::from(&SessionError::Sdk {
-                context: "GetSecretValue".into()
-            }),
-            FetchFailReason::Other
-        );
-    }
-
-    #[test]
-    fn describe_never_leaks_sdk_text() {
-        // The Sdk catch-all carries a context string; describe() must not surface it.
-        let r = FetchFailReason::from(&SessionError::Sdk {
-            context: "hunter2".into(),
-        });
-        assert!(!r.describe().contains("hunter2"));
-        assert_eq!(r.describe(), "AWS error");
-    }
-
-    #[test]
-    fn sign_in_error_maps_to_the_agnostic_port_type_preserving_its_safe_display() {
-        // The boundary masks the rich SignInError into the opaque port type. Its
-        // Display is already error-safe (static phrases / scrubbed Sdk label), so
-        // the wrapped message is the SAME string the GUI banner showed before this
-        // refactor — no behavior change. The browser/loopback *variants* (the type
-        // a file Provider would never produce) stay inside `aws` and never cross.
-        for e in [
-            SignInError::NoLoopbackPort,
-            SignInError::StateMismatch,
-            SignInError::Network,
-            SignInError::Sdk {
-                context: "TokenEndpoint".into(),
-            },
-        ] {
-            let expected = e.to_string();
-            let masked: SignInFailed = e.into();
-            assert_eq!(
-                masked.to_string(),
-                expected,
-                "the port preserves the error-safe banner string verbatim"
-            );
-        }
-    }
+    // The `SessionError -> FetchFailReason` and `SignInError -> SignInFailed`
+    // boundary-masking is exercised where those impls now live
+    // (`janitor_aws_auth::error`); see that crate's tests (ADR 0024).
 
     #[tokio::test]
     async fn sign_in_is_idempotent_one_browser() {

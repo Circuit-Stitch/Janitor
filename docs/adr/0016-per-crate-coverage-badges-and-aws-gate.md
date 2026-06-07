@@ -67,6 +67,7 @@ original reason to leave `aws` ungated no longer holds.
   longer hold: `aws` is now gated too. The `aws` cushion above 80% (~11 points)
   is real but finite; large additions of untested shell could erode it, which is
   the intended pressure — long-term we want the shell covered by integration
-  tests against a real AWS account (a future ADR).
+  tests against a real AWS account (done for the shared auth base in
+  [ADR 0027](0027-covering-the-shared-auth-shell-with-replay-and-live-tests.md)).
 - A coverage regression in `aws` *library* code now fails CI, as it already does
   for `core`. A regression confined to the `src/bin/` harnesses does not.

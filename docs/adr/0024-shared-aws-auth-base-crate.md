@@ -115,3 +115,49 @@ preserving chunk of #33, done before the risky generalization.
   "one `janitor-aws` adapter crate" becomes a base auth crate + per-Provider tail
   crates; the auth object model (broker, facade ladder, stale-role recovery) is
   unchanged, only relocated.
+
+## Implementation notes (2026-06-06, issue #61)
+
+Three things the mechanical move *forced* that this ADR did not spell out, plus
+one prediction that did not hold:
+
+1. **The error→port masking `From` impls relocated to the base.**
+   `impl From<&SessionError> for FetchFailReason` and `impl From<SignInError> for
+   SignInFailed` lived in `session.rs`. Once `SessionError`/`SignInError` moved to
+   `janitor-aws-auth`, the orphan rule forbade a tail crate (owning neither the
+   `From` trait nor the `janitor_core::provider` target) from writing them, so
+   both impls + their three tests moved into `janitor-aws-auth/src/error.rs`. This
+   is *better* placement, not a workaround: both AWS-family tails produce these
+   errors and mask them identically (the `session.rs` doc comment already said the
+   impl "lives in `aws` because `SessionError` does").
+
+2. **Cross-crate test fakes need a `test-support` feature, not `cfg(test)`.**
+   `cfg(test)` does not propagate across a crate boundary, so the relocated
+   `wire::fakes` (which the tail's `secrets`/`source`/`session`/`discovery`/
+   `presenter` tests reuse) are gated `#[cfg(any(test, feature = "test-support"))]`
+   and `janitor-aws` enables `test-support` as a **dev-dependency** only. Fakes are
+   never compiled into a normal build.
+
+3. **`RawSecret` zeroize-on-drop rippled into `secrets.rs`.** `#[derive(ZeroizeOnDrop)]`
+   makes `RawSecret` a `Drop` type, so `SecretsClient::fetch` could no longer move
+   its fields out by value; it now `.take()`s them, leaving the emptied buffer to
+   wipe on drop (a strict improvement). No assertion changed.
+
+4. **Coverage: the prediction "the gate is met by the relocated tests" did NOT
+   hold.** The base lands at **76.3% lines** (the SM tail stays at ~97%). The
+   entire shortfall is the ADR 0010 §5 "untested by design" SDK/browser shell
+   (`authenticator`, `aws_impl` front-half, `loopback` — 157 lines); the base's
+   *logic* is ~93% covered. The shell used to be diluted below the gate by the
+   large well-tested Secrets-Manager tail (`session`/`discovery`/…); the split
+   concentrated it. **Owner decision (2026-06-06): keep the 80% gate — do not
+   weaken it or exclude the shell** ([ADR 0016](0016-per-crate-coverage-badges-and-aws-gate.md)
+   stands; its "intended pressure" consequence is now realized). Issue #61 is
+   therefore **blocked on a follow-up effort to cover the shared auth shell with
+   live-AWS integration tests** (the long-term direction ADR 0016 already named);
+   the `janitor-aws-auth` coverage CI step is wired at ≥80% and is RED until then.
+
+   **Resolved by [ADR 0027](0027-covering-the-shared-auth-shell-with-replay-and-live-tests.md):**
+   the shell is now covered in CI by replay-transport (`StaticReplayClient`) +
+   local-socket tests, with an env-gated live-AWS suite confirming the canned
+   shapes against a real org. The crate is at **~89% lines**, the CI step is
+   GREEN, and #61's coverage blocker is closed.

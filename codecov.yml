@@ -17,6 +17,9 @@ flags:
   aws:
     paths:
       - janitor-aws/
+  aws-auth:
+    paths:
+      - janitor-aws-auth/
   mock:
     paths:
       - janitor-mock/

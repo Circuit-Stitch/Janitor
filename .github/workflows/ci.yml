@@ -67,6 +67,21 @@ jobs:
       - name: Coverage — janitor-mock (≥80% lines)
         run: cargo llvm-cov --package janitor-mock --all-features --fail-under-lines 80 --lcov --output-path lcov-mock.info
 
+      # janitor-aws-auth is the shared Identity Center auth base (ADR 0024), gated
+      # on its *library* surface like janitor-aws. It has no src/bin/ harnesses,
+      # but it carries the ADR 0010 §5 SDK/browser shell
+      # (authenticator/aws_impl/loopback) which — post-split — is no longer diluted
+      # by the Secrets-Manager tail. Per the owner decision (2026-06-06) the 80%
+      # gate was KEPT, not weakened. ADR 0027 then closed the gap the honest way:
+      # the shell is now covered in CI by replay-transport + local-socket tests
+      # (a StaticReplayClient drives the real ssooidc/sso clients; the loopback
+      # listener is driven by a local TcpStream), with an env-gated live-AWS suite
+      # (tests/live_aws.rs) confirming the canned shapes against a real org. So
+      # this step is GREEN (~89% lines); #61's coverage blocker is closed. Ordered
+      # LAST so a failure here doesn't skip the other gates.
+      - name: Coverage — janitor-aws-auth library (≥80% lines)
+        run: cargo llvm-cov --package janitor-aws-auth --all-features --ignore-filename-regex 'src/bin/' --fail-under-lines 80 --lcov --output-path lcov-aws-auth.info
+
       # Display-only upload (ADR 0016): renders the README badges. A missing
       # token or Codecov outage leaves badges stale but never fails the build —
       # the gates above already passed. Per-crate flags keep the badges distinct.
@@ -84,6 +99,14 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov-aws.info
           flags: aws
+          fail_ci_if_error: false
+
+      - name: Upload janitor-aws-auth coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov-aws-auth.info
+          flags: aws-auth
           fail_ci_if_error: false
 
       - name: Upload janitor-mock coverage to Codecov

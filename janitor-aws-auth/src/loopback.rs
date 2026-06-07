@@ -177,4 +177,85 @@ mod tests {
             "path must be /oauth/callback, got {uri}"
         );
     }
+
+    // ---- Local-socket coverage of the listener shell (ADR 0027 Layer 1) -------
+    //
+    // `wait_for_redirect` is real socket I/O, declared "untested shell" by ADR
+    // 0010 §5. It needs no AWS and no browser: bind an *ephemeral* loopback port
+    // (NOT `bind_first_free`'s fixed set — that would contend across parallel
+    // tests), then have the test itself connect and play the browser's role,
+    // sending the redirect request the IdP would. This exercises accept → read →
+    // target/query parse → the "close this tab" write, and the timeout/parse
+    // error paths.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Bind `127.0.0.1:0`, run `wait_for_redirect` against it while the test
+    /// sends `raw_request`, and return (listener result, the bytes the listener
+    /// wrote back). One read on the server side mirrors production.
+    async fn drive_redirect(raw_request: &str) -> (Result<String, SignInError>, String) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let addr = listener.local_addr().expect("local addr");
+        let server = wait_for_redirect(listener, Duration::from_secs(5));
+        let req = raw_request.to_string();
+        let client = async move {
+            let mut s = TcpStream::connect(addr).await.expect("connect");
+            s.write_all(req.as_bytes()).await.expect("write request");
+            s.flush().await.expect("flush");
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).await.expect("read response");
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+        tokio::join!(server, client)
+    }
+
+    #[tokio::test]
+    async fn wait_for_redirect_returns_query_and_writes_close_page() {
+        let (query, response) =
+            drive_redirect("GET /oauth/callback?code=abc&state=xyz HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await;
+        assert_eq!(query.expect("redirect captured"), "code=abc&state=xyz");
+        // The listener answered the browser so the tab can close.
+        assert!(response.contains("200 OK"), "status line: {response}");
+        assert!(
+            response.contains("You can close this tab"),
+            "close page: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_redirect_returns_empty_query_when_no_question_mark() {
+        // A request target with no `?` → empty query (the `unwrap_or_default`
+        // branch), still a successful capture.
+        let (query, _resp) =
+            drive_redirect("GET /oauth/callback HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        assert_eq!(query.expect("captured"), "");
+    }
+
+    #[tokio::test]
+    async fn wait_for_redirect_errors_when_request_line_has_no_target() {
+        // A first line with no request target → `first_request_target` is None →
+        // `SignInError::Network`. The listener never writes a response.
+        let (query, _resp) = drive_redirect("GARBAGE\r\n\r\n").await;
+        assert!(
+            matches!(query, Err(SignInError::Network)),
+            "unparseable request line must be Network, got {query:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_redirect_times_out_when_no_request_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let err = wait_for_redirect(listener, Duration::from_millis(50))
+            .await
+            .expect_err("no client connected");
+        assert!(
+            matches!(err, SignInError::ListenerTimeout),
+            "expected ListenerTimeout, got {err:?}"
+        );
+    }
 }

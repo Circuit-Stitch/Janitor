@@ -5,22 +5,15 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use janitor_core::config::Mapping;
 use janitor_core::secret::SecretShape;
 
-use crate::broker::CredentialBroker;
-use crate::error::{SessionError, SignInError};
-use crate::secrets::SecretsClient;
-use crate::types::{Clock, SsoToken};
-use crate::wire::RoleCredentialClient;
+use janitor_aws_auth::broker::CredentialBroker;
+use janitor_aws_auth::error::SessionError;
+use janitor_aws_auth::types::{Clock, SsoToken};
+use janitor_aws_auth::wire::{Reauth, RoleCredentialClient};
 
-/// The capability to perform a fresh browser Sign-in and yield a new SSO token.
-/// Real impl drives the browser (Task 11); the test fake yields a scripted token.
-#[async_trait]
-pub trait Reauth: Send + Sync {
-    async fn sign_in(&self) -> Result<SsoToken, SignInError>;
-}
+use crate::secrets::SecretsClient;
 
 /// An authenticated data source over one Identity Center Session.
 pub struct AuthenticatedSource {
@@ -118,9 +111,12 @@ impl AuthenticatedSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SsoToken;
-    use crate::wire::fakes::{CredSpec, FakeClock, FakeRoleClient, FakeSecretsApi};
-    use crate::wire::RawSecret;
+    use crate::wire::fakes::FakeSecretsApi;
+    use async_trait::async_trait;
+    use janitor_aws_auth::error::SignInError;
+    use janitor_aws_auth::types::SsoToken;
+    use janitor_aws_auth::wire::fakes::{CredSpec, FakeClock, FakeRoleClient};
+    use janitor_aws_auth::wire::RawSecret;
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
 

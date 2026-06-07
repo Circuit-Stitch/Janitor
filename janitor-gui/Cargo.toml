@@ -12,6 +12,7 @@ build = "build.rs"
 [dependencies]
 janitor-core = { path = "../janitor-core" }
 janitor-aws = { path = "../janitor-aws" }
+janitor-aws-auth = { path = "../janitor-aws-auth" }
 janitor-mock = { path = "../janitor-mock" }
 slint = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
