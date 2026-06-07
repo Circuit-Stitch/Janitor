@@ -12,10 +12,9 @@ use crate::loopback::{
     bind_first_free, open_browser, query_param, redirect_uris, wait_for_redirect,
 };
 use crate::pkce;
-use crate::source::Reauth;
 use crate::state;
 use crate::types::SsoToken;
-use crate::wire::{OidcClient, TokenExchange};
+use crate::wire::{OidcClient, Reauth, TokenExchange};
 
 /// How long to wait for the user to complete the browser Sign-in.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);

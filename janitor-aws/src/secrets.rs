@@ -7,8 +7,9 @@ use std::sync::Arc;
 use janitor_core::config::Mapping;
 use janitor_core::secret::SecretShape;
 
-use crate::error::SessionError;
-use crate::types::Credential;
+use janitor_aws_auth::error::SessionError;
+use janitor_aws_auth::types::Credential;
+
 use crate::wire::SecretsApi;
 
 /// Fetches and shapes one Secret Set.
@@ -27,11 +28,13 @@ impl SecretsClient {
         cred: &Credential,
         mapping: &Mapping,
     ) -> Result<SecretShape, SessionError> {
-        let raw = self
+        let mut raw = self
             .api
             .get_secret_value(cred, &mapping.secret_id, &mapping.region)
             .await?;
-        match (raw.secret_string, raw.secret_binary) {
+        // `RawSecret` is zeroize-on-drop (ADR 0024), so its fields can't be moved
+        // out by value; `take` them, leaving the emptied buffer to wipe on drop.
+        match (raw.secret_string.take(), raw.secret_binary.take()) {
             (Some(s), _) => Ok(SecretShape::from_secret_string(&s)),
             (None, Some(b)) => Ok(SecretShape::from_secret_binary(b)),
             (None, None) => Err(SessionError::NotFound),
@@ -43,7 +46,7 @@ impl SecretsClient {
 mod tests {
     use super::*;
     use crate::wire::fakes::FakeSecretsApi;
-    use crate::wire::RawSecret;
+    use janitor_aws_auth::wire::RawSecret;
     use std::time::SystemTime;
 
     fn cred() -> Credential {

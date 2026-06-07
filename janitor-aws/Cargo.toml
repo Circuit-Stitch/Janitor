@@ -3,26 +3,20 @@ name = "janitor-aws"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-description = "Janitor's AWS adapter: Identity Center auth + Secrets Manager I/O (ADR 0010)."
+description = "Janitor's Secrets Manager Provider tail: GetSecretValue I/O + the SM Discovery walk over the shared janitor-aws-auth base (ADR 0010 / ADR 0024)."
 
 [dependencies]
 janitor-core = { path = "../janitor-core" }
+janitor-aws-auth = { path = "../janitor-aws-auth" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 aws-config = "1"
-aws-sdk-ssooidc = "1"
-aws-sdk-sso = "1"
 aws-sdk-secretsmanager = "1"
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"
-secrecy = "0.10"
-zeroize = "1"
-thiserror = "2"
-sha2 = "0.10"
-base64 = "0.22"
-rand = "0.8"
-open = "5"
 async-trait = "0.1"
 tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+# Front-half test doubles (`wire::fakes`) for the relocated tail tests (ADR 0024).
+janitor-aws-auth = { path = "../janitor-aws-auth", features = ["test-support"] }

@@ -97,9 +97,11 @@ fn parse_choice(line: &str, n: usize, default: Option<usize>) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SsoToken;
-    use crate::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient, FakeSecretsApi};
-    use crate::wire::{AccountSummary, RoleSummary, SecretSummary};
+    use crate::wire::fakes::FakeSecretsApi;
+    use crate::wire::SecretSummary;
+    use janitor_aws_auth::types::SsoToken;
+    use janitor_aws_auth::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient};
+    use janitor_aws_auth::wire::{AccountSummary, RoleSummary};
     use janitor_core::config::Mapping;
     use std::io::Cursor;
     use std::sync::Arc;
@@ -126,7 +128,7 @@ mod tests {
             arn: arn.into(),
         }
     }
-    fn cred_ok() -> Result<CredSpec, crate::error::SessionError> {
+    fn cred_ok() -> Result<CredSpec, janitor_aws_auth::error::SessionError> {
         Ok(CredSpec {
             expires_in: Duration::from_secs(3600),
             tag: "t",
@@ -288,7 +290,7 @@ mod tests {
             token(),
             Arc::new(FakeAccountCatalog::new(
                 vec![Ok(vec![account("111", "Prod")])],
-                vec![Err(crate::error::SessionError::AccessDenied)],
+                vec![Err(janitor_aws_auth::error::SessionError::AccessDenied)],
             )),
             Arc::new(FakeRoleClient::new(vec![])),
             Arc::new(FakeSecretsApi::with_lists(vec![])),

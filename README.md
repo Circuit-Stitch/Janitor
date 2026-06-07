@@ -3,6 +3,7 @@
 [![CI](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Circuit-Stitch/Janitor/actions/workflows/ci.yml)
 [![core coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=core&label=core%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 [![aws coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=aws&label=aws%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
+[![aws-auth coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=aws-auth&label=aws-auth%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 [![mock coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=mock&label=mock%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 
 > An ephemeral desktop client onto **AWS Secrets Manager**. It stores no secrets

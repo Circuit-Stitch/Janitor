@@ -8,10 +8,11 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
-use janitor_aws::authenticator::Authenticator;
-use janitor_aws::aws_impl::{AwsOidcClient, AwsRoleClient, AwsSecretsApi};
+use janitor_aws::aws_impl::AwsSecretsApi;
 use janitor_aws::session::Session;
-use janitor_aws::types::SystemClock;
+use janitor_aws_auth::authenticator::Authenticator;
+use janitor_aws_auth::aws_impl::{AwsOidcClient, AwsRoleClient};
+use janitor_aws_auth::types::SystemClock;
 use janitor_core::compare::RowKey;
 use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::provider::{AppError, Provider, Step, What};

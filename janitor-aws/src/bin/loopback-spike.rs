@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use janitor_aws::loopback::{bind_first_free, open_browser, query_param, wait_for_redirect};
+use janitor_aws_auth::loopback::{bind_first_free, open_browser, query_param, wait_for_redirect};
 
 #[tokio::main]
 async fn main() {
