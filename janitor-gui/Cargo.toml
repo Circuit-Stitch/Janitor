@@ -34,6 +34,9 @@ winresource = "0.1"
 # Internal Slint crate (no semver guarantee) — pinned to match slint 1.16.1.
 # Provides the headless testing backend + ElementHandle query API (ADR 0021).
 i-slint-backend-testing = "=1.16.1"
+# Test-only: implement a fake `Provider` that poses a `Step::Input`, so the
+# worker's free-text Discovery relay round-trips offline (#62 / ADR 0025).
+async-trait = "0.1"
 
 # ── Packaging (ADR 0022) ─────────────────────────────────────────────────────
 # Split by necessity: cargo-packager owns deb + AppImage + signed Windows; it has

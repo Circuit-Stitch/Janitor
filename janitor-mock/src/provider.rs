@@ -111,6 +111,12 @@ impl Provider for MockProvider {
             permission_set: "ReadOnly".into(),
         }))
     }
+
+    async fn provide_input(&mut self, _text: String) -> Option<Step> {
+        // The mock walk only ever poses an account `Ask`, never a free-text
+        // `Step::Input`, so there is nothing to feed text into (ADR 0025).
+        None
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +250,21 @@ mod tests {
         assert!(
             p.advance_discovery(0).await.is_none(),
             "nothing to advance before begin_discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn provide_input_is_always_none_the_mock_poses_no_input_step() {
+        // The mock never emits a free-text `Step::Input`, so feeding it text is a
+        // no-op (the additive `Input` rail, #62 / ADR 0025) — even mid-walk.
+        let mut p = MockProvider::new();
+        assert!(p.provide_input("/app/.env".into()).await.is_none());
+        p.begin_discovery("prod".into(), "us-east-1".into(), None)
+            .await
+            .unwrap();
+        assert!(
+            p.provide_input("/app/.env".into()).await.is_none(),
+            "even with a walk in progress the mock has no Input to satisfy"
         );
     }
 }

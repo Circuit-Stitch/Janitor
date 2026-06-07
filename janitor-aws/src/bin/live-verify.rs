@@ -70,6 +70,10 @@ fn what_word(what: What) -> &'static str {
         What::Accounts => "accounts",
         What::Roles => "roles",
         What::Secrets => "secrets",
+        // The Secrets Manager walk never poses these (ADR 0025's SSM tail does);
+        // present for exhaustiveness only.
+        What::Instances => "instances",
+        What::FilePath => "paths",
     }
 }
 
@@ -162,9 +166,10 @@ async fn main() {
             eprintln!("Session expired — run again to sign in.");
             std::process::exit(1);
         }
-        // `drive_discovery` loops on every `Ask`, so it only ever hands back a
-        // terminal step.
+        // `drive_discovery` loops on every `Ask`/`Input`, so it only ever hands
+        // back a terminal step (and the SM walk never poses an `Input` anyway).
         Step::Ask { .. } => unreachable!("drive_discovery resolves all Ask steps"),
+        Step::Input { .. } => unreachable!("drive_discovery resolves all Input steps"),
     };
 
     // 5. Fetch the chosen Mapping through the facade.

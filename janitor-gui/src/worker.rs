@@ -48,6 +48,10 @@ pub enum Command {
     AdvanceDiscovery {
         choice: usize,
     },
+    /// Feed the user's typed text back into a walk paused on a `Step::Input`
+    /// (ADR 0025) — the free-text counterpart of `AdvanceDiscovery`, sent by the
+    /// Manage window's text field. The text is a location (a path), never a Value.
+    ProvideInput(String),
     Shutdown,
 }
 
@@ -92,6 +96,15 @@ pub enum Event {
         what: What,
         labels: Vec<String>,
         default: Option<usize>,
+    },
+    /// A walk hit a free-text `Step::Input` (ADR 0025): render `prompt` as a text
+    /// field pre-filled with `default` (a remembered path — **not** an index, as
+    /// `DiscoveryChoice`'s `Option<usize>` is). The typed text returns via
+    /// `Command::ProvideInput`. `prompt`/`default` are locations, never Values.
+    DiscoveryInput {
+        what: What,
+        prompt: String,
+        default: Option<String>,
     },
     /// A walk could not complete (no choices, session error). Masked text only.
     DiscoveryFailed(String),
@@ -183,11 +196,23 @@ fn discovery_event(step: Step) -> Event {
             labels: choices,
             default,
         },
+        Step::Input {
+            what,
+            prompt,
+            default,
+        } => Event::DiscoveryInput {
+            what,
+            prompt,
+            default,
+        },
         Step::Empty(what) => Event::DiscoveryFailed(
             match what {
                 What::Accounts => "no accounts you can access",
                 What::Roles => "no roles you can access",
                 What::Secrets => "no secrets you can access",
+                What::Instances => "no instances you can access",
+                // An `Input` never produces `Empty`; present for exhaustiveness.
+                What::FilePath => "no path available",
             }
             .to_string(),
         ),
@@ -276,6 +301,11 @@ async fn run_loop(
             },
             Command::AdvanceDiscovery { choice } => {
                 if let Some(step) = provider.advance_discovery(choice).await {
+                    on_event(discovery_event(step));
+                }
+            }
+            Command::ProvideInput(text) => {
+                if let Some(step) = provider.provide_input(text).await {
                     on_event(discovery_event(step));
                 }
             }
@@ -460,5 +490,124 @@ mod tests {
             ),
             "Reauth must surface as DiscoveryReauthRequired"
         );
+    }
+
+    #[test]
+    fn input_step_becomes_discovery_input_preserving_what_prompt_and_default() {
+        // The free-text counterpart of the `Ask -> DiscoveryChoice` mapping: an
+        // `Input` carries its prompt and a remembered *path* default (a String,
+        // not an index) straight through to the text-field event (#62 / ADR 0025).
+        let step = Step::Input {
+            what: What::FilePath,
+            prompt: "Path to the .env".into(),
+            default: Some("/app/.env".into()),
+        };
+        let Event::DiscoveryInput {
+            what,
+            prompt,
+            default,
+        } = discovery_event(step)
+        else {
+            panic!("Input must surface as DiscoveryInput");
+        };
+        assert_eq!(what, What::FilePath);
+        assert_eq!(prompt, "Path to the .env");
+        assert_eq!(default.as_deref(), Some("/app/.env"));
+    }
+
+    #[test]
+    fn worker_dtos_are_send() {
+        // The worker marshals Commands and Events across the thread boundary, so
+        // the new free-text Input DTOs (and their peers) must be Send (#62).
+        fn assert_send<T: Send>() {}
+        assert_send::<Command>();
+        assert_send::<Event>();
+    }
+
+    /// A fake `Provider` whose walk poses a free-text `Step::Input` — neither the
+    /// Secrets Manager `Session` nor the `MockProvider` ever does, so this is how
+    /// the worker's Input relay is exercised offline (#62 / ADR 0025).
+    /// `begin_discovery` poses the path Input; `provide_input` completes the walk
+    /// with the typed path carried in the Mapping's `secret_id`.
+    struct InputWalkProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for InputWalkProvider {
+        async fn sign_in(&mut self) -> Result<(), janitor_core::provider::SignInFailed> {
+            Ok(())
+        }
+        async fn load(
+            &mut self,
+            _app: &Application,
+        ) -> Result<janitor_core::provider::Loaded, AppError> {
+            unreachable!("this fake only drives discovery")
+        }
+        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<String> {
+            None
+        }
+        async fn begin_discovery(
+            &mut self,
+            environment: String,
+            _region: String,
+            _remembered: Option<Mapping>,
+        ) -> Result<Step, janitor_core::provider::SignInFailed> {
+            Ok(Step::Input {
+                what: What::FilePath,
+                prompt: format!("Path to {environment} .env"),
+                default: Some("/app/.env".into()),
+            })
+        }
+        async fn advance_discovery(&mut self, _choice: usize) -> Option<Step> {
+            None
+        }
+        async fn provide_input(&mut self, text: String) -> Option<Step> {
+            Some(Step::Done(Mapping {
+                environment: "prod".into(),
+                account_id: "111111111111".into(),
+                region: "us-east-1".into(),
+                secret_id: format!("i-0abc:{text}"),
+                permission_set: "ReadOnly".into(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_input_step_round_trips_typed_text_through_the_port() {
+        // The free-text Discovery rail end to end: BeginDiscovery surfaces a
+        // DiscoveryInput question; the typed path returns via ProvideInput and the
+        // walk completes as EnvDiscovered, carrying the path in the Mapping.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::BeginDiscovery {
+            environment: "prod".into(),
+            region: "us-east-1".into(),
+            remembered: None,
+        })
+        .unwrap();
+        tx.send(Command::ProvideInput("/srv/app/.env".into()))
+            .unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut provider = InputWalkProvider;
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        let events = events.lock().unwrap();
+        let [Event::DiscoveryInput {
+            what,
+            prompt,
+            default,
+        }, Event::EnvDiscovered(mapping)] = events.as_slice()
+        else {
+            panic!("expected DiscoveryInput then EnvDiscovered");
+        };
+        assert_eq!(*what, What::FilePath);
+        assert_eq!(prompt, "Path to prod .env");
+        assert_eq!(default.as_deref(), Some("/app/.env"));
+        assert_eq!(
+            mapping.secret_id, "i-0abc:/srv/app/.env",
+            "the typed path round-tripped into the discovered Mapping"
+        );
+        assert_eq!(mapping.environment, "prod");
     }
 }
