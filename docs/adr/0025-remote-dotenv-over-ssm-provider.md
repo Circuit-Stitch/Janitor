@@ -1,8 +1,9 @@
 # A remote `.env`-over-SSM Provider (`janitor-ssm`): the second real Provider
 
-**Status:** accepted; B3 implemented (#64); **B4 implemented (#65)** — transport (b)
-chosen, see [the B4 implementation note](#b4-implementation-note-2026-06-07) below.
-Live verification against a real EC2+SSM org is still pending (Milestone B).
+**Status:** accepted; B3 implemented (#64); **B4 implemented + LIVE-VERIFIED (#65,
+2026-06-07)** — transport (b) chosen, the read is `sudo`+`base64`, see [the B4
+implementation note](#b4-implementation-note-2026-06-07) and [Live verification](#live-verification-2026-06-07--milestone-b-done)
+below. The **write** path is designed in [ADR 0028](0028-remote-dotenv-write-over-ssm-command-channel.md).
 
 **Related:** [#33](https://github.com/Circuit-Stitch/Janitor/issues/33) (the
 shared Discovery orchestrator this unblocks), [ADR 0024](0024-shared-aws-auth-base-crate.md)
