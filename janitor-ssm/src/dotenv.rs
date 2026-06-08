@@ -127,8 +127,14 @@ fn decode_double_quoted(rhs: &str) -> String {
             '\\' => match chars.next() {
                 Some('n') => out.push('\n'),
                 Some('"') => out.push('"'),
-                // Only `\n` and `\"` are recognized escapes (ADR 0025); any
-                // other backslash (and the char after it) is kept literally.
+                // `\\` → one literal backslash (ADR 0025 amendment / ADR 0029):
+                // this makes the write encoder a *total* inverse of the parser, so
+                // every Value round-trips. Read-compat caveat: an existing `.env`
+                // that used `\\` inside double quotes for two literal backslashes
+                // now reads as one per pair.
+                Some('\\') => out.push('\\'),
+                // Only `\n`, `\"`, and `\\` are recognized escapes; any other
+                // backslash (and the char after it) is kept literally.
                 Some(other) => {
                     out.push('\\');
                     out.push(other);
@@ -209,11 +215,11 @@ mod tests {
             (r#"A="a\nb\"c#d""#, "A", "a\nb\"c#d"),
             // an unrecognized escape keeps its backslash literally
             (r#"A="x\ty""#, "A", r"x\ty"),
-            // a backslash right before the closing quote stays literal and the
-            // quote still terminates (a doubled `\\` stays doubled — no `\\` escape)
-            (r#"A="end\\""#, "A", r"end\\"),
-            (r#"A="a\\b""#, "A", r"a\\b"),
-            (r#"A="C:\\" # path"#, "A", r"C:\\"),
+            // `\\` decodes to ONE literal backslash (ADR 0025 amendment / ADR 0029);
+            // the closing quote still terminates.
+            (r#"A="end\\""#, "A", r"end\"),
+            (r#"A="a\\b""#, "A", r"a\b"),
+            (r#"A="C:\\" # path"#, "A", r"C:\"),
             // trailing whitespace after a closing quote is trimmed
             (r#"A="v"   "#, "A", "v"),
             // a trailing comment after a closing quote is dropped
@@ -229,6 +235,20 @@ mod tests {
             let map = entries(raw);
             assert_eq!(value_of(&map, key), *expected, "case: {raw:?}");
         }
+    }
+
+    #[test]
+    fn double_quoted_backslash_escape_decodes_to_one_backslash() {
+        // ADR 0025 amendment / ADR 0029: `\\` is a recognized escape so the write
+        // encoder is a total inverse. `\n`/`\"` keep their meaning; an unrecognized
+        // escape and a lone trailing backslash are still kept literally.
+        assert_eq!(value_of(&entries(r#"A="a\\b""#), "A"), r"a\b");
+        assert_eq!(value_of(&entries(r#"A="\\""#), "A"), r"\"); // one backslash
+                                                                // a literal backslash adjacent to n/" is now representable and unambiguous
+        assert_eq!(value_of(&entries(r#"A="x\\n""#), "A"), r"x\n"); // backslash + n
+        assert_eq!(value_of(&entries(r#"A="\\\"""#), "A"), "\\\""); // backslash + quote
+                                                                    // unchanged: unknown escape keeps both chars; lone trailing backslash kept
+        assert_eq!(value_of(&entries(r#"A="x\ty""#), "A"), r"x\ty");
     }
 
     #[test]

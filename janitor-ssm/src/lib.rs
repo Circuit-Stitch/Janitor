@@ -31,6 +31,7 @@
 
 mod discovery;
 mod dotenv;
+mod dotenv_edit;
 mod session;
 mod source;
 pub mod wire;
@@ -41,6 +42,11 @@ pub mod transport;
 
 pub use discovery::SsmDiscovery;
 pub use dotenv::{parse_dotenv, DotenvError};
+pub use dotenv_edit::{
+    apply_edits, encode_value, sha256_hex, validate_edits, EnvEdit, EnvWriteError,
+};
 pub use logging::{LoggingPreference, LoggingState};
+pub use mgs::WriteOutcome;
 pub use session::SsmProvider;
-pub use transport::{AwsInstanceCatalog, AwsLoggingPreference, SsmFileReader};
+pub use source::{DotenvWriteError, SsmWriter};
+pub use transport::{AwsInstanceCatalog, AwsLoggingPreference, SsmFileReader, SsmFileWriter};

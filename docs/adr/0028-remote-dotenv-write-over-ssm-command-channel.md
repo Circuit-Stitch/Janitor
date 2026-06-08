@@ -1,8 +1,28 @@
 # Remote `.env` write over the SSM command channel (non-stomp, base64-over-stdin)
 
-**Status:** accepted (design); **not yet implemented** — this is the handoff design
-for the write slice (proposed issue **B5**). The read half it builds on is live-verified
+**Status:** accepted (semantics) — but its **transport is superseded by
+[ADR 0029](0029-remote-dotenv-write-via-interactive-pty-data-channel-stream.md).**
+This ADR's *write semantics* stand and are implemented (base64; the `sha256`
+compare-and-swap guard; the atomic `mktemp`/`--reference`/`mv` replace; the
+`JANITOR_OK`/`JANITOR_CONFLICT` status tokens; read-write-mode gating; and the
+SFTP/SCP-over-SSM rejection in *Why not SFTP/SCP-over-SSM*, still in force).
+But its **transport** — "base64 over **stdin** into an
+`AWS-StartNonInteractiveCommand`" — turned out to be **mechanically impossible**:
+the `amazon-ssm-agent` does not connect a stdin to a non-interactive command and
+**discards** the `input_stream_data` we would send (it scans those bytes only for
+`Ctrl-C`/`Ctrl-\`). ADR 0029 replaces the transport with an **interactive
+(pty-backed) session that streams the content over the MGS data channel** (which
+also keeps it off the CloudTrail-logged `StartSession` `Parameters`, the reason
+this ADR wanted stdin). Read ADR 0029 for the implemented design; read on here
+for the semantics it keeps. This was the handoff design for the write slice
+(issue **B5 / #70**). The read half is live-verified
 ([ADR 0025 Live verification](0025-remote-dotenv-over-ssm-provider.md#live-verification-2026-06-07--milestone-b-done)).
+
+> **Note on §"The one genuinely new capability: stdin streaming over MGS" and
+> Open question #1 (MGS stdin EOF):** these are answered by ADR 0029. Streaming is
+> real, but only an *interactive/pty* session delivers it to the command's stdin;
+> EOF is sidestepped with a length-prefixed `head -c N` read rather than tty
+> `Ctrl-D`/`VEOF`.
 
 **Related:** [ADR 0025](0025-remote-dotenv-over-ssm-provider.md) (the remote-`.env`
 Provider + the MGS transport this extends), [ADR 0001](0001-non-stomping-writes-via-staged-put-and-cas.md)

@@ -2,6 +2,31 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the remote-`.env` WRITE engine + transport landed (ADR 0029, B5 / #70).**
+> Research against the `amazon-ssm-agent` source overturned ADR 0028's central
+> assumption: **`AWS-StartNonInteractiveCommand` never connects stdin to the command**
+> (its `InputStreamMessageHandler` discards all but `Ctrl-C`/`Ctrl-\`), so "base64
+> over stdin" was mechanically impossible. **ADR 0029 supersedes that transport**:
+> the write runs over **`AWS-StartInteractiveCommand`** (pty), streaming the base64
+> content as `input_stream_data` over the data channel (off the CloudTrail-logged
+> `Parameters`), tames the pty with `stty raw -echo`, and reads exactly `head -c N`
+> bytes (a non-secret length prefix) so completion is deterministic — no fragile
+> tty-EOF. It keeps ADR 0028's semantics: the `sha256` **CAS guard** (ADR 0001),
+> the atomic `mktemp`/`--reference`(+`stat` fallback)/`mv` replace, and the
+> `JANITOR_OK`/`JANITOR_CONFLICT` tokens. New code (all pure + unit-tested except the
+> live `wss` socket): `dotenv_edit` (a **total** value encoder + the non-stomping
+> textual `apply_edits`; this required an **ADR 0025 amendment** adding `\\` to the
+> double-quoted grammar so every Value round-trips), the `WriteSession` MGS state
+> machine + `write_command_output` driver (chunked `input_stream_data` + `FLAG_FIN`),
+> `build_write_command`/`sha256_hex`/base64 encode + the `SsmFileWriter` shell, the
+> `RemoteFileWriter` seam + fake, `source::write_dotenv`/`SsmWriter` (read→hash→apply
+> →write with bounded **replay-on-fresh** conflict retry), and a human-gated
+> `live-verify-ssm-write` binary. **Still pending:** live verification against a real
+> box (the ADR 0029 checklist — pty readiness, `head -c N` byte-count, CAS conflict,
+> `--reference` portability); the `Provider::apply_edits` port method + worker
+> `ApplyEdits` command; and the lockable **read-write-mode unlock UX** (ADR 0004/0013)
+> — v1 still ships read-only, the write path reachable only via the live-verify binary.
+>
 > **Latest: the second real Provider is LIVE-VERIFIED (ADR 0025, B4 / #65).** On
 > 2026-06-07 `live-verify-ssm` read a real root-owned `600` `/opt/deferno/.env` off a
 > real EC2 box end-to-end and printed the masked 49-entry matrix — **no

@@ -23,8 +23,10 @@ use janitor_aws_auth::error::SessionError;
 use janitor_aws_auth::types::Credential;
 
 use crate::dotenv::{parse_dotenv, DotenvError};
+use crate::dotenv_edit::{apply_edits, sha256_hex, validate_edits, EnvEdit, EnvWriteError};
 use crate::logging::{session_logging_advisory, LoggingPreference};
-use crate::wire::RemoteFileReader;
+use crate::mgs::WriteOutcome;
+use crate::wire::{RemoteFileReader, RemoteFileWriter};
 
 /// Split a remote-`.env` `Mapping`'s `secret_id` — `"<instance-id>:<path>"`
 /// (ADR 0025) — back into its `(instance_id, path)` parts. Splits on the **first**
@@ -221,10 +223,162 @@ impl SsmSource {
     }
 }
 
+/// The bounded number of read-modify-write attempts before a persistent
+/// `JANITOR_CONFLICT` is surfaced (ADR 0001 caps retries — each is a real round-trip
+/// and an unbounded loop under contention is its own hazard).
+const MAX_WRITE_ATTEMPTS: u32 = 3;
+
+/// A failed remote-`.env` write, masked for the port (mirrors [`DotenvFetchError`]).
+#[derive(Debug)]
+pub enum DotenvWriteError {
+    /// A read (the CAS re-read) or the write transport failed. Masked via the shared
+    /// `From<&SessionError>` impl — no SDK text crosses.
+    Session(SessionError),
+    /// The remote file is not editable text (binary / no `secret_string`).
+    NotText,
+    /// An edit could not be encoded into a `.env` line (an invalid key). Never
+    /// carries a Value (THREAT-MODEL).
+    Edit(EnvWriteError),
+}
+
+impl DotenvWriteError {
+    /// The masked, port-facing classification. Never carries SSM/SDK text or a Value.
+    pub fn reason(&self) -> FetchFailReason {
+        match self {
+            DotenvWriteError::Session(e) => FetchFailReason::from(e),
+            DotenvWriteError::NotText | DotenvWriteError::Edit(_) => FetchFailReason::Unsupported,
+        }
+    }
+
+    /// An error-safe detail string (ADR 0017): the `SessionError`'s already-scrubbed
+    /// `Display`, a fixed phrase, or `EnvWriteError`'s key-less message — never a
+    /// Value, a Credential, or any `.env` line content.
+    pub fn detail(&self) -> String {
+        match self {
+            DotenvWriteError::Session(e) => e.to_string(),
+            DotenvWriteError::NotText => "remote file is not editable .env text".to_string(),
+            DotenvWriteError::Edit(e) => e.to_string(),
+        }
+    }
+
+    /// Whether this is a dead-token failure (routes to re-Sign-in, not a retry).
+    pub fn is_reauth(&self) -> bool {
+        matches!(
+            self,
+            DotenvWriteError::Session(SessionError::ReauthRequired)
+        )
+    }
+}
+
+/// Read-modify-write `edits` into the remote `.env` at `path` on `instance_id`
+/// (ADR 0029 / ADR 0001). Each attempt: read the current file, hash it (the CAS
+/// `expected`), apply the surgical ops to the *fresh* text (replay-on-fresh, so a
+/// teammate's untouched Entries survive), and write under the hash guard. A
+/// `JANITOR_CONFLICT` (the file changed under us) re-reads and retries, bounded by
+/// [`MAX_WRITE_ATTEMPTS`]; exhausting it returns [`WriteOutcome::Conflict`] for the
+/// caller to surface (never a silent stomp). The whole-file plaintext lives only in
+/// zeroizing buffers (THREAT-MODEL).
+pub(crate) async fn write_dotenv(
+    reader: &dyn RemoteFileReader,
+    writer: &dyn RemoteFileWriter,
+    cred: &Credential,
+    instance_id: &str,
+    region: &str,
+    path: &str,
+    edits: &[EnvEdit],
+) -> Result<WriteOutcome, DotenvWriteError> {
+    // Reject an unwritable key before any SSM round-trip (deterministic, fail-closed).
+    validate_edits(edits).map_err(DotenvWriteError::Edit)?;
+
+    for _ in 0..MAX_WRITE_ATTEMPTS {
+        let mut raw = reader
+            .read_file(cred, instance_id, region, path)
+            .await
+            .map_err(DotenvWriteError::Session)?;
+        // The whole-file plaintext: take()n out of the zeroize-on-drop RawSecret and
+        // re-wrapped zeroizing (cannot move a field out of a Drop type, ADR 0024).
+        let current = match raw.secret_string.take() {
+            Some(text) => Zeroizing::new(text),
+            None => return Err(DotenvWriteError::NotText),
+        };
+        let expected = sha256_hex(current.as_bytes());
+        let new_content = apply_edits(&current, edits).map_err(DotenvWriteError::Edit)?;
+        match writer
+            .write_file(
+                cred,
+                instance_id,
+                region,
+                path,
+                &expected,
+                new_content.as_bytes(),
+            )
+            .await
+            .map_err(DotenvWriteError::Session)?
+        {
+            WriteOutcome::Applied => return Ok(WriteOutcome::Applied),
+            // The file changed between our read and the remote `sha256sum`; re-read,
+            // re-apply onto the fresh text, and try again (ADR 0001 replay-on-fresh).
+            WriteOutcome::Conflict => continue,
+        }
+    }
+    Ok(WriteOutcome::Conflict)
+}
+
+/// Mints a role Credential per write (via the shared [`CredentialBroker`]) and
+/// applies edits to that Environment's remote `.env`. The write analogue of
+/// [`SsmSource`]; built from the same seams plus a [`RemoteFileWriter`]. Gated
+/// behind read-write mode at the call site (ADR 0004/0029); v1 reaches it only
+/// through the human-gated `live-verify-ssm-write` binary.
+pub struct SsmWriter {
+    broker: CredentialBroker,
+    reader: Arc<dyn RemoteFileReader>,
+    writer: Arc<dyn RemoteFileWriter>,
+}
+
+impl SsmWriter {
+    pub fn new(
+        broker: CredentialBroker,
+        reader: Arc<dyn RemoteFileReader>,
+        writer: Arc<dyn RemoteFileWriter>,
+    ) -> Self {
+        SsmWriter {
+            broker,
+            reader,
+            writer,
+        }
+    }
+
+    /// Apply `edits` to `mapping`'s remote `.env`: split its `<instance-id>:<path>`
+    /// location, mint a Credential, then read-modify-write under the CAS guard.
+    pub async fn write(
+        &self,
+        mapping: &Mapping,
+        edits: &[EnvEdit],
+    ) -> Result<WriteOutcome, DotenvWriteError> {
+        let (instance_id, path) = split_secret_id(&mapping.secret_id)
+            .ok_or(DotenvWriteError::Session(SessionError::NotFound))?;
+        let cred = self
+            .broker
+            .credentials_for(mapping)
+            .await
+            .map_err(DotenvWriteError::Session)?;
+        write_dotenv(
+            self.reader.as_ref(),
+            self.writer.as_ref(),
+            cred.as_ref(),
+            instance_id,
+            &mapping.region,
+            path,
+            edits,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::fakes::FakeRemoteFileReader;
+    use crate::wire::fakes::{FakeRemoteFileReader, FakeRemoteFileWriter};
     use janitor_aws_auth::types::SsoToken;
     use janitor_aws_auth::wire::fakes::{CredSpec, FakeClock, FakeRoleClient};
     use janitor_aws_auth::wire::RawSecret;
@@ -408,6 +562,190 @@ mod tests {
             .logging_advisory(&mapping("i-0abc:/app/.env"), &logging)
             .await
             .is_none());
+    }
+
+    // ---- write_dotenv (read → hash → apply → write → conflict-retry) ----
+
+    fn set(key: &str, value: &str) -> EnvEdit {
+        EnvEdit::set(key, value)
+    }
+
+    #[tokio::test]
+    async fn write_dotenv_reads_hashes_applies_and_writes() {
+        let reader = FakeRemoteFileReader::with_dotenv(vec!["A=1\nB=2\n"]);
+        let writer = FakeRemoteFileWriter::new(vec![Ok(WriteOutcome::Applied)]);
+        let outcome = write_dotenv(
+            &reader,
+            &writer,
+            &cred(),
+            "i-0abc",
+            "us-east-1",
+            "/app/.env",
+            &[set("B", "x")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, WriteOutcome::Applied);
+        let w = writer.seen();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].instance_id, "i-0abc");
+        assert_eq!(w[0].path, "/app/.env");
+        // The CAS hash is of the file as read, and only B's line changed.
+        assert_eq!(w[0].expected_sha256, sha256_hex(b"A=1\nB=2\n"));
+        assert_eq!(w[0].content, b"A=1\nB=x\n");
+    }
+
+    #[tokio::test]
+    async fn write_dotenv_conflict_then_applies_replaying_onto_fresh() {
+        // Attempt 1 conflicts; the re-read sees a teammate's new C; the replay applies
+        // B onto the FRESH text, preserving C (non-stomp) and using the fresh hash.
+        let reader = FakeRemoteFileReader::with_dotenv(vec!["A=1\nB=2\n", "A=1\nB=2\nC=3\n"]);
+        let writer =
+            FakeRemoteFileWriter::new(vec![Ok(WriteOutcome::Conflict), Ok(WriteOutcome::Applied)]);
+        let outcome = write_dotenv(
+            &reader,
+            &writer,
+            &cred(),
+            "i-0abc",
+            "us-east-1",
+            "/app/.env",
+            &[set("B", "x")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, WriteOutcome::Applied);
+        assert_eq!(reader.call_count(), 2, "re-read on conflict");
+        let w = writer.seen();
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].content, b"A=1\nB=x\n");
+        assert_eq!(w[0].expected_sha256, sha256_hex(b"A=1\nB=2\n"));
+        assert_eq!(
+            w[1].content, b"A=1\nB=x\nC=3\n",
+            "the retry preserves the teammate's C (replay-on-fresh)"
+        );
+        assert_eq!(w[1].expected_sha256, sha256_hex(b"A=1\nB=2\nC=3\n"));
+    }
+
+    #[tokio::test]
+    async fn write_dotenv_persistent_conflict_exhausts_to_conflict() {
+        let reader = FakeRemoteFileReader::with_dotenv(vec!["A=1\n", "A=1\n", "A=1\n"]);
+        let writer = FakeRemoteFileWriter::new(vec![
+            Ok(WriteOutcome::Conflict),
+            Ok(WriteOutcome::Conflict),
+            Ok(WriteOutcome::Conflict),
+        ]);
+        let outcome = write_dotenv(
+            &reader,
+            &writer,
+            &cred(),
+            "i-0abc",
+            "us-east-1",
+            "/app/.env",
+            &[set("B", "x")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            WriteOutcome::Conflict,
+            "bounded retries surface Conflict"
+        );
+        assert_eq!(reader.call_count(), 3);
+        assert_eq!(writer.call_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn write_dotenv_invalid_key_fails_closed_without_any_io() {
+        // A malformed key is rejected before any SSM round-trip (no read, no write).
+        let reader = FakeRemoteFileReader::new(vec![]);
+        let writer = FakeRemoteFileWriter::new(vec![]);
+        let err = write_dotenv(
+            &reader,
+            &writer,
+            &cred(),
+            "i-0abc",
+            "us-east-1",
+            "/app/.env",
+            &[set("A=B", "v")],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.reason(), FetchFailReason::Unsupported);
+        assert_eq!(reader.call_count(), 0, "no read for an invalid edit");
+        assert_eq!(writer.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn write_dotenv_binary_file_is_not_text() {
+        let reader = FakeRemoteFileReader::new(vec![Ok(RawSecret {
+            secret_string: None,
+            secret_binary: Some(vec![0, 1, 2]),
+        })]);
+        let writer = FakeRemoteFileWriter::new(vec![]);
+        let err = write_dotenv(
+            &reader,
+            &writer,
+            &cred(),
+            "i-0abc",
+            "us-east-1",
+            "/app/.env",
+            &[set("B", "x")],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.reason(), FetchFailReason::Unsupported);
+        assert!(matches!(err, DotenvWriteError::NotText));
+        assert_eq!(writer.call_count(), 0, "never write over a non-.env file");
+    }
+
+    #[tokio::test]
+    async fn write_dotenv_read_failure_is_masked_and_skips_the_write() {
+        let reader = FakeRemoteFileReader::new(vec![Err(SessionError::AccessDenied)]);
+        let writer = FakeRemoteFileWriter::new(vec![]);
+        let err = write_dotenv(
+            &reader,
+            &writer,
+            &cred(),
+            "i-0abc",
+            "us-east-1",
+            "/app/.env",
+            &[set("B", "x")],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.reason(), FetchFailReason::AccessDenied);
+        assert_eq!(writer.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn ssm_writer_mints_a_credential_then_writes() {
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let reader = Arc::new(FakeRemoteFileReader::with_dotenv(vec!["A=1\n"]));
+        let writer = Arc::new(FakeRemoteFileWriter::new(vec![Ok(WriteOutcome::Applied)]));
+        let w = SsmWriter::new(broker(role.clone()), reader.clone(), writer.clone());
+        let outcome = w
+            .write(&mapping("i-0abc:/app/.env"), &[set("A", "2")])
+            .await
+            .unwrap();
+        assert_eq!(outcome, WriteOutcome::Applied);
+        assert_eq!(role.call_count(), 1, "minted exactly one credential");
+        assert_eq!(writer.seen()[0].content, b"A=2\n");
+        assert_eq!(writer.seen()[0].path, "/app/.env");
+    }
+
+    #[tokio::test]
+    async fn ssm_writer_malformed_location_is_not_found_without_minting() {
+        let role = Arc::new(FakeRoleClient::new(vec![]));
+        let reader = Arc::new(FakeRemoteFileReader::new(vec![]));
+        let writer = Arc::new(FakeRemoteFileWriter::new(vec![]));
+        let w = SsmWriter::new(broker(role.clone()), reader, writer.clone());
+        let err = w
+            .write(&mapping("i-0abc-no-colon"), &[set("A", "2")])
+            .await
+            .unwrap_err();
+        assert_eq!(err.reason(), FetchFailReason::NotFound);
+        assert_eq!(role.call_count(), 0, "no mint for an unresolvable location");
+        assert_eq!(writer.call_count(), 0);
     }
 
     #[tokio::test]

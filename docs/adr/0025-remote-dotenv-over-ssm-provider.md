@@ -75,7 +75,8 @@ files). The read mechanism is therefore a security decision, not an ergonomic on
   Set produces — so it slots into the existing comparison model with **no `core`
   change** (ADR 0008). Rules (pinned by table-tests): ignore `#`/blank lines; strip
   leading `export `; `"…"`/`'…'` quoting (single literal, double unescapes
-  `\n`/`\"`); trailing inline `#` comment trimmed only outside quotes; duplicate
+  `\n`/`\"`/`\\` — see the amendment below); trailing inline `#` comment trimmed
+  only outside quotes; duplicate
   key = last wins; a line without `=` → `SessionError::Unsupported`. Raw bytes live
   in zeroizing `RawSecret`; each Entry's Value is a zeroizing `Value`.
 
@@ -232,5 +233,31 @@ Checklist resolution:
 - [ ] a KMS-encrypted org fails masked (`Unsupported`) — untested (org has no
       session KMS); the handshake path is unit-tested.
 
-The **write** path (read+modify+write a few Entries) is designed in **ADR 0028**,
-which also records the command-channel-vs-SFTP foundation decision this read settled.
+The **write** path (read+modify+write a few Entries) is designed in **ADR 0028**
+(write semantics + the command-channel-vs-SFTP foundation) and **ADR 0029** (the
+implemented transport — interactive pty + data-channel content stream, which
+supersedes ADR 0028's "base64 over the non-interactive command's stdin": the
+agent discards non-interactive stdin).
+
+## Amendment (2026-06-07): `\\` added to the double-quoted escape grammar
+
+Implementing the write path (B5 / #70) required the `.env` value encoder to be a
+total inverse of the parser — `parse_dotenv("K=" + encode(V)) == V` for **every**
+`V` — so a surgical edit can write any Value back losslessly. The original
+double-quoted grammar (`\n`/`\"` only, with `\\` *not* a recognized escape) made
+some Values un-encodable in any style: a literal backslash adjacent to `n`/`"`,
+or a value containing both a single-quote (kills single-quoting) and a backslash
+(kills double-quoting). The minimal symmetric fix:
+
+- **`decode_double_quoted` now recognizes `\\` → a single literal backslash** (one
+  new match arm). Combined with a double-quoted encoder that escapes `\`→`\\`,
+  `"`→`\"`, newline→`\n`, this makes the round-trip **total**.
+- **Read-compat caveat:** an existing remote `.env` that used `\\` *inside double
+  quotes* intending two literal backslashes now reads as **one** backslash per
+  pair (e.g. a Windows path `"C:\\\\share"` reads with half the backslashes).
+  This is the deliberate cost of a lossless grammar; single-quoted values and
+  unrecognized escapes (`\t`, a lone trailing `\`) are unchanged. Three
+  table-test assertions in `dotenv.rs` flipped accordingly.
+
+`\n` remains the only way to encode an embedded newline (the parser is
+line-based). See ADR 0029 for the encoder + the textual `apply_edits`.
