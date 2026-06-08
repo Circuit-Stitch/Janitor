@@ -16,6 +16,7 @@
 //! masked into the agnostic `core::provider` types at the boundary
 //! (`SessionError`/`DotenvError` → `FetchFailReason`; ADR 0019 / ADR 0024).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ use janitor_aws_auth::types::{Clock, SsoToken};
 use janitor_aws_auth::wire::{AccountCatalog, Reauth, RoleCredentialClient};
 
 use crate::discovery::SsmDiscovery;
+use crate::logging::LoggingPreference;
 use crate::source::{DotenvFetchError, SsmSource};
 use crate::wire::{InstanceCatalog, RemoteFileReader};
 
@@ -53,6 +55,7 @@ pub struct SsmProvider {
     catalog: Arc<dyn AccountCatalog>,
     instances: Arc<dyn InstanceCatalog>,
     reader: Arc<dyn RemoteFileReader>,
+    logging: Arc<dyn LoggingPreference>,
     clock: Arc<dyn Clock>,
     source: Option<SsmSource>,
     /// The session's one SSO token, shared (`Arc`) with both the fetch broker and
@@ -63,6 +66,10 @@ pub struct SsmProvider {
     /// of the fetched-Set cache, so the wizard survives across `Command`s.
     discovery: Option<SsmDiscovery>,
     cached: Vec<(String, SecretShape)>,
+    /// Session-logging advisories pending surfacing (drained by `take_advisories`),
+    /// and the set already surfaced so an advisory shows at most once (ADR 0025).
+    advisories: Vec<String>,
+    seen_advisories: HashSet<String>,
 }
 
 impl SsmProvider {
@@ -76,6 +83,7 @@ impl SsmProvider {
         catalog: Arc<dyn AccountCatalog>,
         instances: Arc<dyn InstanceCatalog>,
         reader: Arc<dyn RemoteFileReader>,
+        logging: Arc<dyn LoggingPreference>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         SsmProvider {
@@ -84,11 +92,30 @@ impl SsmProvider {
             catalog,
             instances,
             reader,
+            logging,
             clock,
             source: None,
             token: None,
             discovery: None,
             cached: Vec::new(),
+            advisories: Vec::new(),
+            seen_advisories: HashSet::new(),
+        }
+    }
+
+    /// Queue an advisory to surface, deduped so the same note shows at most once
+    /// this session (ADR 0025).
+    fn push_advisory(&mut self, advisory: String) {
+        if self.seen_advisories.insert(advisory.clone()) {
+            self.advisories.push(advisory);
+        }
+    }
+
+    /// Pull any session-logging advisory the in-progress walk produced at its read
+    /// (where it minted a credential and probed) up into the surface queue.
+    fn pull_discovery_advisory(&mut self) {
+        if let Some(w) = self.discovery.as_mut().and_then(|d| d.take_advisory()) {
+            self.push_advisory(w);
         }
     }
 
@@ -139,6 +166,21 @@ impl Provider for SsmProvider {
         self.sign_in()
             .await
             .map_err(|_| AppError::needs_sign_in())?;
+
+        // Warn once if this Application's reads may be archived by org-wide SSM
+        // session logging — probed against its first Environment's credential
+        // before any read happens (ADR 0025 / THREAT-MODEL).
+        let advisory = {
+            let source = self.source.as_ref().expect("source exists after sign_in");
+            match app.environments.first() {
+                Some(first) => source.logging_advisory(first, self.logging.as_ref()).await,
+                None => None,
+            }
+        };
+        if let Some(w) = advisory {
+            self.push_advisory(w);
+        }
+
         let source = self.source.as_ref().expect("source exists after sign_in");
 
         let mut sets: Vec<(String, SecretShape)> = Vec::new();
@@ -188,10 +230,12 @@ impl Provider for SsmProvider {
             Arc::clone(&self.role_client),
             Arc::clone(&self.instances),
             Arc::clone(&self.reader),
+            Arc::clone(&self.logging),
             remembered,
         );
         let step = discovery.start().await;
         self.discovery = Some(discovery);
+        self.pull_discovery_advisory();
         self.reset_if_reauth(&step);
         Ok(step)
     }
@@ -200,6 +244,7 @@ impl Provider for SsmProvider {
     /// is in progress.
     async fn advance_discovery(&mut self, choice: usize) -> Option<Step> {
         let step = self.discovery.as_mut()?.advance(choice).await;
+        self.pull_discovery_advisory();
         self.reset_if_reauth(&step);
         Some(step)
     }
@@ -209,14 +254,23 @@ impl Provider for SsmProvider {
     /// in progress. The text is a location (a path), never a Value.
     async fn provide_input(&mut self, text: String) -> Option<Step> {
         let step = self.discovery.as_mut()?.provide_input(text).await;
+        self.pull_discovery_advisory();
         self.reset_if_reauth(&step);
         Some(step)
+    }
+
+    /// Drain the queued session-logging advisories (ADR 0025). The worker surfaces
+    /// each to the Diagnostic Log + Discovery wizard once.
+    async fn take_advisories(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.advisories)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::fakes::FakeLoggingPreference;
+    use crate::logging::LoggingState;
     use crate::wire::fakes::{FakeInstanceCatalog, FakeRemoteFileReader};
     use crate::wire::InstanceSummary;
     use janitor_aws_auth::error::SessionError;
@@ -265,6 +319,7 @@ mod tests {
             Arc::new(FakeAccountCatalog::new(vec![], vec![])),
             Arc::new(FakeInstanceCatalog::new(vec![])),
             reader,
+            Arc::new(FakeLoggingPreference::off()),
             Arc::new(FakeClock::at(0)),
         )
     }
@@ -409,6 +464,7 @@ mod tests {
                 name: "web".into(),
             }])])),
             Arc::new(FakeRemoteFileReader::new(reads)),
+            Arc::new(FakeLoggingPreference::off()),
             Arc::new(FakeClock::at(0)),
         )
     }
@@ -472,6 +528,7 @@ mod tests {
                 dotenv("A=1"),
                 dotenv("A=1"),
             ])),
+            Arc::new(FakeLoggingPreference::off()),
             Arc::new(FakeClock::at(0)),
         );
         let app = Application {
@@ -522,6 +579,66 @@ mod tests {
         assert!(
             p.provide_input("/app/.env".into()).await.is_none(),
             "no walk in progress → no input to feed"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_surfaces_a_session_logging_advisory_once_then_dedupes() {
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let reader = Arc::new(FakeRemoteFileReader::new(vec![
+            dotenv("A=1"),
+            dotenv("A=1"),
+        ]));
+        let logging_on = || {
+            Ok(LoggingState {
+                cloudwatch: true,
+                ..Default::default()
+            })
+        };
+        let mut p = SsmProvider::new(
+            reauth,
+            role,
+            Arc::new(FakeAccountCatalog::new(vec![], vec![])),
+            Arc::new(FakeInstanceCatalog::new(vec![])),
+            reader,
+            Arc::new(FakeLoggingPreference::new(vec![logging_on(), logging_on()])),
+            Arc::new(FakeClock::at(0)),
+        );
+        let app = Application {
+            name: "app".into(),
+            environments: vec![mapping("prod", "i-prod:/app/.env")],
+        };
+        p.load(&app).await.unwrap();
+        let adv = p.take_advisories().await;
+        assert_eq!(adv.len(), 1, "logging-on surfaces one advisory");
+        assert!(
+            adv[0].contains("CloudWatch"),
+            "the advisory names the destination"
+        );
+        assert!(p.take_advisories().await.is_empty(), "advisories drained");
+        // A second load re-probes, but the identical advisory is deduped.
+        p.load(&app).await.unwrap();
+        assert!(
+            p.take_advisories().await.is_empty(),
+            "the same advisory is not surfaced twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_advisory_when_logging_is_off() {
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let reader = Arc::new(FakeRemoteFileReader::new(vec![dotenv("A=1")]));
+        let mut p = provider(reauth, role, reader); // provider() injects logging-off
+        let app = Application {
+            name: "app".into(),
+            environments: vec![mapping("prod", "i-prod:/app/.env")],
+        };
+        p.load(&app).await.unwrap();
+        assert!(
+            p.take_advisories().await.is_empty(),
+            "logging off → no advisory"
         );
     }
 }

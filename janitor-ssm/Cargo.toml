@@ -3,14 +3,15 @@ name = "janitor-ssm"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
-description = "Janitor's remote-.env-over-SSM Provider (ADR 0025): the SSM Discovery tail (instance → .env path → read+parse) over the shared janitor-aws-auth base, plus a pure .env → SecretShape parser. The concrete SSM transport lands in a later slice (B4)."
+description = "Janitor's remote-.env-over-SSM Provider (ADR 0025): the SSM Discovery tail (instance → .env path → read+parse) over the shared janitor-aws-auth base, a pure .env → SecretShape parser, and a pure-Rust Session Manager (MGS) data-channel transport (B4)."
 
 # Second real Provider (ADR 0025). Depends on janitor-core (domain + Provider
 # port) and the shared janitor-aws-auth base (Sign-in, account/role catalog,
 # credential broker, the AWS error taxonomy) — NEVER on janitor-aws (a peer
-# Provider, not a subtype; ADR 0024/0025). The concrete SSM SDK transport behind
-# `RemoteFileReader`/`InstanceCatalog` is the untested shell deferred to B4, so
-# this crate currently holds only tested logic and keeps its coverage pristine.
+# Provider, not a subtype; ADR 0024/0025). The concrete SSM transport (B4) is a
+# pure-Rust MGS data-channel: the binary framing + protocol state machine are
+# tested logic; only the WebSocket socket I/O and the StartSession→socket glue
+# are the untested shell (ADR 0010 §5), kept small so the crate holds its gate.
 [features]
 # Exposes `wire::fakes` (the SSM-tail test doubles) to dependent crates' tests —
 # the GUI worker's offline end-to-end test reuses them via a dev-dependency —
@@ -24,14 +25,58 @@ janitor-aws-auth = { path = "../janitor-aws-auth" }
 async-trait = "0.1"
 thiserror = "2"
 tracing = "0.1"
+# Used only by the `live-verify-ssm` binary to surface the scrubbed SDK error
+# detail (the failing op + AWS error code that map_aws_err logs under the
+# `janitor` target) — the masked Provider port hides it, and the CLI has no log
+# panel like the GUI. The library never references it.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Holds the whole-file `.env` plaintext (take()n out of the zeroize-on-drop
 # RawSecret) in a Zeroizing buffer during parse, so it is scrubbed on drop
 # (THREAT-MODEL / ADR 0024).
 zeroize = "1"
+# The remote read is `base64 <file>` so the file's bytes survive the session's
+# PTY/banner layer intact (the base64 alphabet excludes the control/high-bit bytes
+# that pollute a raw `cat`); we decode the stream back to the file (ADR 0025 §3).
+base64 = "0.22"
+
+# --- B4 SSM tail transport (ADR 0025 §3, transport b: pure-Rust MGS) ---
+# The real DescribeInstanceInformation / StartSession / GetDocument SDK calls.
+aws-config = "1"
+aws-sdk-ssm = "1"
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
+# The Session Manager data channel is a WebSocket (wss StreamUrl). tokio drives
+# the socket; tokio-tungstenite speaks WebSocket over rustls (no OpenSSL, no
+# external binary — the whole point of transport b). futures-util gives the
+# Sink/Stream combinators the channel wrapper uses.
+tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+futures-util = "0.3"
+# Payload SHA-256 digest in the AgentMessage header.
+sha2 = "0.10"
+# MessageId / ClientId / RequestId.
+uuid = { version = "1", features = ["v4"] }
+# The data-channel handshake / acknowledge JSON payloads and the
+# SSM-SessionManagerRunShell document body.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # Front-half test doubles (`wire::fakes`) for the SsmDiscovery / SsmProvider /
 # SsmSource tests (ADR 0024): FakeReauth, FakeAccountCatalog, FakeRoleClient,
 # FakeClock. Never compiled into a normal build.
 janitor-aws-auth = { path = "../janitor-aws-auth", features = ["test-support"] }
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+# Replay-test the SSM SDK seams (DescribeInstanceInformation / GetDocument /
+# StartSession field extraction) against canned HTTP, exactly as janitor-aws-auth
+# covers its shell (ADR 0027) — so the gate stays green with the shell in the
+# number.
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+http = "1"
+
+[[bin]]
+name = "live-verify-ssm"
+# Human-gated Milestone-B harness (ADR 0025 §3): browser Sign-in → discovery →
+# read a real `.env` over the MGS transport → masked print. Excluded from the
+# coverage gate (`--ignore-filename-regex 'src/bin/'`, ADR 0016).
+path = "src/bin/live-verify-ssm.rs"

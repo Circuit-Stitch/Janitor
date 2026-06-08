@@ -23,6 +23,7 @@ use janitor_aws_auth::error::SessionError;
 use janitor_aws_auth::types::Credential;
 
 use crate::dotenv::{parse_dotenv, DotenvError};
+use crate::logging::{session_logging_advisory, LoggingPreference};
 use crate::wire::RemoteFileReader;
 
 /// Split a remote-`.env` `Mapping`'s `secret_id` — `"<instance-id>:<path>"`
@@ -101,10 +102,59 @@ pub(crate) async fn read_and_parse(
     match raw.secret_string.take() {
         Some(text) => {
             let text = Zeroizing::new(text);
-            parse_dotenv(&text).map_err(DotenvFetchError::Malformed)
+            // Opt-in, threat-model-safe structural trace of the read payload (no
+            // Value, no key text, no line content) — gated on `JANITOR_SSM_DIAG`
+            // so the live harness can see *why* a real `.env` was rejected without
+            // ever logging it (ADR 0025 §3 live verify).
+            diag_dotenv_structure(&text);
+            parse_dotenv(&text).map_err(|e| {
+                let e = DotenvFetchError::Malformed(e);
+                // `detail()` names only a 1-based line number, never content
+                // (THREAT-MODEL) — log it so the live harness / Diagnostic Log can
+                // pinpoint the offending line, as the masked port hides the reason.
+                tracing::warn!(target: "janitor::ssm", "{}", e.detail());
+                e
+            })
         }
         // A `.env` is text; a binary or empty payload is not one we can compare.
         None => Err(DotenvFetchError::Read(SessionError::Unsupported)),
+    }
+}
+
+/// Opt-in (`JANITOR_SSM_DIAG=1`) structural trace of a read `.env` payload, for
+/// the live harness to diagnose a `Malformed`/`Unsupported` read **without ever
+/// logging file content** (THREAT-MODEL). For each physical line it emits only the
+/// 1-based line number, the byte length, a parser-relevant classification (blank /
+/// comment / `has-eq` with the *key length* / `no-eq` / `empty-key`), and a flag
+/// for any control characters (ANSI/PTY junk a non-interactive read shouldn't carry)
+/// — never an Entry Name, a Value, or any line text.
+fn diag_dotenv_structure(text: &str) {
+    if std::env::var_os("JANITOR_SSM_DIAG").is_none() {
+        return;
+    }
+    let line_count = text.lines().count();
+    tracing::warn!(target: "janitor::ssm", "diag .env: {} bytes, {line_count} lines", text.len());
+    for (index, line) in text.lines().enumerate() {
+        let n = index + 1;
+        let len = line.len();
+        let control = line.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f);
+        let trimmed = line.trim_start();
+        let assignment = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let kind = if trimmed.is_empty() {
+            "blank".to_string()
+        } else if trimmed.starts_with('#') {
+            "comment".to_string()
+        } else if let Some(eq) = assignment.find('=') {
+            let key_len = assignment[..eq].trim().len();
+            if key_len == 0 {
+                "empty-key".to_string()
+            } else {
+                format!("has-eq key_len={key_len}")
+            }
+        } else {
+            "no-eq".to_string()
+        };
+        tracing::warn!(target: "janitor::ssm", "diag line {n}: len={len} kind={kind} control={control}");
     }
 }
 
@@ -145,6 +195,29 @@ impl SsmSource {
             path,
         )
         .await
+    }
+
+    /// Probe the org's SSM session-logging policy for `mapping` (mint a Credential,
+    /// then ask `logging`) and distil it to an operator advisory (ADR 0025).
+    /// `None` means "no logging configured" (or the mint failed — see below). Used
+    /// by `load` to warn once per Application before any read.
+    ///
+    /// Only a *successful* mint warrants an advisory. A mint failure is the load's
+    /// real error (surfaced per-Environment as a `Failure`), not a logging-policy
+    /// uncertainty — raising the always-on fallback for it would mislead (it reads
+    /// like a logging-permission problem when the user simply isn't entitled to the
+    /// role). The fallback still fires when the cred mints but `GetDocument` itself
+    /// is denied/unreachable (a genuine "can't determine logging" case).
+    pub(crate) async fn logging_advisory(
+        &self,
+        mapping: &Mapping,
+        logging: &dyn LoggingPreference,
+    ) -> Option<String> {
+        let cred = self.broker.credentials_for(mapping).await.ok()?;
+        let probe = logging
+            .session_logging(cred.as_ref(), &mapping.region)
+            .await;
+        session_logging_advisory(&probe)
     }
 }
 
@@ -312,5 +385,47 @@ mod tests {
         let err = src.fetch(&mapping("i-0abc:/app/.env")).await.unwrap_err();
         assert!(err.is_reauth());
         assert_eq!(reader.call_count(), 0, "no read when minting fails");
+    }
+
+    #[tokio::test]
+    async fn logging_advisory_is_none_when_minting_fails() {
+        // A mint failure (e.g. not entitled to the role) is the load's real error,
+        // not a logging-policy uncertainty: no misleading always-on advisory even
+        // though the scripted logging probe says S3 logging is on.
+        use crate::logging::fakes::FakeLoggingPreference;
+        use crate::logging::LoggingState;
+        let role = Arc::new(FakeRoleClient::new(vec![Err(
+            SessionError::RoleNotEntitled {
+                context: "no access".into(),
+            },
+        )]));
+        let logging = FakeLoggingPreference::always(LoggingState {
+            s3: true,
+            ..Default::default()
+        });
+        let src = SsmSource::new(broker(role), Arc::new(FakeRemoteFileReader::new(vec![])));
+        assert!(src
+            .logging_advisory(&mapping("i-0abc:/app/.env"), &logging)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn logging_advisory_warns_when_minted_and_logging_on() {
+        // The complement: a successful mint plus a logging-on probe yields the
+        // advisory (so the mint-failure short-circuit above didn't break the path).
+        use crate::logging::fakes::FakeLoggingPreference;
+        use crate::logging::LoggingState;
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let logging = FakeLoggingPreference::always(LoggingState {
+            cloudwatch: true,
+            ..Default::default()
+        });
+        let src = SsmSource::new(broker(role), Arc::new(FakeRemoteFileReader::new(vec![])));
+        let adv = src
+            .logging_advisory(&mapping("i-0abc:/app/.env"), &logging)
+            .await
+            .expect("logging-on yields an advisory");
+        assert!(adv.contains("CloudWatch"));
     }
 }

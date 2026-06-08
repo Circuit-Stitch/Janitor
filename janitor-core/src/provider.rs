@@ -199,6 +199,18 @@ pub trait Provider: Send {
     /// progress (or the Provider never poses an `Input` — the default for every
     /// Provider in this slice). The text is a location (a path), never a Value.
     async fn provide_input(&mut self, text: String) -> Option<Step>;
+
+    /// Drain any operator **advisories** the Provider has accumulated since the
+    /// last call: short, already-masked notes about an unavoidable, operator-
+    /// visible side effect of a read — e.g. org-wide SSM session logging copies the
+    /// remote file to S3/CloudWatch (ADR 0025, the remote-`.env` Provider). The
+    /// worker surfaces each once, to both the Diagnostic Log and the Discovery
+    /// wizard. Provider-agnostic: a Provider with no such side effect returns empty
+    /// (the default). The strings are policy notes — never a Value/Credential/token
+    /// (THREAT-MODEL).
+    async fn take_advisories(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

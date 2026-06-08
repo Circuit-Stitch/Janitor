@@ -96,11 +96,22 @@ visibility** across Environments.
   Diagnostic Log and the discovery wizard) so the operator knows the read will be
   logged, but it cannot prevent it. Accepted residual risk, sibling to the AWS
   24h version-retention note: the secret already lives in the customer's AWS
-  account; Janitor surfaces the exposure rather than defending below it. (Why
-  not `SendCommand`: its inline output truncates at ~2500 chars, so reading a
-  larger `.env` would force output to S3 — a disk write to *read* a secret;
-  Session Manager streams arbitrary sizes with archival being opt-in/detectable.
-  See [ADR 0025](adr/0025-remote-dotenv-over-ssm-provider.md).)
+  account; Janitor surfaces the exposure rather than defending below it. (B4
+  detects this by reading the `SSM-SessionManagerRunShell` document over
+  `ssm:GetDocument` — an unreachable probe falls back to an always-on warning, so
+  it never *under*-warns. Why not `SendCommand`: its inline output truncates at
+  ~2500 chars, so reading a larger `.env` would force output to S3 — a disk write
+  to *read* a secret; Session Manager streams arbitrary sizes with archival being
+  opt-in/detectable. See [ADR 0025](adr/0025-remote-dotenv-over-ssm-provider.md).)
+- **Below-the-data-channel transport security.** The remote read rides the SSM
+  Session Manager data channel — a TLS `wss` WebSocket Janitor opens to AWS's
+  managed endpoint (`mgs::channel`); the streamed file contents live only in a
+  zeroizing `RawSecret` worker-side, never on the operator's disk. Janitor relies
+  on that TLS + AWS's session authorization, not on its own channel encryption. If
+  the org enables **KMS encryption** of the session data itself, Janitor's pure
+  transport does not implement the KMS data-key exchange, so the read fails
+  **masked** (`Unsupported`) rather than proceeding unencrypted — a fail-closed,
+  not a silent downgrade.
 - **Being a secret store or backup.** Janitor has no storage of record; AWS is the
   source of truth.
 

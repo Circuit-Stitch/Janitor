@@ -1,0 +1,60 @@
+{
+  // Plain `cargo run` tasks — no debugger extension needed. Run via
+  // Terminal → Run Task… (or bind a key). Output goes to the integrated terminal.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run Janitor (real AWS)",
+      "type": "cargo",
+      "command": "run",
+      "args": ["-p", "janitor-gui"],
+      "problemMatcher": ["$rustc"],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "clear": true }
+    },
+    {
+      "label": "Run Janitor (mock, offline)",
+      "type": "cargo",
+      "command": "run",
+      "args": ["-p", "janitor-gui"],
+      "options": { "env": { "JANITOR_MOCK": "1" } },
+      "problemMatcher": ["$rustc"],
+      "presentation": { "clear": true }
+    },
+    {
+      "label": "Run Janitor (SSM remote .env)",
+      "type": "cargo",
+      "command": "run",
+      "args": ["-p", "janitor-gui"],
+      "options": { "env": { "JANITOR_SSM": "1" } },
+      "problemMatcher": ["$rustc"],
+      "presentation": { "clear": true }
+    },
+    {
+      // Interactive (Milestone B): drive the SSM transport against a real box —
+      // browser sign-in → discovery (pick JanitorSSM) → masked matrix. Reads stdin
+      // for the menu + .env path, so it gets its own dedicated terminal panel. Add
+      // "--reset-config" to the args to clear stale remembered picks.
+      "label": "Run live-verify-ssm (SSM transport)",
+      "type": "cargo",
+      "command": "run",
+      "args": ["-p", "janitor-ssm", "--bin", "live-verify-ssm"],
+      "problemMatcher": ["$rustc"],
+      "presentation": { "clear": true, "panel": "dedicated", "reveal": "always" }
+    },
+    {
+      "label": "Build workspace",
+      "type": "cargo",
+      "command": "build",
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Test workspace",
+      "type": "cargo",
+      "command": "test",
+      "args": ["--workspace"],
+      "problemMatcher": ["$rustc"],
+      "group": { "kind": "test", "isDefault": true }
+    }
+  ]
+}

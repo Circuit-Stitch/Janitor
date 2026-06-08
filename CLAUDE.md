@@ -2,6 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the second real Provider is LIVE-VERIFIED (ADR 0025, B4 / #65).** On
+> 2026-06-07 `live-verify-ssm` read a real root-owned `600` `/opt/deferno/.env` off a
+> real EC2 box end-to-end and printed the masked 49-entry matrix — **no
+> `session-manager-plugin`, no Value leaked.** Bring-up surfaced four real fixes, all
+> now in code+tests (ADR 0025 *Live verification*): (1) the AgentMessage **`MessageId`
+> is half-swapped on the wire** (`mgs::frame` transposes the two 8-byte halves —
+> reading it verbatim made every ack unrecognized → handshake-retransmit stall →
+> truncation); (2) the session runs as **`ssm-user`** so the read uses **`sudo -n`**
+> (the file is root-owned `600`); (3) the `sudo`/PAM/PTY path can fold a binary banner
+> into the stream, so the read is **`base64`** (decoded + noise-filtered on our side,
+> not a raw `cat`); (4) `AWS-StartNonInteractiveCommand` ends with **`channel_closed`
+> and no `EXIT_CODE`** — a clean close is the completion signal. The **write** path
+> (read-modify-write a few Entries, non-stomp) is designed in **ADR 0028** (command
+> channel chosen over SFTP-over-SSM; SFTP can't `sudo` a root-owned file). The
+> `janitor-ssm` remote-`.env`-over-SSM Provider reads a real file off a real
+> EC2 instance over a **pure-Rust Session Manager (MGS) data channel** — no
+> `session-manager-plugin` binary. The AgentMessage byte codec (`mgs::frame`) and
+> the session state machine + driver (`mgs::protocol`) are pure, unit-tested logic;
+> the `DescribeInstanceInformation`/`StartSession`/`GetDocument` SDK calls are
+> replay-tested (ADR 0027); only the `wss` socket (`mgs::channel`) is the untested
+> shell (`janitor-ssm` holds ~96% coverage). B4 also added **session-logging
+> detection** (a `GetDocument`-backed `LoggingPreference` seam + the pure
+> `session_logging_advisory` decision) that warns — via a new provider-agnostic
+> `Provider::take_advisories` port method — in the Diagnostic Log and the Discovery
+> wizard when a read would be archived to S3/CloudWatch; a `live-verify-ssm` binary
+> and the GUI `--ssm` selector; and `docs/iam_setup.md`'s SSM least-privilege policy.
+> **Still pending:** the **write** path (ADR 0028 — non-stomp, base64-over-stdin,
+> hash-guarded, gated behind read-write mode; the one new capability is streaming
+> stdin over MGS); and two minor live checks (the `GetDocument` on/off toggle under a
+> role that *has* the permission, and KMS-on masked-failure). **#33/ADR 0026** can now
+> extract the shared `core` Discovery orchestrator from the two real Provider shapes.
+> KMS-encrypted SSM sessions are unsupported in v1 (the read fails masked).
+> Design/decisions:
+> [`docs/adr/0025-remote-dotenv-over-ssm-provider.md`](docs/adr/0025-remote-dotenv-over-ssm-provider.md).
+>
 > **Status: GUI↔AWS bridge landed (ADR 0012) — the matrix now reads real AWS.** The Cargo
 > workspace now holds three crates under a CI lint/test/coverage lane:
 > `janitor-core`'s offline bedrock (secret-shape model, zeroizing `Value`,

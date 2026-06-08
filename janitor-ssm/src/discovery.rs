@@ -28,6 +28,7 @@ use janitor_core::select::{plan_selection, Selectable, SelectionPlan};
 use janitor_aws_auth::types::{Credential, SsoToken};
 use janitor_aws_auth::wire::{AccountCatalog, AccountSummary, RoleCredentialClient, RoleSummary};
 
+use crate::logging::{session_logging_advisory, LoggingPreference};
 use crate::source::{read_and_parse, split_secret_id};
 use crate::wire::{InstanceCatalog, InstanceSummary, RemoteFileReader};
 
@@ -55,6 +56,7 @@ pub struct SsmDiscovery {
     role_client: Arc<dyn RoleCredentialClient>,
     instances: Arc<dyn InstanceCatalog>,
     reader: Arc<dyn RemoteFileReader>,
+    logging: Arc<dyn LoggingPreference>,
     /// Environment name being added (typed by the user; not discovered).
     environment: String,
     /// Resolved browse region (`config.secret_region` else `sso_region`).
@@ -67,6 +69,9 @@ pub struct SsmDiscovery {
     instance: Option<InstanceSummary>,
     path: Option<String>,
     awaiting: Option<Awaiting>,
+    /// The session-logging advisory computed at the read (probed once we hold a
+    /// credential), pulled up by the Provider after each step (ADR 0025).
+    advisory: Option<String>,
 }
 
 impl SsmDiscovery {
@@ -80,6 +85,7 @@ impl SsmDiscovery {
         role_client: Arc<dyn RoleCredentialClient>,
         instances: Arc<dyn InstanceCatalog>,
         reader: Arc<dyn RemoteFileReader>,
+        logging: Arc<dyn LoggingPreference>,
         remembered: Option<Mapping>,
     ) -> Self {
         SsmDiscovery {
@@ -88,6 +94,7 @@ impl SsmDiscovery {
             role_client,
             instances,
             reader,
+            logging,
             environment,
             region,
             remembered,
@@ -97,7 +104,15 @@ impl SsmDiscovery {
             instance: None,
             path: None,
             awaiting: None,
+            advisory: None,
         }
+    }
+
+    /// Take the session-logging advisory computed during the read (the wizard
+    /// surfaces it). `None` until the walk has reached the read, or if logging is
+    /// off. Drained so the Provider surfaces it at most once.
+    pub fn take_advisory(&mut self) -> Option<String> {
+        self.advisory.take()
     }
 
     /// Begin the walk: collapse singleton steps until the first `many` choice (an
@@ -200,6 +215,16 @@ impl SsmDiscovery {
                 Ok(c) => self.cred = Some(c),
                 Err(e) => return terminal_for(&e),
             }
+            // Now we hold a credential, probe the org's SSM session-logging policy
+            // *before* the instance/path steps and the read, so the wizard can warn
+            // — while it is still open — that a read may be archived to S3/CloudWatch
+            // (ADR 0025 / THREAT-MODEL). A probe failure biases toward warning; it
+            // never blocks the walk.
+            let probe = self
+                .logging
+                .session_logging(self.cred.as_ref().unwrap(), &self.region)
+                .await;
+            self.advisory = session_logging_advisory(&probe);
         }
 
         if self.instance.is_none() {
@@ -330,6 +355,8 @@ fn pick<T>(mut items: Vec<T>, choice: usize) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::fakes::FakeLoggingPreference;
+    use crate::logging::LoggingState;
     use crate::wire::fakes::{FakeInstanceCatalog, FakeRemoteFileReader};
     use janitor_aws_auth::error::SessionError;
     use janitor_aws_auth::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient};
@@ -384,6 +411,7 @@ mod tests {
             Arc::new(FakeRoleClient::new(creds)),
             Arc::new(FakeInstanceCatalog::new(instances)),
             Arc::new(FakeRemoteFileReader::new(reads)),
+            Arc::new(FakeLoggingPreference::off()),
             remembered,
         )
     }
@@ -558,6 +586,7 @@ mod tests {
             rolec.clone(),
             instances.clone(),
             reader.clone(),
+            Arc::new(FakeLoggingPreference::off()),
             None,
         );
         assert!(matches!(
@@ -739,5 +768,65 @@ mod tests {
             m.secret_id, "i-second:/app/.env",
             "out-of-range clamps to the last instance"
         );
+    }
+
+    #[tokio::test]
+    async fn read_probes_logging_and_exposes_an_advisory_when_on() {
+        // The walk probes the org's SSM logging policy at the read; logging-on
+        // yields a wizard advisory the Provider drains.
+        let mut d = SsmDiscovery::new(
+            "prod".into(),
+            "us-east-1".into(),
+            token(),
+            Arc::new(FakeAccountCatalog::new(
+                vec![Ok(vec![account("111", "Prod")])],
+                vec![Ok(vec![role("ReadOnly")])],
+            )),
+            Arc::new(FakeRoleClient::new(vec![cred_ok()])),
+            Arc::new(FakeInstanceCatalog::new(vec![Ok(vec![instance(
+                "i-0abc", "web",
+            )])])),
+            Arc::new(FakeRemoteFileReader::new(vec![dotenv("A=1")])),
+            Arc::new(FakeLoggingPreference::always(LoggingState {
+                s3: true,
+                ..Default::default()
+            })),
+            None,
+        );
+        assert!(matches!(d.start().await, Step::Input { .. }));
+        // The probe runs at the credential mint, so the advisory is available *now*
+        // — while the wizard is still posing the path Input, not only at the read.
+        let adv = d
+            .take_advisory()
+            .expect("logging-on yields an advisory at mint time");
+        assert!(adv.contains("S3"), "the advisory names the destination");
+        assert!(matches!(
+            d.provide_input("/app/.env".into()).await,
+            Step::Done(_)
+        ));
+        assert!(
+            d.take_advisory().is_none(),
+            "drained — surfaced at most once"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_advisory_when_logging_is_off() {
+        let mut d = discovery(
+            "prod",
+            "us-east-1",
+            vec![Ok(vec![account("111", "Prod")])],
+            vec![Ok(vec![role("ReadOnly")])],
+            vec![cred_ok()],
+            vec![Ok(vec![instance("i-0abc", "web")])],
+            vec![dotenv("A=1")],
+            None,
+        );
+        assert!(matches!(d.start().await, Step::Input { .. }));
+        assert!(matches!(
+            d.provide_input("/app/.env".into()).await,
+            Step::Done(_)
+        ));
+        assert!(d.take_advisory().is_none(), "logging off → no advisory");
     }
 }

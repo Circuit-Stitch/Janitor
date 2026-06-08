@@ -189,9 +189,91 @@ The test secret is the only ongoing cost — delete it from Secrets Manager when
 done (note: deletion runs on a recovery window, not immediate). Identity Center,
 the user, the permission set, and the Organization are free to leave in place.
 
+## The remote-`.env`-over-SSM Provider (ADR 0025, B4)
+
+Janitor's second Provider reads a `.env` file off a remote **EC2 instance** over AWS
+Systems Manager (SSM) Session Manager, instead of from Secrets Manager. To verify it
+(`cargo run -p janitor-ssm --bin live-verify-ssm`, or the GUI with `--ssm`) you need,
+in addition to the Identity Center setup above:
+
+### A target EC2 instance managed by SSM
+
+- The instance must run the **SSM agent** (preinstalled on Amazon Linux / recent
+  Ubuntu AMIs) and have an **instance profile** with the AWS managed policy
+  `AmazonSSMManagedInstanceCore` (so it registers with Systems Manager).
+- It must reach the SSM endpoints (a public subnet + IGW, a NAT, or SSM VPC
+  endpoints). Confirm it shows up under **Systems Manager → Fleet Manager** /
+  `aws ssm describe-instance-information` before running Janitor.
+- Put a `.env` (flat `KEY=VALUE`) somewhere readable by the session's user, e.g.
+  `/app/.env` (the conventional default Janitor pre-fills).
+
+### The permission set's SSM read policy
+
+Add these to the permission set's inline policy (alongside the Identity Center +
+`GetRoleCredentials` the sign-in already needs). Janitor is read-only (ADR 0004) — it
+only runs `cat`-class reads via the `AWS-StartNonInteractiveCommand` document; it
+never mutates the instance.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "ssm:DescribeInstanceInformation", "Resource": "*" },
+    {
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": [
+        "arn:aws:ec2:*:*:instance/*",
+        "arn:aws:ssm:*::document/AWS-StartNonInteractiveCommand"
+      ]
+    },
+    { "Effect": "Allow", "Action": ["ssm:TerminateSession", "ssm:ResumeSession"], "Resource": "arn:aws:ssm:*:*:session/*" },
+    { "Effect": "Allow", "Action": "ssm:GetDocument", "Resource": "arn:aws:ssm:*::document/SSM-SessionManagerRunShell" }
+  ]
+}
+```
+
+- `ssm:DescribeInstanceInformation` — list the managed instances to pick from.
+- `ssm:StartSession` scoped to the target instance(s) **and** the
+  `AWS-StartNonInteractiveCommand` document — open the data channel that streams the
+  `cat`. Scope `arn:aws:ec2:*:*:instance/*` to specific instance IDs in production.
+- `ssm:TerminateSession`/`ssm:ResumeSession` — session lifecycle.
+- `ssm:GetDocument` on `SSM-SessionManagerRunShell` — read the org's **session-logging
+  preference** so Janitor can warn when a read would be archived to S3/CloudWatch (it
+  cannot disable that; see [THREAT-MODEL.md](THREAT-MODEL.md)). If this is denied,
+  Janitor falls back to an always-on warning rather than assuming logging is off.
+
+> **Editing the policy is not enough — assign the permission set to your user.** The
+> policy above says what the *minted* role may do; it does not grant your user the
+> right to mint it. You must **assign** the permission set to your user on the target
+> account (Identity Center → **AWS accounts** → select the account → **Assign users or
+> groups** → your user → the permission set → **Submit**), exactly as in step 4 above.
+> Without the assignment, Janitor fails at **`GetRoleCredentials`** with
+> `ForbiddenException: No access` / "not entitled to this role" — **before** any SSM
+> call, so the SSM policy is never even reached. (If you renamed or replaced an
+> earlier permission set, a saved Application's mapping may still name the old role;
+> reset and re-discover — see below.) Assignments take a minute to propagate.
+
+> **Use a fresh SSM Application, not a Secrets Manager one.** The remote-`.env`
+> Provider's locations are `<instance-id>:<path>`, not Secrets Manager ARNs. Reusing
+> an Application discovered against the Secrets Manager Provider will not work even
+> once `GetRoleCredentials` succeeds (its `secret_id`s are the wrong shape, and may
+> name a role without the SSM policy). Either run `live-verify-ssm` (it walks its own
+> account → role → instance → path) or, in the GUI, create a **new** Application via
+> Manage → discovery while running with `--ssm`.
+
+> **No `session-manager-plugin` needed.** Unlike the AWS CLI's `aws ssm start-session`,
+> Janitor speaks the Session Manager data-channel protocol in pure Rust (ADR 0025 §3,
+> transport b), so there is **no** local plugin binary to install.
+
+> **KMS-encrypted sessions are not supported (v1).** If the org's
+> `SSM-SessionManagerRunShell` sets a `kmsKeyId` (session-data encryption), the read
+> fails masked rather than hanging — leave session encryption off on the test box.
+
 ## See also
 
 - [ADR 0002](adr/0002-identity-center-only-memory-only-auth.md) — Identity-Center-only, memory-only auth
+- [ADR 0025](adr/0025-remote-dotenv-over-ssm-provider.md) — the remote-`.env`-over-SSM Provider
 - [ADR 0010](adr/0010-aws-adapter-crate-and-auth-object-model.md) — `janitor-aws` adapter + auth object model (Milestone B)
 - [ADR 0011](adr/0011-guided-sign-in-and-discovery.md) — guided sign-in, discovery, remembered picks
 - [THREAT-MODEL.md](THREAT-MODEL.md) — why nothing secret touches disk
