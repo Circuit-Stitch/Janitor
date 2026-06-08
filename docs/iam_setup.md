@@ -210,9 +210,10 @@ in addition to the Identity Center setup above:
 ### The permission set's SSM read policy
 
 Add these to the permission set's inline policy (alongside the Identity Center +
-`GetRoleCredentials` the sign-in already needs). Janitor is read-only (ADR 0004) — it
-only runs `cat`-class reads via the `AWS-StartNonInteractiveCommand` document; it
-never mutates the instance.
+`GetRoleCredentials` the sign-in already needs). Janitor is read-only by default
+(ADR 0004) — it runs `cat`-class reads via the `AWS-StartNonInteractiveCommand`
+document. The **read-only** policy is the first block below; the **read-write**
+addition (the `AWS-StartInteractiveCommand` document, ADR 0029) is the second.
 
 ```json
 {
@@ -242,6 +243,24 @@ never mutates the instance.
   preference** so Janitor can warn when a read would be archived to S3/CloudWatch (it
   cannot disable that; see [THREAT-MODEL.md](THREAT-MODEL.md)). If this is denied,
   Janitor falls back to an always-on warning rather than assuming logging is off.
+
+#### Read-write mode (the `.env` write path, ADR 0029)
+
+Writing an Entry back to a remote `.env` (read-write mode, gated; v1 ships read-only)
+needs the **interactive** document, because only a pty-backed session lets the agent
+deliver the streamed content to the command's stdin (the non-interactive document
+discards it — ADR 0029). Add it to the `ssm:StartSession` document list:
+
+```json
+"arn:aws:ssm:*::document/AWS-StartInteractiveCommand"
+```
+
+- The new file content streams over the encrypted data channel — never on argv or in
+  the CloudTrail-logged `StartSession` `Parameters` (THREAT-MODEL / ADR 0029). The
+  same session-logging advisory applies (S3/CloudWatch archival captures it if on).
+- The write runs the atomic replace under **passwordless `sudo`** (root-owned `600`
+  files), so the instance's SSM agent must grant `ssm-user` `NOPASSWD` sudo (the
+  default). There is no non-sudo fallback on the write (stdin is consumed once).
 
 > **Editing the policy is not enough — assign the permission set to your user.** The
 > policy above says what the *minted* role may do; it does not grant your user the

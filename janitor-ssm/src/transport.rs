@@ -24,8 +24,10 @@ use janitor_aws_auth::types::Credential;
 use janitor_aws_auth::wire::RawSecret;
 
 use crate::logging::{parse_logging, LoggingPreference, LoggingState};
-use crate::mgs::{read_command_output, MgsError, TungsteniteChannel};
-use crate::wire::{InstanceCatalog, InstanceSummary, RemoteFileReader};
+use crate::mgs::{
+    read_command_output, write_command_output, MgsError, TungsteniteChannel, WriteOutcome,
+};
+use crate::wire::{InstanceCatalog, InstanceSummary, RemoteFileReader, RemoteFileWriter};
 
 /// The SSM document that runs one shell command and streams its stdout over the
 /// data channel (no `SendCommand` S3 archival; ADR 0025). The session runs the
@@ -33,6 +35,11 @@ use crate::wire::{InstanceCatalog, InstanceSummary, RemoteFileReader};
 /// stream — [`build_read_command`] reads the file as `base64` so those bytes are
 /// non-alphabet noise that [`decode_base64_output`] drops.
 const NONINTERACTIVE_DOCUMENT: &str = "AWS-StartNonInteractiveCommand";
+/// The SSM document that runs a command under a **pty** (ADR 0029). Unlike the
+/// non-interactive document, the agent writes client `input_stream_data` to the
+/// command's stdin here — the only route that lets the write stream its content
+/// over the data channel (off the CloudTrail-logged `StartSession` `Parameters`).
+const INTERACTIVE_DOCUMENT: &str = "AWS-StartInteractiveCommand";
 /// The Session Manager preferences document that holds the org's session
 /// logging/encryption config (read with `GetDocument`).
 const SESSION_PREFS_DOCUMENT: &str = "SSM-SessionManagerRunShell";
@@ -86,17 +93,19 @@ async fn describe_instances_with(
     Ok(out)
 }
 
-/// `StartSession` for a one-shot `cat` → the data-channel `(stream_url, token)`.
-/// Replay-tested.
+/// `StartSession` running `command` under `document` → the data-channel
+/// `(stream_url, token)`. The read uses [`NONINTERACTIVE_DOCUMENT`]; the write uses
+/// [`INTERACTIVE_DOCUMENT`] (pty, ADR 0029). Replay-tested.
 async fn start_session_with(
     client: &aws_sdk_ssm::Client,
     instance_id: &str,
+    document: &str,
     command: String,
 ) -> Result<Started, SessionError> {
     let resp = client
         .start_session()
         .target(instance_id)
-        .document_name(NONINTERACTIVE_DOCUMENT)
+        .document_name(document)
         .parameters("command", vec![command])
         .send()
         .await
@@ -202,6 +211,82 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Build the remote **write** command (ADR 0029): tame the pty, then a single
+/// `sudo -n sh -c` script that does the `sha256`-guarded (ADR 0001 CAS) atomic
+/// replace, reading exactly `n` bytes of base64 from stdin:
+///
+/// ```text
+/// stty raw -echo -isig 2>/dev/null; sudo -n sh -c '<script>'
+/// ```
+///
+/// **Why `stty raw -echo -isig`.** The interactive document runs under a pty; raw,
+/// no-echo, no-ISIG mode stops the line discipline from echoing our streamed bytes
+/// back, cooking CR/LF, enforcing the `MAX_CANON` line limit, or interpreting
+/// control chars — so the base64 passes through verbatim.
+///
+/// **Why `head -c n`.** It reads *exactly* `n` bytes (`n` = the base64 length, not
+/// secret) then closes the pipe, so `base64 -d` sees EOF deterministically — no
+/// reliance on tty `Ctrl-D`/`VEOF` (mode-dependent and fragile).
+///
+/// **CAS + atomic replace.** `sha256sum` must equal `expected_sha256` (the file as
+/// read) or the command prints `JANITOR_CONFLICT` and exits before writing;
+/// otherwise the new content is decoded into a temp file **co-located in the
+/// target's own directory**, given the target's owner/mode (`--reference`, with a
+/// `stat -c` fallback for an image lacking it), then `mv -f` atomically replaces and
+/// prints `JANITOR_OK`. `sudo -n` only — the stdin is consumed once, so there is no
+/// non-sudo `||` fallback to re-read it (root-owned `600` files need sudo anyway).
+///
+/// Three subtleties, each a real correctness fix:
+/// - **`sha256sum < PATH`, not `sha256sum -- PATH`.** GNU `sha256sum` *escapes* a
+///   filename containing a backslash or newline (prepending a `\` to the output
+///   line), which `cut` would then return as part of the "hash" — so the CAS would
+///   never match and every write to such a path would false-conflict. Reading the
+///   file on stdin emits `<hash>  -` (no filename), so the digest is clean for any
+///   path. The redirect is local to the command-substitution subshell, so it does
+///   **not** consume the pty stdin the later `head -c N` reads.
+/// - **`mktemp` in the target's directory.** A default `mktemp` lands in `/tmp`
+///   (often a separate filesystem / tmpfs), which makes `mv` a non-atomic
+///   copy-then-unlink — a reader could see a partial file. Co-locating the temp
+///   (`mktemp -- "$(dirname PATH)/.janitor.XXXXXX"`) keeps `mv` a same-filesystem
+///   atomic rename. A `trap … EXIT` removes the temp on any failure (after a
+///   successful `mv` it is already gone, so the `rm` is a harmless no-op).
+/// - **Split status-token literals.** The emitted tokens are `JANITOR_OK` /
+///   `JANITOR_CONFLICT`, but the command *source* writes them split
+///   (`printf "…JANITOR""_OK…"`) so the command body itself never contains the
+///   contiguous token — defense-in-depth, so even if the agent ever folded the
+///   command text into stdout the [`super::mgs`] token scan could not false-positive.
+///
+/// Single-quoting (twice — once for the path inside the script, once for the whole
+/// script under `sh -c`) follows [`build_read_command`]. Pure; `expected_sha256`
+/// (hex) and `n` are not secret, and the file content rides stdin, never here.
+fn build_write_command(path: &str, expected_sha256: &str, n: usize) -> String {
+    let p = shell_single_quote(path);
+    // One line, `;`-separated, so the command parameter carries no embedded newline.
+    let script = format!(
+        "cur=$(sha256sum < {p} | cut -d\" \" -f1); \
+         [ \"$cur\" = \"{expected_sha256}\" ] || {{ printf \"\\nJANITOR\"\"_CONFLICT\\n\"; exit 3; }}; \
+         t=$(mktemp -- \"$(dirname -- {p})/.janitor.XXXXXX\") || exit 1; \
+         trap 'rm -f \"$t\" 2>/dev/null' EXIT; \
+         head -c {n} | base64 -d > \"$t\" || exit 1; \
+         {{ chown --reference={p} \"$t\" || chown \"$(stat -c %u:%g {p})\" \"$t\"; }} && \
+         {{ chmod --reference={p} \"$t\" || chmod \"$(stat -c %a {p})\" \"$t\"; }} || exit 1; \
+         mv -f \"$t\" {p} && printf \"\\nJANITOR\"\"_OK\\n\""
+    );
+    let script_q = shell_single_quote(&script);
+    format!("stty raw -echo -isig 2>/dev/null; sudo -n sh -c {script_q}")
+}
+
+/// Base64-encode the new file content for streaming over the data channel into the
+/// remote `head -c N | base64 -d` (ADR 0029). The standard alphabet's bytes survive
+/// the pty intact. Returns the ASCII base64 bytes (what we stream); the count is
+/// the `N` the write command reads. The result encodes secret bytes, so the caller
+/// holds it zeroizing. Pure.
+fn encode_file_base64(content: &[u8]) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .encode(content)
+        .into_bytes()
+}
+
 /// Map a masked [`MgsError`] onto the shared [`SessionError`] taxonomy. The masked
 /// port hides the category, so log it here for the live harness — the `MgsError`
 /// variants carry only structural context (a fixed label), never a payload, so the
@@ -214,6 +299,24 @@ fn mgs_error_to_session(e: MgsError) -> SessionError {
         MgsError::CommandFailed => SessionError::NotFound,
         MgsError::Channel(_) | MgsError::Protocol(_) | MgsError::ClosedEarly => SessionError::Sdk {
             context: "ssm data channel".into(),
+        },
+    }
+}
+
+/// Map a masked write-side [`MgsError`] onto [`SessionError`] (ADR 0029). Unlike a
+/// read, a `CommandFailed` here is "the command ran but confirmed no token" (e.g.
+/// `sudo`/`mktemp` failed) — a write failure, not a missing file — so it maps to a
+/// generic masked `Sdk` error rather than `NotFound`. (A `JANITOR_CONFLICT` is a
+/// successful [`WriteOutcome::Conflict`], never an error.)
+fn mgs_write_error_to_session(e: MgsError) -> SessionError {
+    tracing::warn!(target: "janitor::ssm", "ssm write failed — {e}");
+    match e {
+        MgsError::KmsEncryptionUnsupported => SessionError::Unsupported,
+        MgsError::Channel(_)
+        | MgsError::Protocol(_)
+        | MgsError::ClosedEarly
+        | MgsError::CommandFailed => SessionError::Sdk {
+            context: "ssm write".into(),
         },
     }
 }
@@ -326,7 +429,13 @@ impl RemoteFileReader for SsmFileReader {
         path: &str,
     ) -> Result<RawSecret, SessionError> {
         let client = build_client(cred, region);
-        let started = start_session_with(&client, instance_id, build_read_command(path)).await?;
+        let started = start_session_with(
+            &client,
+            instance_id,
+            NONINTERACTIVE_DOCUMENT,
+            build_read_command(path),
+        )
+        .await?;
         let mut channel = TungsteniteChannel::connect(&started.stream_url)
             .await
             .map_err(mgs_error_to_session)?;
@@ -350,6 +459,47 @@ impl RemoteFileReader for SsmFileReader {
         })?;
         tracing::debug!(target: "janitor::ssm", bytes = content.len(), "ssm read decoded");
         Ok(raw_from_bytes(content))
+    }
+}
+
+/// Session-Manager-backed [`RemoteFileWriter`] (ADR 0029): `StartSession` on the
+/// **interactive** document → the MGS data channel → stream the base64 content into
+/// the `sha256`-guarded atomic replace → the typed [`WriteOutcome`]. The
+/// `StartSession` SDK call and all the protocol logic are tested; only the live
+/// WebSocket connect + driver call are the untested shell.
+pub struct SsmFileWriter;
+
+#[async_trait]
+impl RemoteFileWriter for SsmFileWriter {
+    async fn write_file(
+        &self,
+        cred: &Credential,
+        instance_id: &str,
+        region: &str,
+        path: &str,
+        expected_sha256: &str,
+        content: &[u8],
+    ) -> Result<WriteOutcome, SessionError> {
+        // Base64-encode in a zeroizing buffer (it encodes the secret file). `n` (its
+        // length) is the non-secret byte count the remote `head -c n` reads.
+        let b64 = zeroize::Zeroizing::new(encode_file_base64(content));
+        let n = b64.len();
+        let command = build_write_command(path, expected_sha256, n);
+        let client = build_client(cred, region);
+        let started =
+            start_session_with(&client, instance_id, INTERACTIVE_DOCUMENT, command).await?;
+        let mut channel = TungsteniteChannel::connect(&started.stream_url)
+            .await
+            .map_err(mgs_write_error_to_session)?;
+        write_command_output(
+            &mut channel,
+            &started.token_value,
+            Uuid::new_v4(),
+            b64.to_vec(),
+            &now_millis,
+        )
+        .await
+        .map_err(mgs_write_error_to_session)
     }
 }
 
@@ -450,6 +600,82 @@ mod tests {
         ));
         let leak = mgs_error_to_session(MgsError::Protocol("SECRET=hunter2".into()));
         // The masked SessionError must not carry the protocol detail string.
+        assert!(!format!("{leak}").contains("hunter2"));
+    }
+
+    #[test]
+    fn write_command_is_a_stty_sudo_cas_atomic_replace() {
+        let cmd = build_write_command("/app/.env", "abc123", 128);
+        // Tames the pty, runs under sudo -n, reads exactly N bytes, CAS-guards on the
+        // expected hash, decodes base64, and replaces atomically — printing tokens.
+        assert!(cmd.starts_with("stty raw -echo -isig 2>/dev/null; sudo -n sh -c "));
+        for needle in [
+            "sha256sum < ", // stdin redirect (no filename to escape) — not `--`
+            "\"$cur\" =",   // the CAS comparison
+            "abc123",       // against the expected hash
+            "head -c 128",
+            "base64 -d",
+            "mktemp -- ",
+            "dirname -- ", // temp co-located in the target's dir (atomic mv)
+            "trap ",       // cleanup of the temp on any failure
+            "--reference=",
+            "stat -c %u:%g", // the chown fallback
+            "stat -c %a",    // the chmod fallback
+            "mv -f",
+        ] {
+            assert!(cmd.contains(needle), "command missing {needle:?}:\n{cmd}");
+        }
+        // The path is embedded (single-quoted, double-nested for `sh -c`) and a
+        // path that would word-split or look like a flag is safe.
+        assert!(build_write_command("/a b/.env", "h", 1).contains("/a b/.env"));
+        assert!(build_write_command("-rf", "h", 1).contains("-rf"));
+        // No raw newline in the command (it must ride one Parameters value cleanly).
+        assert!(!cmd.contains('\n'), "the command must be a single line");
+    }
+
+    #[test]
+    fn write_command_body_cannot_false_positive_the_token_scan() {
+        // The emitted tokens are JANITOR_OK / JANITOR_CONFLICT, but the command
+        // SOURCE writes them split (printf "…JANITOR""_OK…"), so the command body
+        // itself contains NEITHER contiguous token — defense-in-depth, so even if the
+        // agent ever echoed the command text into stdout the token scan (which looks
+        // for the contiguous token) could not mis-report a result.
+        let cmd = build_write_command("/app/.env", "abc123", 1);
+        assert!(
+            !cmd.contains("JANITOR_OK"),
+            "the command body must not contain the contiguous OK token"
+        );
+        assert!(
+            !cmd.contains("JANITOR_CONFLICT"),
+            "the command body must not contain the contiguous CONFLICT token"
+        );
+        // …but it does carry the split pieces that printf concatenates at runtime.
+        assert!(cmd.contains("JANITOR\"\"_OK"));
+        assert!(cmd.contains("JANITOR\"\"_CONFLICT"));
+    }
+
+    #[test]
+    fn encode_file_base64_round_trips_through_the_read_decoder() {
+        // What we stream (base64) must decode back to the file via the read path's
+        // strict decoder — the two halves of the wire format agree.
+        for content in [b"A=1\nB=two\n".as_slice(), b"".as_slice(), &[0u8, 159, 200]] {
+            let b64 = encode_file_base64(content);
+            assert_eq!(decode_base64_output(&b64).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn write_mgs_errors_map_to_masked_session_errors() {
+        assert!(matches!(
+            mgs_write_error_to_session(MgsError::KmsEncryptionUnsupported),
+            SessionError::Unsupported
+        ));
+        // CommandFailed on write is a write failure (Sdk), NOT NotFound (unlike read).
+        assert!(matches!(
+            mgs_write_error_to_session(MgsError::CommandFailed),
+            SessionError::Sdk { .. }
+        ));
+        let leak = mgs_write_error_to_session(MgsError::Protocol("SECRET=hunter2".into()));
         assert!(!format!("{leak}").contains("hunter2"));
     }
 
@@ -578,6 +804,7 @@ mod tests {
         let started = start_session_with(
             &client_with_replay(vec![ok_json(body)]),
             "i-0abc",
+            NONINTERACTIVE_DOCUMENT,
             "cat -- '/app/.env'".into(),
         )
         .await
@@ -594,7 +821,8 @@ mod tests {
         let result = start_session_with(
             &client_with_replay(vec![ok_json(body)]),
             "i-0abc",
-            "cat -- '/x'".into(),
+            INTERACTIVE_DOCUMENT,
+            "stty raw; sudo -n sh -c '…'".into(),
         )
         .await;
         assert!(matches!(result, Err(SessionError::Sdk { .. })));

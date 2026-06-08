@@ -15,6 +15,8 @@ use janitor_aws_auth::types::Credential;
 use janitor_aws_auth::wire::RawSecret;
 use janitor_core::select::Selectable;
 
+use crate::mgs::WriteOutcome;
+
 /// One SSM-managed Instance (`DescribeInstanceInformation`). `id` is the stable
 /// identity (the instance id, e.g. `i-0abc…`); `name` is the friendly label
 /// (the `Name` tag or `ComputerName`, falling back to `id` when neither is set).
@@ -69,6 +71,30 @@ pub trait RemoteFileReader: Send + Sync {
         region: &str,
         path: &str,
     ) -> Result<RawSecret, SessionError>;
+}
+
+/// Writes `content` to a file's `path` on `instance_id` over SSM (ADR 0029): an
+/// interactive pty session streams the base64 content over the data channel into a
+/// `sha256`-guarded atomic replace. `expected_sha256` is the hex digest of the file
+/// **as read** — the compare-and-swap (ADR 0001); a mismatch returns
+/// [`WriteOutcome::Conflict`] (not an error), so the caller re-reads and retries.
+/// A transport/protocol failure surfaces as a [`SessionError`] the caller masks.
+/// `content` is the new file's raw bytes (secret) — the impl base64-encodes and
+/// streams it, never placing it on argv/`Parameters` (THREAT-MODEL). The concrete
+/// transport is the untested shell (ADR 0010 §5); the orchestration that drives
+/// this seam is tested against [`fakes::FakeRemoteFileWriter`].
+#[async_trait]
+pub trait RemoteFileWriter: Send + Sync {
+    /// Write `content` to `path` on `instance_id`, guarded by `expected_sha256`.
+    async fn write_file(
+        &self,
+        cred: &Credential,
+        instance_id: &str,
+        region: &str,
+        path: &str,
+        expected_sha256: &str,
+        content: &[u8],
+    ) -> Result<WriteOutcome, SessionError>;
 }
 
 // ----------------------------------------------------------------------------
@@ -173,6 +199,65 @@ pub mod fakes {
             let mut v = self.reads.lock().unwrap();
             if v.is_empty() {
                 panic!("FakeRemoteFileReader called more times than scripted");
+            }
+            v.remove(0)
+        }
+    }
+
+    /// One recorded call to [`FakeRemoteFileWriter::write_file`], so a test can
+    /// assert the location, the CAS hash, and the exact bytes the write engine
+    /// chose to send (the values are test fixtures).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RecordedWrite {
+        pub instance_id: String,
+        pub path: String,
+        pub expected_sha256: String,
+        pub content: Vec<u8>,
+    }
+
+    /// A scripted remote-file writer: each `write_file` call pops the next scripted
+    /// outcome and records the call, panicking if called more often than scripted.
+    pub struct FakeRemoteFileWriter {
+        pub outcomes: Mutex<Vec<Result<WriteOutcome, SessionError>>>,
+        pub seen: Mutex<Vec<RecordedWrite>>,
+        pub calls: Mutex<u32>,
+    }
+    impl FakeRemoteFileWriter {
+        pub fn new(outcomes: Vec<Result<WriteOutcome, SessionError>>) -> Self {
+            FakeRemoteFileWriter {
+                outcomes: Mutex::new(outcomes),
+                seen: Mutex::new(Vec::new()),
+                calls: Mutex::new(0),
+            }
+        }
+        pub fn call_count(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+        pub fn seen(&self) -> Vec<RecordedWrite> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+    #[async_trait]
+    impl RemoteFileWriter for FakeRemoteFileWriter {
+        async fn write_file(
+            &self,
+            _cred: &Credential,
+            instance_id: &str,
+            _region: &str,
+            path: &str,
+            expected_sha256: &str,
+            content: &[u8],
+        ) -> Result<WriteOutcome, SessionError> {
+            *self.calls.lock().unwrap() += 1;
+            self.seen.lock().unwrap().push(RecordedWrite {
+                instance_id: instance_id.to_string(),
+                path: path.to_string(),
+                expected_sha256: expected_sha256.to_string(),
+                content: content.to_vec(),
+            });
+            let mut v = self.outcomes.lock().unwrap();
+            if v.is_empty() {
+                panic!("FakeRemoteFileWriter called more times than scripted");
             }
             v.remove(0)
         }

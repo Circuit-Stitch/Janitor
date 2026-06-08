@@ -14,4 +14,7 @@ pub mod protocol;
 mod channel;
 
 pub use channel::TungsteniteChannel;
-pub use protocol::{read_command_output, DataChannel, MgsError, SessionState};
+pub use protocol::{
+    read_command_output, write_command_output, DataChannel, MgsError, SessionState, WriteOutcome,
+    WriteSession,
+};

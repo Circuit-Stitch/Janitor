@@ -249,76 +249,28 @@ impl SessionState {
         out
     }
 
-    /// Build an `acknowledge` for a received message.
+    /// Build an `acknowledge` for a received message (shared with [`WriteSession`]).
     fn ack(&self, msg: &AgentMessage) -> Outgoing {
-        let content = AcknowledgeContent {
-            message_type: msg.message_type.clone(),
-            message_id: msg.message_id.to_string(),
-            sequence_number: msg.sequence_number,
-            is_sequential_message: true,
-        };
-        Outgoing {
-            message_type: message_type::ACKNOWLEDGE.into(),
-            payload_type: 0,
-            // SYN|FIN (3): a self-contained control message, exactly as the SSM
-            // agent / session-manager-plugin send acks. With flags=0 the agent
-            // treats it as a mid-stream data frame and never registers the ack, so
-            // it retransmits the unacked message until it gives up (channel_closed)
-            // — verified live (ADR 0025 §3).
-            flags: FLAG_SYN | FLAG_FIN,
-            sequence_number: 0,
-            payload: serde_json::to_vec(&content).expect("ack json"),
-        }
+        build_ack(msg)
     }
 
-    /// Build the `handshake_response` for a `handshake_request`. Responds Success
-    /// to `SessionType`; marks `KMSEncryption` Unsupported and fails the session
-    /// (the pure transport cannot do the KMS data-key exchange).
+    /// Build the `handshake_response` for a `handshake_request`, advancing
+    /// `out_seq` and recording a KMS-unsupported / malformed error on `self` as the
+    /// shared [`build_handshake_response`] reports it.
     fn handshake_response(&mut self, msg: &AgentMessage) -> Option<Outgoing> {
-        let req: HandshakeRequestPayload = match serde_json::from_slice(&msg.payload) {
-            Ok(r) => r,
-            Err(_) => {
-                self.error = Some(MgsError::Protocol("handshake request".into()));
-                return None;
-            }
-        };
-        let processed: Vec<ProcessedClientAction> = req
-            .requested_client_actions
-            .iter()
-            .map(|a| {
-                if a.action_type == "KMSEncryption" {
-                    self.error = Some(MgsError::KmsEncryptionUnsupported);
-                    ProcessedClientAction {
-                        action_type: a.action_type.clone(),
-                        action_status: ACTION_UNSUPPORTED,
-                        action_result: None,
-                        error: "unsupported".into(),
-                    }
-                } else {
-                    ProcessedClientAction {
-                        action_type: a.action_type.clone(),
-                        action_status: ACTION_SUCCESS,
-                        action_result: None,
-                        error: String::new(),
-                    }
+        match build_handshake_response(&msg.payload, self.out_seq) {
+            Ok((out, kms_unsupported)) => {
+                if let Some(e) = kms_unsupported {
+                    self.error = Some(e);
                 }
-            })
-            .collect();
-        let resp = HandshakeResponsePayload {
-            client_version: CLIENT_VERSION.into(),
-            processed_client_actions: processed,
-            errors: Vec::new(),
-        };
-        let seq = self.out_seq;
-        let flags = if seq == 0 { FLAG_SYN } else { 0 };
-        self.out_seq += 1;
-        Some(Outgoing {
-            message_type: message_type::INPUT_STREAM_DATA.into(),
-            payload_type: payload_type::HANDSHAKE_RESPONSE,
-            flags,
-            sequence_number: seq,
-            payload: serde_json::to_vec(&resp).expect("handshake json"),
-        })
+                self.out_seq += 1;
+                Some(out)
+            }
+            Err(e) => {
+                self.error = Some(e);
+                None
+            }
+        }
     }
 
     /// Assemble the terminal result: the accumulated stdout on success, or a
@@ -359,6 +311,94 @@ fn parse_exit_code(payload: &[u8]) -> i64 {
         .unwrap_or(0)
 }
 
+// ---- shared building blocks (used by both the read and write drivers) ----
+
+/// Build an `acknowledge` for a received message. SYN|FIN (3) marks a
+/// self-contained control message, exactly as the SSM agent / session-manager-
+/// plugin send acks; with flags=0 the agent treats it as a mid-stream data frame
+/// and never registers the ack, retransmitting the unacked message until it gives
+/// up (channel_closed) — verified live (ADR 0025 §3).
+fn build_ack(msg: &AgentMessage) -> Outgoing {
+    let content = AcknowledgeContent {
+        message_type: msg.message_type.clone(),
+        message_id: msg.message_id.to_string(),
+        sequence_number: msg.sequence_number,
+        is_sequential_message: true,
+    };
+    Outgoing {
+        message_type: message_type::ACKNOWLEDGE.into(),
+        payload_type: 0,
+        flags: FLAG_SYN | FLAG_FIN,
+        sequence_number: 0,
+        payload: serde_json::to_vec(&content).expect("ack json"),
+    }
+}
+
+/// Build the `handshake_response` for a `handshake_request` at outgoing sequence
+/// `seq`. Responds Success to `SessionType`; marks `KMSEncryption` Unsupported and
+/// returns it as the second tuple element (the pure transport cannot do the KMS
+/// data-key exchange, so the caller fails the session). `Err` only on a malformed
+/// request payload.
+fn build_handshake_response(
+    req_payload: &[u8],
+    seq: i64,
+) -> Result<(Outgoing, Option<MgsError>), MgsError> {
+    let req: HandshakeRequestPayload = serde_json::from_slice(req_payload)
+        .map_err(|_| MgsError::Protocol("handshake request".into()))?;
+    let mut kms_unsupported = None;
+    let processed: Vec<ProcessedClientAction> = req
+        .requested_client_actions
+        .iter()
+        .map(|a| {
+            if a.action_type == "KMSEncryption" {
+                kms_unsupported = Some(MgsError::KmsEncryptionUnsupported);
+                ProcessedClientAction {
+                    action_type: a.action_type.clone(),
+                    action_status: ACTION_UNSUPPORTED,
+                    action_result: None,
+                    error: "unsupported".into(),
+                }
+            } else {
+                ProcessedClientAction {
+                    action_type: a.action_type.clone(),
+                    action_status: ACTION_SUCCESS,
+                    action_result: None,
+                    error: String::new(),
+                }
+            }
+        })
+        .collect();
+    let resp = HandshakeResponsePayload {
+        client_version: CLIENT_VERSION.into(),
+        processed_client_actions: processed,
+        errors: Vec::new(),
+    };
+    let flags = if seq == 0 { FLAG_SYN } else { 0 };
+    Ok((
+        Outgoing {
+            message_type: message_type::INPUT_STREAM_DATA.into(),
+            payload_type: payload_type::HANDSHAKE_RESPONSE,
+            flags,
+            sequence_number: seq,
+            payload: serde_json::to_vec(&resp).expect("handshake json"),
+        },
+        kms_unsupported,
+    ))
+}
+
+/// Serialize the OpenDataChannel handshake (a JSON **text** frame) carrying the
+/// session token. Shared by the read and write drivers.
+fn open_data_channel_text(token_value: &str, client_id: Uuid) -> Result<String, MgsError> {
+    let open = OpenDataChannelInput {
+        message_schema_version: "1.0".into(),
+        request_id: Uuid::new_v4().to_string(),
+        token_value: token_value.into(),
+        client_id: client_id.to_string(),
+        client_version: CLIENT_VERSION.into(),
+    };
+    serde_json::to_string(&open).map_err(|_| MgsError::Protocol("open".into()))
+}
+
 /// Drive one read over `channel`: open the data channel, run the session to
 /// completion, and return the command's stdout bytes. The only non-deterministic
 /// inputs (the per-message UUID and `now` timestamp) are injected so tests stay
@@ -369,15 +409,9 @@ pub async fn read_command_output(
     client_id: Uuid,
     now_millis: &(dyn Fn() -> u64 + Send + Sync),
 ) -> Result<Vec<u8>, MgsError> {
-    let open = OpenDataChannelInput {
-        message_schema_version: "1.0".into(),
-        request_id: Uuid::new_v4().to_string(),
-        token_value: token_value.into(),
-        client_id: client_id.to_string(),
-        client_version: CLIENT_VERSION.into(),
-    };
-    let open = serde_json::to_string(&open).map_err(|_| MgsError::Protocol("open".into()))?;
-    channel.send_text(open).await?;
+    channel
+        .send_text(open_data_channel_text(token_value, client_id)?)
+        .await?;
     tracing::debug!(target: "janitor::ssm", "sent OpenDataChannel handshake; awaiting agent");
 
     // The data channel is a single ordered WebSocket, so frames are consumed in
@@ -437,6 +471,258 @@ pub async fn read_command_output(
 /// the epoch can never produce an invalid outgoing message.
 fn nonzero(millis: u64) -> u64 {
     millis.max(1)
+}
+
+// ============================ write path (ADR 0029) ============================
+
+/// The default size of each streamed `input_stream_data` chunk. The agent reads
+/// the pty in fixed buffers, so any chunk size works; this keeps a few-KB `.env`
+/// to a handful of frames.
+const INPUT_CHUNK_SIZE: usize = 1024;
+
+/// The outcome of a remote `.env` write, parsed from the small status tokens the
+/// CAS-guarded command prints (ADR 0029). Distinct from an [`MgsError`] (a
+/// transport/protocol failure): both `Applied` and `Conflict` are *successful*
+/// round-trips of the protocol — the command ran and reported its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// `JANITOR_OK` — the CAS matched and the atomic replace committed.
+    Applied,
+    /// `JANITOR_CONFLICT` — the file's `sha256` no longer matched what we read, so
+    /// the command refused (ADR 0001). The caller re-reads, re-applies, retries.
+    Conflict,
+}
+
+/// Scan the command's accumulated stdout for the status token. `CONFLICT` is
+/// checked first (it is printed and the command exits *before* any `OK` could
+/// appear); robust to surrounding pty banner noise since it is a substring search.
+/// Pure.
+fn scan_write_outcome(stdout: &[u8]) -> Option<WriteOutcome> {
+    if contains_subslice(stdout, b"JANITOR_CONFLICT") {
+        Some(WriteOutcome::Conflict)
+    } else if contains_subslice(stdout, b"JANITOR_OK") {
+        Some(WriteOutcome::Applied)
+    } else {
+        None
+    }
+}
+
+/// Whether `haystack` contains `needle` as a contiguous subslice.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The deterministic data-channel state machine for a **write** (ADR 0029): like
+/// [`SessionState`] it answers the handshake and acks every output frame, but
+/// after `handshake_complete` it **streams** the base64 content as
+/// `input_stream_data`/`Output` frames (chunked, sequenced after the handshake
+/// response's seq 0, `FLAG_FIN` on the last), then accumulates the command's
+/// stdout to parse the `JANITOR_OK`/`JANITOR_CONFLICT` token. No I/O, no clock,
+/// no randomness — fully unit-tested.
+///
+/// The base64 content is the encoding of a secret file, so it is held in a
+/// zeroizing buffer and **never** logged; the driver logs only structural fields.
+pub struct WriteSession {
+    /// The base64 bytes to stream into the remote `head -c N | base64 -d`.
+    content: zeroize::Zeroizing<Vec<u8>>,
+    chunk_size: usize,
+    /// Our outgoing `input_stream_data` sequence (the handshake response takes 0;
+    /// content frames continue from 1).
+    out_seq: i64,
+    handshake_responded: bool,
+    /// Whether the content frames have been emitted (only once, at handshake_complete).
+    streamed: bool,
+    /// Command stdout chunks by sequence number, concatenated in order at
+    /// [`finish`](Self::finish) to scan for the status token.
+    stdout: BTreeMap<i64, Vec<u8>>,
+    channel_closed: bool,
+    error: Option<MgsError>,
+}
+
+impl WriteSession {
+    /// Build a write session that will stream `content_b64` once the handshake
+    /// completes. `content_b64` is the base64 of the new file bytes.
+    pub fn new(content_b64: Vec<u8>) -> Self {
+        Self::with_chunk_size(content_b64, INPUT_CHUNK_SIZE)
+    }
+
+    fn with_chunk_size(content_b64: Vec<u8>, chunk_size: usize) -> Self {
+        WriteSession {
+            content: zeroize::Zeroizing::new(content_b64),
+            chunk_size: chunk_size.max(1),
+            out_seq: 0,
+            handshake_responded: false,
+            streamed: false,
+            stdout: BTreeMap::new(),
+            channel_closed: false,
+            error: None,
+        }
+    }
+
+    /// Whether the session has reached a terminal state (the driver stops): an
+    /// error, or a clean channel close (the command exited).
+    pub fn done(&self) -> bool {
+        self.error.is_some() || self.channel_closed
+    }
+
+    /// Process one incoming message, returning the messages to send back (acks, the
+    /// handshake response, and — at handshake_complete — the streamed content frames).
+    pub fn on_message(&mut self, msg: &AgentMessage) -> Vec<Outgoing> {
+        match msg.message_type.as_str() {
+            message_type::OUTPUT_STREAM_DATA => self.on_output(msg),
+            message_type::CHANNEL_CLOSED => {
+                self.channel_closed = true;
+                Vec::new()
+            }
+            // The agent's acks of our streamed frames + flow control: nothing to do
+            // (the WebSocket/TCP is reliable, so v1 streams without retransmit).
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_output(&mut self, msg: &AgentMessage) -> Vec<Outgoing> {
+        let mut out = vec![build_ack(msg)];
+        match msg.payload_type {
+            payload_type::HANDSHAKE_REQUEST => {
+                if !self.handshake_responded {
+                    match build_handshake_response(&msg.payload, self.out_seq) {
+                        Ok((resp, kms)) => {
+                            if let Some(e) = kms {
+                                self.error = Some(e);
+                            }
+                            self.out_seq += 1;
+                            out.push(resp);
+                        }
+                        Err(e) => self.error = Some(e),
+                    }
+                    self.handshake_responded = true;
+                }
+            }
+            payload_type::HANDSHAKE_COMPLETE => {
+                // The agent is ready and the command is running under the pty; stream
+                // the content now (once). A KMS-failed handshake never reaches here.
+                if !self.streamed && self.error.is_none() {
+                    out.extend(self.input_frames());
+                    self.streamed = true;
+                }
+            }
+            payload_type::OUTPUT => {
+                self.stdout.insert(msg.sequence_number, msg.payload.clone());
+            }
+            // STDERR/ERROR fold into the pty's output stream for an interactive
+            // session; they are not a distinct failure here. EXIT_CODE (if any) is
+            // not the completion signal — the status token + channel_closed are.
+            _ => {}
+        }
+        out
+    }
+
+    /// Chunk the base64 content into `input_stream_data`/`Output` frames, sequenced
+    /// from the current `out_seq`, `FLAG_FIN` on the last. Empty content → no frames
+    /// (the remote `head -c 0` completes immediately).
+    fn input_frames(&mut self) -> Vec<Outgoing> {
+        let chunks: Vec<Vec<u8>> = self
+            .content
+            .chunks(self.chunk_size)
+            .map(|c| c.to_vec())
+            .collect();
+        let n = chunks.len();
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let seq = self.out_seq;
+                self.out_seq += 1;
+                Outgoing {
+                    message_type: message_type::INPUT_STREAM_DATA.into(),
+                    payload_type: payload_type::OUTPUT,
+                    flags: if i + 1 == n { FLAG_FIN } else { 0 },
+                    sequence_number: seq,
+                    payload: chunk,
+                }
+            })
+            .collect()
+    }
+
+    /// The terminal result: the parsed [`WriteOutcome`] on a clean close, or a
+    /// masked [`MgsError`]. A clean close with neither token is a [`MgsError::CommandFailed`]
+    /// (the command ran but reported nothing — e.g. `sudo`/`mktemp` failed); an
+    /// abrupt socket drop with no token is [`MgsError::ClosedEarly`].
+    pub fn finish(self) -> Result<WriteOutcome, MgsError> {
+        if let Some(e) = self.error {
+            return Err(e);
+        }
+        let stdout: Vec<u8> = self.stdout.into_values().flatten().collect();
+        match scan_write_outcome(&stdout) {
+            Some(outcome) => Ok(outcome),
+            None if self.channel_closed => Err(MgsError::CommandFailed),
+            None => Err(MgsError::ClosedEarly),
+        }
+    }
+}
+
+/// Drive one write over `channel`: open the data channel, answer the handshake,
+/// stream `content_b64` after `handshake_complete`, and parse the command's status
+/// token. Mirrors [`read_command_output`] (UUID + clock injected for determinism),
+/// but **never logs an outgoing payload** — the streamed frames carry the base64 of
+/// a secret file (THREAT-MODEL).
+pub async fn write_command_output(
+    channel: &mut dyn DataChannel,
+    token_value: &str,
+    client_id: Uuid,
+    content_b64: Vec<u8>,
+    now_millis: &(dyn Fn() -> u64 + Send + Sync),
+) -> Result<WriteOutcome, MgsError> {
+    channel
+        .send_text(open_data_channel_text(token_value, client_id)?)
+        .await?;
+    tracing::debug!(target: "janitor::ssm", "sent OpenDataChannel handshake (write); awaiting agent");
+
+    let mut state = WriteSession::new(content_b64);
+    while !state.done() {
+        let Some(bytes) = channel.recv().await? else {
+            break; // socket closed
+        };
+        let msg = AgentMessage::deserialize(&bytes)
+            .map_err(|_| MgsError::Protocol("agent frame".into()))?;
+        // Structural only — never the payload (it can be the pty echo of our
+        // streamed content) (THREAT-MODEL).
+        tracing::debug!(
+            target: "janitor::ssm",
+            msg_type = %msg.message_type,
+            payload_type = msg.payload_type,
+            seq = msg.sequence_number,
+            flags = msg.flags,
+            payload_len = msg.payload.len(),
+            "rx agent message (write)"
+        );
+        for out in state.on_message(&msg) {
+            let am = out.into_agent_message(Uuid::new_v4(), nonzero(now_millis()));
+            // Structural only — our outgoing payloads include the streamed base64
+            // content, so the payload is NEVER logged (unlike the read driver, whose
+            // outgoing are only acks).
+            tracing::debug!(
+                target: "janitor::ssm",
+                msg_type = %am.message_type,
+                payload_type = am.payload_type,
+                seq = am.sequence_number,
+                flags = am.flags,
+                payload_len = am.payload.len(),
+                "tx agent message (write)"
+            );
+            channel.send_binary(am.serialize()).await?;
+        }
+    }
+    let result = state.finish();
+    match &result {
+        Ok(o) => tracing::debug!(target: "janitor::ssm", outcome = ?o, "ssm write complete"),
+        Err(e) => {
+            tracing::warn!(target: "janitor::ssm", "ssm write ended without a clean result — {e}")
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -728,6 +1014,216 @@ mod tests {
             }
         }
         let err = read_command_output(&mut Failing, "tok", Uuid::nil(), &|| 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err, MgsError::Channel("connect".into()));
+    }
+
+    // ---- WriteSession (pure) + write_command_output driver (ADR 0029) ----
+
+    fn channel_closed(seq: i64) -> AgentMessage {
+        AgentMessage {
+            message_type: message_type::CHANNEL_CLOSED.into(),
+            ..out_msg(0, seq, b"")
+        }
+    }
+
+    /// The reassembled payload of all streamed content frames (input_stream_data /
+    /// Output), in sequence order — i.e. exactly what the remote `head -c N` reads.
+    fn streamed_content(frames: &[Outgoing]) -> Vec<u8> {
+        let mut v: Vec<&Outgoing> = frames
+            .iter()
+            .filter(|o| {
+                o.message_type == message_type::INPUT_STREAM_DATA
+                    && o.payload_type == payload_type::OUTPUT
+            })
+            .collect();
+        v.sort_by_key(|o| o.sequence_number);
+        v.into_iter().flat_map(|o| o.payload.clone()).collect()
+    }
+
+    #[test]
+    fn scan_write_outcome_prefers_conflict_and_is_substring_robust() {
+        assert_eq!(
+            scan_write_outcome(b"JANITOR_OK\n"),
+            Some(WriteOutcome::Applied)
+        );
+        assert_eq!(
+            scan_write_outcome(b"\x1b[0mJANITOR_OK\r\n"),
+            Some(WriteOutcome::Applied),
+            "robust to surrounding pty/banner noise"
+        );
+        assert_eq!(
+            scan_write_outcome(b"JANITOR_CONFLICT\n"),
+            Some(WriteOutcome::Conflict)
+        );
+        assert_eq!(scan_write_outcome(b"random output"), None);
+        assert_eq!(scan_write_outcome(b""), None);
+    }
+
+    #[test]
+    fn write_session_streams_chunked_content_with_fin_after_handshake_complete() {
+        // Handshake first (ack + response, seq 0). Then handshake_complete triggers
+        // the content stream: chunked, sequenced from 1, FIN only on the last frame.
+        let mut s = WriteSession::with_chunk_size(b"ABCDEFG".to_vec(), 3);
+        let hs = s.on_message(&handshake_request(&["SessionType"]));
+        assert_eq!(hs.len(), 2, "ack + handshake response");
+        assert_eq!(hs[1].payload_type, payload_type::HANDSHAKE_RESPONSE);
+        assert_eq!(hs[1].sequence_number, 0);
+
+        let done = s.on_message(&out_msg(payload_type::HANDSHAKE_COMPLETE, 1, b""));
+        // ack + 3 content frames (3+3+1 bytes).
+        let frames: Vec<&Outgoing> = done
+            .iter()
+            .filter(|o| o.payload_type == payload_type::OUTPUT)
+            .collect();
+        assert_eq!(frames.len(), 3, "7 bytes / chunk 3 → 3 frames");
+        assert_eq!(
+            frames[0].sequence_number, 1,
+            "content seq continues after handshake's 0"
+        );
+        assert_eq!(frames[1].sequence_number, 2);
+        assert_eq!(frames[2].sequence_number, 3);
+        assert_eq!(frames[0].flags, 0);
+        assert_eq!(
+            frames[2].flags, FLAG_FIN,
+            "only the last content frame is FIN"
+        );
+        assert_eq!(streamed_content(&done), b"ABCDEFG");
+
+        // A second handshake_complete does not re-stream.
+        let again = s.on_message(&out_msg(payload_type::HANDSHAKE_COMPLETE, 2, b""));
+        assert_eq!(again.len(), 1, "ack only — content streamed once");
+    }
+
+    #[test]
+    fn write_session_empty_content_streams_no_frames() {
+        let mut s = WriteSession::new(Vec::new());
+        s.on_message(&handshake_request(&["SessionType"]));
+        let done = s.on_message(&out_msg(payload_type::HANDSHAKE_COMPLETE, 1, b""));
+        assert_eq!(done.len(), 1, "ack only; head -c 0 needs no bytes");
+    }
+
+    #[test]
+    fn write_session_parses_ok_and_conflict_at_clean_close() {
+        for (token, expect) in [
+            (b"JANITOR_OK\n".as_slice(), WriteOutcome::Applied),
+            (b"JANITOR_CONFLICT\n".as_slice(), WriteOutcome::Conflict),
+        ] {
+            let mut s = WriteSession::new(b"Zg==".to_vec());
+            s.on_message(&out_msg(payload_type::OUTPUT, 1, token));
+            s.on_message(&channel_closed(2));
+            assert!(s.done());
+            assert_eq!(s.finish().unwrap(), expect);
+        }
+    }
+
+    #[test]
+    fn write_session_clean_close_with_no_token_is_command_failed() {
+        let mut s = WriteSession::new(b"Zg==".to_vec());
+        s.on_message(&out_msg(payload_type::OUTPUT, 1, b"some pty noise"));
+        s.on_message(&channel_closed(2));
+        assert_eq!(s.finish().unwrap_err(), MgsError::CommandFailed);
+    }
+
+    #[test]
+    fn write_session_abrupt_drop_with_no_token_is_closed_early() {
+        let mut s = WriteSession::new(b"Zg==".to_vec());
+        s.on_message(&out_msg(payload_type::OUTPUT, 1, b"partial"));
+        assert!(!s.done(), "no close yet");
+        assert_eq!(s.finish().unwrap_err(), MgsError::ClosedEarly);
+    }
+
+    #[test]
+    fn write_session_kms_handshake_fails_and_never_streams() {
+        let mut s = WriteSession::with_chunk_size(b"ABCD".to_vec(), 2);
+        s.on_message(&handshake_request(&["SessionType", "KMSEncryption"]));
+        assert!(s.done(), "KMS-unsupported is terminal");
+        // handshake_complete must not stream once errored.
+        let after = s.on_message(&out_msg(payload_type::HANDSHAKE_COMPLETE, 1, b""));
+        assert!(
+            after.iter().all(|o| o.payload_type != payload_type::OUTPUT),
+            "no content frames after a failed handshake"
+        );
+        assert_eq!(s.finish().unwrap_err(), MgsError::KmsEncryptionUnsupported);
+    }
+
+    #[tokio::test]
+    async fn driver_runs_full_write_session_streams_content_and_parses_ok() {
+        let content = b"SGVsbG8sIHdvcmxkIQ=="; // base64 of "Hello, world!"
+        let mut ch = FakeChannel::new(vec![
+            handshake_request(&["SessionType"]),
+            out_msg(payload_type::HANDSHAKE_COMPLETE, 1, b""),
+            out_msg(payload_type::OUTPUT, 2, b"JANITOR_OK\n"),
+            channel_closed(3),
+        ]);
+        let outcome = write_command_output(&mut ch, "tok", Uuid::nil(), content.to_vec(), &|| 1)
+            .await
+            .unwrap();
+        assert_eq!(outcome, WriteOutcome::Applied);
+
+        let bin = ch.sent_binary.lock().unwrap();
+        // The OpenDataChannel text frame carried the token.
+        let text = ch.sent_text.lock().unwrap();
+        assert_eq!(text.len(), 1);
+        // Exactly one handshake response went out.
+        let responses = bin
+            .iter()
+            .filter(|m| m.payload_type == payload_type::HANDSHAKE_RESPONSE)
+            .count();
+        assert_eq!(responses, 1);
+        // Every incoming message was acked.
+        let acks = bin
+            .iter()
+            .filter(|m| m.message_type == message_type::ACKNOWLEDGE)
+            .count();
+        assert_eq!(acks, 3);
+        // The streamed content frames reassemble to exactly the base64 we passed.
+        let frames: Vec<Outgoing> = bin
+            .iter()
+            .map(|m| Outgoing {
+                message_type: m.message_type.clone(),
+                payload_type: m.payload_type,
+                flags: m.flags,
+                sequence_number: m.sequence_number,
+                payload: m.payload.clone(),
+            })
+            .collect();
+        assert_eq!(streamed_content(&frames), content);
+        // Every outgoing message has a non-zero CreatedDate (agent Validate).
+        assert!(bin.iter().all(|m| m.created_date != 0));
+    }
+
+    #[tokio::test]
+    async fn driver_maps_conflict_token_to_conflict_outcome() {
+        let mut ch = FakeChannel::new(vec![
+            handshake_request(&["SessionType"]),
+            out_msg(payload_type::HANDSHAKE_COMPLETE, 1, b""),
+            out_msg(payload_type::OUTPUT, 2, b"\nJANITOR_CONFLICT\n"),
+            channel_closed(3),
+        ]);
+        let outcome = write_command_output(&mut ch, "tok", Uuid::nil(), b"Zg==".to_vec(), &|| 1)
+            .await
+            .unwrap();
+        assert_eq!(outcome, WriteOutcome::Conflict);
+    }
+
+    #[tokio::test]
+    async fn driver_write_propagates_a_send_error() {
+        struct Failing;
+        #[async_trait]
+        impl DataChannel for Failing {
+            async fn send_text(&mut self, _t: String) -> Result<(), MgsError> {
+                Err(MgsError::Channel("connect".into()))
+            }
+            async fn send_binary(&mut self, _b: Vec<u8>) -> Result<(), MgsError> {
+                Ok(())
+            }
+            async fn recv(&mut self) -> Result<Option<Vec<u8>>, MgsError> {
+                Ok(None)
+            }
+        }
+        let err = write_command_output(&mut Failing, "tok", Uuid::nil(), b"Zg==".to_vec(), &|| 1)
             .await
             .unwrap_err();
         assert_eq!(err, MgsError::Channel("connect".into()));
