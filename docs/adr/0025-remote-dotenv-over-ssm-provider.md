@@ -1,6 +1,8 @@
 # A remote `.env`-over-SSM Provider (`janitor-ssm`): the second real Provider
 
-**Status:** accepted (not yet implemented)
+**Status:** accepted; B3 implemented (#64); **B4 implemented (#65)** — transport (b)
+chosen, see [the B4 implementation note](#b4-implementation-note-2026-06-07) below.
+Live verification against a real EC2+SSM org is still pending (Milestone B).
 
 **Related:** [#33](https://github.com/Circuit-Stitch/Janitor/issues/33) (the
 shared Discovery orchestrator this unblocks), [ADR 0024](0024-shared-aws-auth-base-crate.md)
@@ -140,3 +142,94 @@ files). The read mechanism is therefore a security decision, not an ergonomic on
   evidence, satisfying #33's acceptance criteria.
 
 - **CONTEXT.md gains terms** (Instance, Remote `.env` Provider; see CONTEXT.md).
+
+## B4 implementation note (2026-06-07)
+
+B4 (#65) implemented the concrete SSM tail. Two decisions are recorded here as the
+ADR's Decision says to "commit by amending this ADR."
+
+- **Transport: (b), the pure-Rust MGS data channel — chosen over (a).** Janitor
+  reimplements the Session Manager agent message protocol
+  (`AWS-StartNonInteractiveCommand` → `StartSession` → the `StreamUrl` WebSocket)
+  directly in Rust (`janitor-ssm/src/mgs/`), so reading a remote `.env` needs **no**
+  `session-manager-plugin` binary (no packaging/runtime dependency; ADR 0022
+  unaffected). The byte framing (`mgs::frame`, reproduced from the `amazon-ssm-agent`
+  contract) and the session state machine + driver (`mgs::protocol`) are **pure,
+  unit-tested logic**; only the `wss` socket adapter (`mgs::channel`, ~30 lines) and
+  the `StartSession`→socket glue are the untested shell (ADR 0010 §5). The SDK calls
+  (`DescribeInstanceInformation`, `StartSession`, `GetDocument`) are replay-tested
+  against `StaticReplayClient` (ADR 0027), so `janitor-ssm` holds its ≥80% gate with
+  the shell in the number (~95% lines). The read command is **`sudo -n sh -c 'base64
+  -- '\''<path>'\'''`** with a non-sudo `||` fallback — `sudo` because the session
+  runs as the unprivileged `ssm-user` which cannot read a root-owned `600` secrets
+  file, and `base64` because the session's `sudo`/PAM/PTY path can fold banner/relay
+  bytes into the stream (it is decoded back on our side, the non-alphabet noise
+  dropped). This superseded an initial `cat -- '<path>'` during live bring-up — see
+  *Live verification* below.
+
+- **Session-logging detection: `GetDocument`, not `GetServiceSetting`.** The spec
+  recalled this as `GetServiceSetting`; that was wrong — there is no service setting
+  for session logging. The org's preference lives in the `SSM-SessionManagerRunShell`
+  SSM **document** (`ssm:GetDocument`); its `inputs.s3BucketName` /
+  `cloudWatchLogGroupName` drive the advisory, and `inputs.kmsKeyId` flags KMS data-
+  channel encryption. A new `LoggingPreference`/`LoggingState` seam + fake + the pure
+  `session_logging_advisory` decision are **covered**; only the live `GetDocument`
+  call is shell. The on/off → warn decision (with "doc absent (`ResourceNotFound`) =
+  Session Manager default = no logging" and "unreachable probe = always-on fallback
+  warning") is unit-tested. The advisory surfaces through a new, provider-agnostic
+  `Provider::take_advisories` port method (default empty) to **both** the Diagnostic
+  Log and the Discovery wizard; it is raised at the credential mint (while the wizard
+  is still open) and once per load.
+
+- **KMS-encrypted sessions are unsupported (v1).** If the org enables session-data
+  KMS encryption, the data channel's handshake requests `KMSEncryption`; the pure
+  transport does not implement the KMS data-key exchange, so it responds `Unsupported`
+  and the read fails fast and **masked** (`SessionError::Unsupported`) rather than
+  hanging. The `GetDocument` probe's `kmsKeyId` flag detects this. Implementing KMS
+  is a noted future enhancement.
+
+### Live verification (2026-06-07 — Milestone B, done)
+
+`live-verify-ssm` was run against a real Identity Center org + EC2/SSM box
+(`/opt/deferno/.env`, a 62-line / 3,579-byte root-owned `600` file). It read the file
+end-to-end and printed the masked 49-entry matrix — **no `session-manager-plugin`, no
+Value leaked.** Four things had to be fixed/learned during bring-up; each is now in the
+code + tests:
+
+1. **AgentMessage `MessageId` is half-swapped on the wire.** The `amazon-ssm-agent` /
+   `session-manager-plugin` marshal the 16-byte id as two byte-swapped 8-byte longs
+   (`getUuid`/`putUuid`: least-significant half first). Reading it verbatim made every
+   `AcknowledgedMessageId` we echoed unrecognized, so the agent retransmitted its
+   `handshake_request` forever and its send window stalled — the file truncated to its
+   first frame. `mgs::frame` now transposes the halves on encode + decode.
+2. **The session runs as `ssm-user`; the file is root-owned `600`.** A plain `cat`
+   returned `cat: …: Permission denied` (exactly 42 bytes). The read now uses
+   `sudo -n` (the SSM agent grants `ssm-user` NOPASSWD sudo by default), `||`-falling
+   back to a non-sudo read.
+3. **The `sudo`/PAM/PTY path can fold a large binary banner block into the stream**
+   (a 3.5 KB file came back as ~44 KB of mixed text+binary). The read is therefore
+   `base64` — its alphabet excludes the control/high-bit noise, which `decode_base64
+   _output` filters before a strict decode (a corrupt/aborted read → masked `Err`,
+   never a mis-parsed `.env`). This replaced both the raw `cat` and an interim
+   sentinel-bracketing approach.
+4. **`AWS-StartNonInteractiveCommand` ends with `channel_closed` and no `EXIT_CODE`.**
+   The completion signal is a clean `channel_closed` (return the accumulated output);
+   only an abrupt socket drop (recv `None` with no close) is `ClosedEarly`.
+
+Checklist resolution:
+
+- [x] `StartSession` accepts the `AWS-StartNonInteractiveCommand` document name.
+- [x] stdout streams cleanly and whole — the 49 masked Entries matched the file's
+      `KEY=VALUE` lines (50 lines, `POSTGRES_PASSWORD` duplicated → 49 unique).
+- [x] completion signal resolved (clean `channel_closed`, no `EXIT_CODE` — item 4
+      above). A non-zero `cat`/command still maps to masked `NotFound`; a bad-path
+      run is the one remaining easy manual check.
+- [~] `ssm:GetDocument` on `SSM-SessionManagerRunShell` — the test role lacked the
+      permission, so the **always-on fallback advisory fired** (the intended
+      degraded behaviour); the on/off toggle still wants a role that *has* the
+      permission against an org with logging configured.
+- [ ] a KMS-encrypted org fails masked (`Unsupported`) — untested (org has no
+      session KMS); the handshake path is unit-tested.
+
+The **write** path (read+modify+write a few Entries) is designed in **ADR 0028**,
+which also records the command-channel-vs-SFTP foundation decision this read settled.

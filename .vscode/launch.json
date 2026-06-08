@@ -41,6 +41,24 @@
       "args": [],
       "env": { "JANITOR_SSM": "1" },
       "cwd": "${workspaceFolder}"
+    },
+    {
+      // The human-gated Milestone-B harness (ADR 0025 §3): browser sign-in →
+      // guided SSM discovery (pick the JanitorSSM role!) → read a real .env over
+      // the pure-Rust MGS data channel → masked matrix. It is INTERACTIVE — the
+      // discovery menu + the .env-path prompt read stdin — so it runs in the
+      // integrated terminal (the Debug Console cannot take typed input). Add
+      // "args": ["--reset-config"] to clear stale remembered picks.
+      "type": "lldb",
+      "request": "launch",
+      "name": "live-verify-ssm — SSM transport (browser + stdin)",
+      "cargo": {
+        "args": ["build", "--bin=live-verify-ssm", "--package=janitor-ssm"],
+        "filter": { "name": "live-verify-ssm", "kind": "bin" }
+      },
+      "args": [],
+      "terminal": "integrated",
+      "cwd": "${workspaceFolder}"
     }
   ]
 }

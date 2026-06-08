@@ -12,15 +12,12 @@ use janitor_aws::aws_impl::AwsSecretsApi;
 use janitor_aws::session::Session;
 use janitor_aws_auth::authenticator::Authenticator;
 use janitor_aws_auth::aws_impl::{AwsOidcClient, AwsRoleClient};
-use janitor_aws_auth::error::SessionError;
-use janitor_aws_auth::types::{Credential, SystemClock};
-use janitor_aws_auth::wire::RawSecret;
+use janitor_aws_auth::types::SystemClock;
 use janitor_core::compare::RowKey;
 use janitor_core::config::{Application, Config, Mapping};
 use janitor_core::provider::{AppError, Provider, Step, What};
 use janitor_core::view::MatrixView;
-use janitor_ssm::wire::{InstanceCatalog, InstanceSummary, RemoteFileReader};
-use janitor_ssm::SsmProvider;
+use janitor_ssm::{AwsInstanceCatalog, AwsLoggingPreference, SsmFileReader, SsmProvider};
 
 /// UI → worker.
 pub enum Command {
@@ -115,6 +112,11 @@ pub enum Event {
     /// A walk hit a dead SSO token (`Step::Reauth`). The GUI routes back to the
     /// Sign-in state rather than offering Back/Close (ADR 0013); no SDK text.
     DiscoveryReauthRequired,
+    /// A masked operator advisory the Provider surfaced (ADR 0025): a policy note
+    /// about an unavoidable side effect of a read — e.g. org-wide SSM session
+    /// logging archives the file to S3/CloudWatch. Shown in the Discovery wizard;
+    /// also written to the Diagnostic Log (the worker logs it). Never a Value.
+    Warning(String),
 }
 
 /// Which [`Provider`] the GUI runs against. The composition root (`main`) picks
@@ -123,15 +125,12 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Aws,
-    /// The remote-`.env`-over-SSM Provider (ADR 0025). Constructs the real
-    /// front-half shell; its SSM tail (instance discovery + file read) is the
-    /// B4-deferred transport, so until then the tail seams refuse. The offline
-    /// end-to-end path is exercised by the worker tests against the fakes.
-    ///
-    /// `build_provider` already constructs it, but `main` does not *select* it
-    /// yet (the user-facing selector lands in B4 with the real transport) — hence
-    /// the allow: the arm is wired ahead of its composition-root entry point.
-    #[allow(dead_code)]
+    /// The remote-`.env`-over-SSM Provider (ADR 0025). The real front-half shell
+    /// (browser Sign-in + account/role catalog + credential minting) plus the B4
+    /// SSM tail: `DescribeInstanceInformation`, the pure-Rust Session Manager (MGS)
+    /// data-channel file read, and `GetDocument`-based session-logging detection.
+    /// `main` selects it with `--ssm`/`JANITOR_SSM`. The offline end-to-end path is
+    /// exercised by the worker tests against the `janitor-ssm` fakes.
     SsmDotenv,
     Mock,
 }
@@ -196,64 +195,29 @@ async fn build_session(config: &Config) -> Session {
 }
 
 /// Build the remote-`.env`-over-SSM Provider (ADR 0025). The front half is the
-/// same real shell as `build_session` (browser Sign-in + the account/role
-/// catalog + credential minting); the SSM tail — `DescribeInstanceInformation`
-/// and the Session Manager file read — is the transport spiked and chosen in B4
-/// (ADR 0025 §3), so until then it is the [`UnimplementedSsmTail`] placeholder
-/// that refuses with a masked error. The Provider therefore signs in for real but
-/// cannot list/read yet; the offline end-to-end walk is exercised by the worker
-/// tests against the `janitor-ssm` fakes (#64).
+/// same real shell as `build_session` (browser Sign-in, the account/role catalog,
+/// credential minting). The SSM tail is the B4 transport (ADR 0025 §3, transport
+/// b): `AwsInstanceCatalog` for `DescribeInstanceInformation`, `SsmFileReader` for
+/// the `StartSession` then pure-Rust MGS data channel `cat` read, and
+/// `AwsLoggingPreference` for `GetDocument` session-logging detection. The SDK
+/// calls and protocol are tested in `janitor-ssm`; only the live WebSocket socket
+/// is untested shell, verified by `live-verify-ssm`.
 async fn build_ssm_session(config: &Config) -> SsmProvider {
     let oidc = Arc::new(AwsOidcClient::new(config.sso_region.clone()).await);
     let role_client = Arc::new(AwsRoleClient::new(config.sso_region.clone()).await);
     let clock = Arc::new(SystemClock);
     let authenticator = Arc::new(Authenticator::new(oidc, config.sso_start_url.clone()));
-    let tail = Arc::new(UnimplementedSsmTail);
-    // `AwsRoleClient` implements both `RoleCredentialClient` and `AccountCatalog`;
-    // the single `tail` Arc serves both SSM-tail seams.
+    // `AwsRoleClient` implements both `RoleCredentialClient` and `AccountCatalog`,
+    // so the same Arc serves credential minting and account/role enumeration.
     SsmProvider::new(
         authenticator,
         role_client.clone(),
         role_client,
-        tail.clone(),
-        tail,
+        Arc::new(AwsInstanceCatalog),
+        Arc::new(SsmFileReader),
+        Arc::new(AwsLoggingPreference),
         clock,
     )
-}
-
-/// B4 placeholder for the SSM tail seams (ADR 0025 §3): the real
-/// `DescribeInstanceInformation` + Session Manager transport land in a later
-/// slice. It refuses every call with a masked, error-safe [`SessionError`] (no
-/// SDK text), so the SsmDotenv Provider is constructible and signs in but its
-/// tail is inert until B4. Untested I/O-boundary shell (ADR 0010 §5).
-struct UnimplementedSsmTail;
-
-#[async_trait::async_trait]
-impl InstanceCatalog for UnimplementedSsmTail {
-    async fn describe_instances(
-        &self,
-        _cred: &Credential,
-        _region: &str,
-    ) -> Result<Vec<InstanceSummary>, SessionError> {
-        Err(SessionError::Sdk {
-            context: "SSM instance discovery not implemented (B4)".into(),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl RemoteFileReader for UnimplementedSsmTail {
-    async fn read_file(
-        &self,
-        _cred: &Credential,
-        _instance_id: &str,
-        _region: &str,
-        _path: &str,
-    ) -> Result<RawSecret, SessionError> {
-        Err(SessionError::Sdk {
-            context: "SSM file read not implemented (B4)".into(),
-        })
-    }
 }
 
 /// Map a `Discovery` `Step` to the UI Event the worker relays. `Ask` carries the
@@ -294,6 +258,16 @@ fn discovery_event(step: Step) -> Event {
         ),
         Step::Failed(reason) => Event::DiscoveryFailed(reason.describe().to_string()),
         Step::Reauth => Event::DiscoveryReauthRequired,
+    }
+}
+
+/// Drain and surface any Provider advisories (ADR 0025): each to the Diagnostic
+/// Log (the worker's own `tracing::warn`) and to the Discovery wizard
+/// (`Event::Warning`). A no-op for Providers that produce none (AWS/mock).
+async fn surface_advisories<F: Fn(Event)>(provider: &mut dyn Provider, on_event: &F) {
+    for w in provider.take_advisories().await {
+        tracing::warn!(target: "janitor::gui", "{w}");
+        on_event(Event::Warning(w));
     }
 }
 
@@ -386,6 +360,11 @@ async fn run_loop(
                 }
             }
         }
+        // After any command that touched the Provider, surface any advisories it
+        // accumulated (e.g. an SSM session-logging warning raised at the credential
+        // mint during a walk, or before a load). After the step Event, so the
+        // wizard renders the question first and the warning sits alongside it.
+        surface_advisories(provider, on_event).await;
     }
 }
 
@@ -698,6 +677,7 @@ mod tests {
             CredSpec, FakeAccountCatalog, FakeClock, FakeReauth, FakeRoleClient,
         };
         use janitor_aws_auth::wire::{AccountSummary, RawSecret, RoleSummary};
+        use janitor_ssm::logging::fakes::FakeLoggingPreference;
         use janitor_ssm::wire::fakes::{FakeInstanceCatalog, FakeRemoteFileReader};
         use janitor_ssm::wire::InstanceSummary;
         use std::time::Duration;
@@ -737,6 +717,8 @@ mod tests {
                 dotenv("A=1\nB=x"),
                 dotenv("A=1"),
             ])),
+            // No org session logging in the offline test → no advisory.
+            Arc::new(FakeLoggingPreference::off()),
             Arc::new(FakeClock::at(0)),
         )
     }

@@ -37,6 +37,14 @@ _Avoid_: backend, source, adapter (use Provider; "source" is the retired sync se
 A remote machine (an EC2 instance registered with AWS Systems Manager) whose filesystem holds a `.env` file that Janitor treats as a Secret Set. For the remote-`.env` Provider, the Instance plus a file path is *where the Set lives* — the Discovery pick (after account → role) that precedes choosing the `.env` path, and the SSM equivalent of choosing a Secrets Manager secret.
 _Avoid_: host, server, box (use Instance; it is specifically an SSM-managed instance)
 
+**Data channel**:
+The SSM Session Manager WebSocket the remote-`.env` Provider reads a file over: `StartSession` returns a `StreamUrl`/`TokenValue`, Janitor opens that `wss` socket and speaks the Session Manager agent-message protocol in pure Rust (no `session-manager-plugin` binary) to stream a one-shot `cat`. The framing + protocol are tested logic; only the socket is the untested shell.
+_Avoid_: tunnel, pipe, stream (use data channel; it is the named Session Manager concept)
+
+**Advisory**:
+A short, masked operator note the Provider surfaces about an unavoidable side effect of a read — currently that org-wide SSM **session logging** would archive the remote file to S3/CloudWatch (which Janitor detects but cannot disable). Shown in the Diagnostic Log and the Discovery wizard, never a Value. Crosses the Provider port via `take_advisories`.
+_Avoid_: warning, alert (use advisory; it is informational, not a failure)
+
 **Comparison Columns**:
 The chosen, ordered subset of an Application's Environments currently shown as columns in the matrix. A *view* selection over the Application's Environments — not the same as which Environments are configured. Taking a column "out of the comparison" hides that Environment from the view; it stays configured and can be brought back. Persisted in Config (locations only — Environment identifiers, never Values).
 _Avoid_: columns, visible envs (use Comparison Columns; reserve "Environment" for the configured thing, "Comparison Column" for the shown thing)

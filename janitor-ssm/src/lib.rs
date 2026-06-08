@@ -35,6 +35,12 @@ mod session;
 mod source;
 pub mod wire;
 
+pub mod logging;
+pub mod mgs;
+pub mod transport;
+
 pub use discovery::SsmDiscovery;
 pub use dotenv::{parse_dotenv, DotenvError};
+pub use logging::{LoggingPreference, LoggingState};
 pub use session::SsmProvider;
+pub use transport::{AwsInstanceCatalog, AwsLoggingPreference, SsmFileReader};

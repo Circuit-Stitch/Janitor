@@ -427,6 +427,10 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             set_manage_terminal("Session expired — sign in again.");
             set_status(ui, state, "error", "session expired — sign in again");
         }
+        // A masked operator advisory (ADR 0025): already written to the Diagnostic
+        // Log by the worker. Also surface it in the Discovery wizard if it is open
+        // (set_manage_status no-ops when the Manage window is closed). Never a Value.
+        Event::Warning(msg) => set_manage_status(&msg),
     }
 }
 
@@ -892,8 +896,13 @@ fn main() -> Result<(), slint::PlatformError> {
     // Provider `kind`. Mock loads the seeded demo Config (never persisted); real
     // loads the user's saved org.
     let mock = env::var("JANITOR_MOCK").is_ok() || env::args().any(|a| a == "--mock");
+    // `--ssm`/`JANITOR_SSM` selects the remote-`.env`-over-SSM Provider (ADR 0025)
+    // against the saved org, instead of the default Secrets Manager Provider.
+    let ssm = env::var("JANITOR_SSM").is_ok() || env::args().any(|a| a == "--ssm");
     let kind = if mock {
         ProviderKind::Mock
+    } else if ssm {
+        ProviderKind::SsmDotenv
     } else {
         ProviderKind::Aws
     };
