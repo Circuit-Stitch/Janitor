@@ -243,6 +243,16 @@ impl SessionState {
                 // content); their presence is treated as a failed read.
                 self.error.get_or_insert(MgsError::CommandFailed);
             }
+            payload_type::ENC_CHALLENGE_REQUEST => {
+                // An encryption challenge means the session is KMS-encrypted — a
+                // manifestation distinct from the handshake `KMSEncryption` action
+                // (ADR 0025). It must go terminal here and never fall into the
+                // ack-and-ignore catch-all below: otherwise the OUTPUT frames that
+                // follow are ciphertext we would accumulate as the `.env`. We never
+                // answer the challenge (no ENC_CHALLENGE_RESPONSE, no data key) — its
+                // arrival alone fails the read masked.
+                self.error.get_or_insert(MgsError::KmsEncryptionUnsupported);
+            }
             // HANDSHAKE_COMPLETE and anything else: just the ack.
             _ => {}
         }
@@ -611,6 +621,14 @@ impl WriteSession {
             payload_type::OUTPUT => {
                 self.stdout.insert(msg.sequence_number, msg.payload.clone());
             }
+            payload_type::ENC_CHALLENGE_REQUEST => {
+                // Same KMS guard as the read path (ADR 0025): an encryption challenge
+                // is a manifestation of a KMS-encrypted session distinct from the
+                // handshake `KMSEncryption` action. Go terminal so the content is
+                // never streamed — the FLAG_FIN frames are gated on `error.is_none()`
+                // at HANDSHAKE_COMPLETE — and never answer the challenge.
+                self.error.get_or_insert(MgsError::KmsEncryptionUnsupported);
+            }
             // STDERR/ERROR fold into the pty's output stream for an interactive
             // session; they are not a distinct failure here. EXIT_CODE (if any) is
             // not the completion signal — the status token + channel_closed are.
@@ -826,6 +844,29 @@ mod tests {
             .unwrap();
         assert_eq!(kms["ActionStatus"], ACTION_UNSUPPORTED);
         assert!(s.done());
+        assert_eq!(s.finish().unwrap_err(), MgsError::KmsEncryptionUnsupported);
+    }
+
+    #[test]
+    fn enc_challenge_request_fails_the_read_masked_without_a_handshake_action() {
+        // The *other* way a KMS-encrypted session manifests: a bare
+        // ENC_CHALLENGE_REQUEST frame, with no `KMSEncryption` handshake action to
+        // catch it first. It must still go terminal — never fall into the
+        // ack-and-ignore catch-all and let the following (ciphertext) OUTPUT frames be
+        // accumulated and returned as the `.env`.
+        let mut s = SessionState::new();
+        // A normal handshake (no KMS action) — the read would otherwise proceed.
+        s.on_message(&handshake_request(&["SessionType"]));
+        assert!(!s.done(), "a plain handshake is not terminal");
+        // The encryption challenge arrives. We ack it but never answer it (no
+        // ENC_CHALLENGE_RESPONSE goes out), and the session is now terminal.
+        let out = s.on_message(&out_msg(payload_type::ENC_CHALLENGE_REQUEST, 1, b"chal"));
+        assert_eq!(out.len(), 1, "the challenge is acked, not answered");
+        assert_eq!(out[0].message_type, message_type::ACKNOWLEDGE);
+        assert!(s.done(), "an encryption challenge is terminal");
+        // A late (ciphertext) OUTPUT frame must not be returned as the file — finish()
+        // short-circuits on the error before reading any accumulated output.
+        s.on_message(&out_msg(payload_type::OUTPUT, 2, b"ciphertext"));
         assert_eq!(s.finish().unwrap_err(), MgsError::KmsEncryptionUnsupported);
     }
 
@@ -1144,6 +1185,26 @@ mod tests {
         assert!(
             after.iter().all(|o| o.payload_type != payload_type::OUTPUT),
             "no content frames after a failed handshake"
+        );
+        assert_eq!(s.finish().unwrap_err(), MgsError::KmsEncryptionUnsupported);
+    }
+
+    #[test]
+    fn write_session_enc_challenge_request_fails_and_never_streams() {
+        // The bare-challenge manifestation on the write path: it must go terminal and
+        // never stream the to-be-written content, exactly like the handshake-action
+        // case — even if a HANDSHAKE_COMPLETE follows.
+        let mut s = WriteSession::with_chunk_size(b"ABCD".to_vec(), 2);
+        s.on_message(&handshake_request(&["SessionType"])); // plain handshake, not KMS
+        assert!(!s.done(), "a plain handshake is not terminal");
+        let out = s.on_message(&out_msg(payload_type::ENC_CHALLENGE_REQUEST, 1, b"chal"));
+        assert_eq!(out.len(), 1, "the challenge is acked, not answered");
+        assert!(s.done(), "an encryption challenge is terminal");
+        // handshake_complete must not stream the content once errored.
+        let after = s.on_message(&out_msg(payload_type::HANDSHAKE_COMPLETE, 2, b""));
+        assert!(
+            after.iter().all(|o| o.payload_type != payload_type::OUTPUT),
+            "no content frames after an encryption challenge"
         );
         assert_eq!(s.finish().unwrap_err(), MgsError::KmsEncryptionUnsupported);
     }

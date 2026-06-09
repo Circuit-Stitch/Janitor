@@ -181,14 +181,34 @@ ADR's Decision says to "commit by amending this ADR."
   warning") is unit-tested. The advisory surfaces through a new, provider-agnostic
   `Provider::take_advisories` port method (default empty) to **both** the Diagnostic
   Log and the Discovery wizard; it is raised at the credential mint (while the wizard
-  is still open) and once per load.
+  is still open) and once per load. **Known limitation (v1, accepted):** the per-load
+  probe runs only against `app.environments.first()` and yields no advisory if *that*
+  Environment's credential mint fails — so a logging-on org could show no warning if
+  the first Environment's role is un-entitled. Safe today because any Environment
+  fetch failure is already a whole-app error (no partial matrix), so the
+  suppressed-advisory case also fails the load and the user never reads silently. When
+  **#33 / ADR 0026** extracts the shared Discovery orchestrator, move the probe to
+  whichever Environment successfully mints (or once per distinct account+region)
+  rather than unconditionally the first.
 
-- **KMS-encrypted sessions are unsupported (v1).** If the org enables session-data
-  KMS encryption, the data channel's handshake requests `KMSEncryption`; the pure
-  transport does not implement the KMS data-key exchange, so it responds `Unsupported`
-  and the read fails fast and **masked** (`SessionError::Unsupported`) rather than
-  hanging. The `GetDocument` probe's `kmsKeyId` flag detects this. Implementing KMS
-  is a noted future enhancement.
+- **Session-channel encryption (KMS) is unsupported (v1) — and the masked-fail is
+  enforced for *both* ways it can manifest.** If the org enables session-data KMS
+  encryption (`inputs.kmsKeyId` in `SSM-SessionManagerRunShell`; see CONTEXT.md
+  *Session-channel encryption* vs *Secret encryption at rest*), the read must fail
+  fast and **masked** (`SessionError::Unsupported`) — never hang, never return
+  ciphertext-as-`.env`. There are two on-wire manifestations and the transport must be
+  terminal on each: **(1)** the `handshake_request` carries a `KMSEncryption`
+  `RequestedClientAction`, caught in `build_handshake_response` (responds
+  `ACTION_UNSUPPORTED`, records `KmsEncryptionUnsupported`); and **(2)** a bare
+  `ENC_CHALLENGE_REQUEST` frame (payload type 8) — which **must be routed to the same
+  terminal `KmsEncryptionUnsupported` error rather than the `on_output`
+  ack-and-ignore `_ => {}` catch-all**, so the guarantee does not depend on the agent
+  always announcing KMS in the handshake *before* any challenge frame. The
+  `GetDocument` probe's `kmsKeyId` flag *detects* the condition but (v1) does **not**
+  pre-flight-refuse: the handshake/challenge arms are the authoritative,
+  probe-independent line of defense (a denied or unreachable `GetDocument` must not
+  weaken the guarantee). A pre-flight refusal on `kmsKeyId` (an earlier, actionable
+  message) is a noted future enhancement, as is implementing KMS itself.
 
 ### Live verification (2026-06-07 — Milestone B, done)
 
@@ -226,12 +246,39 @@ Checklist resolution:
 - [x] completion signal resolved (clean `channel_closed`, no `EXIT_CODE` — item 4
       above). A non-zero `cat`/command still maps to masked `NotFound`; a bad-path
       run is the one remaining easy manual check.
-- [~] `ssm:GetDocument` on `SSM-SessionManagerRunShell` — the test role lacked the
-      permission, so the **always-on fallback advisory fired** (the intended
-      degraded behaviour); the on/off toggle still wants a role that *has* the
-      permission against an org with logging configured.
-- [ ] a KMS-encrypted org fails masked (`Unsupported`) — untested (org has no
-      session KMS); the handshake path is unit-tested.
+- [~] `ssm:GetDocument` on `SSM-SessionManagerRunShell` — the B4 test role lacked the
+      permission, so the **always-on fallback advisory fired** (the intended degraded
+      behaviour). **Plan to close (2026-06-08 grill, no prod mutation):** grant the
+      verify role *read-only* `ssm:GetDocument`, run `live-verify-ssm` against
+      prod-as-is pointed at a **throwaway** file (not a real `.env` — if prod logs
+      sessions, a real read would archive the secret, the exact harm the advisory
+      warns of). This proves `GetDocument` *succeeds* (killing the fail-open risk that
+      the real `Content` envelope mis-parses to all-false and silences a logging-on
+      org) and verifies whichever direction prod's *current* logging state exercises
+      (on → named-destination advisory, or off → none, textually distinct from the
+      fallback). Capture the real (sanitized) document body as a `parse_logging`
+      fixture and derive the *opposite*-direction fixture by editing it, unit-testing
+      both. The on/off **toggle** (editing `s3BucketName` account-wide) stays deferred
+      — same prod blast-radius reason as KMS.
+- [deferred] a KMS-encrypted org fails masked (`Unsupported`) — **live run deferred**
+      (see *Amendment 2026-06-07* below). The handshake-action path is unit-tested;
+      the `ENC_CHALLENGE_REQUEST` terminal arm is a pending code change + unit test.
+
+**Amendment (2026-06-07, grill): the live KMS run is deferred, not blocking.** The
+only available org carries production workloads, and session-channel KMS is configured
+**account-wide** in `SSM-SessionManagerRunShell` — enabling it would encrypt (and, for
+any SSM client lacking `kms:Decrypt`, break) *every* session in the account, not just
+Janitor's read. The masked-failure guarantee is a *protocol* property, fully
+exercisable in unit tests: the handshake `KMSEncryption` action and the bare
+`ENC_CHALLENGE_REQUEST` frame are the only two on-wire manifestations, and each is
+covered by a terminal-error unit test. We close this item by (a) proving the protocol
+property in tests and (b) confirming against the `amazon-ssm-agent` source that those
+are the only two manifestations, and **explicitly defer** the live run (tracked, not
+lost) until a throwaway account is available. The one code change this requires —
+routing `ENC_CHALLENGE_REQUEST` to the terminal `KmsEncryptionUnsupported` error
+instead of the `on_output` catch-all — is pure protocol logic (no AWS) and is what
+makes the "fails masked, not hang" guarantee true for *both* manifestations rather
+than only the handshake path.
 
 The **write** path (read+modify+write a few Entries) is designed in **ADR 0028**
 (write semantics + the command-channel-vs-SFTP foundation) and **ADR 0029** (the

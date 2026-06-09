@@ -41,6 +41,14 @@ _Avoid_: host, server, box (use Instance; it is specifically an SSM-managed inst
 The SSM Session Manager WebSocket the remote-`.env` Provider reads a file over: `StartSession` returns a `StreamUrl`/`TokenValue`, Janitor opens that `wss` socket and speaks the Session Manager agent-message protocol in pure Rust (no `session-manager-plugin` binary) to stream a one-shot `cat`. The framing + protocol are tested logic; only the socket is the untested shell.
 _Avoid_: tunnel, pipe, stream (use data channel; it is the named Session Manager concept)
 
+**Secret encryption at rest**:
+The KMS encryption AWS applies to a Secret Set stored in Secrets Manager. AWS decrypts it server-side on `GetSecretValue` (under the Credential's `kms:Decrypt`) and returns plaintext — Janitor never sees ciphertext and does no crypto itself. Transparent and always supported. Distinct from **Session-channel encryption**.
+_Avoid_: bare "KMS" (it collides with Session-channel encryption — always say which).
+
+**Session-channel encryption**:
+KMS encryption of the SSM **Data channel** itself, where every frame on the `wss` socket is wrapped with a per-session KMS data key negotiated during the agent handshake. Reading such a session would require Janitor's pure-Rust transport to perform the data-key exchange and per-frame crypto itself — which it deliberately does not. A read against a session-channel-encrypted org is therefore **Unsupported (v1)** and fails masked rather than hanging. Distinct from **Secret encryption at rest** (which AWS handles transparently).
+_Avoid_: bare "KMS"; "encrypted session" as a noun (say Session-channel encryption — the Set's own encryption is "at rest").
+
 **Advisory**:
 A short, masked operator note the Provider surfaces about an unavoidable side effect of a read — currently that org-wide SSM **session logging** would archive the remote file to S3/CloudWatch (which Janitor detects but cannot disable). Shown in the Diagnostic Log and the Discovery wizard, never a Value. Crosses the Provider port via `take_advisories`.
 _Avoid_: warning, alert (use advisory; it is informational, not a failure)
