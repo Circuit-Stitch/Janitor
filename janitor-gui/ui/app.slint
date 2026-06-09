@@ -134,6 +134,31 @@ export component MainWindow inherits Window {
     // the body ScrollView's `viewport-y`. Sticky group headers (#42) read it to pin
     // the active cluster's header; `in-out` so a view test can drive it directly.
     in-out property <length> scroll-y: 0px;
+    // The env region's current horizontal scroll offset (px scrolled right from
+    // the leftmost column; `env-body.viewport-x` is its negation). Mirrored out
+    // from the body Flickable's `viewport-x` so a view test can observe a
+    // scrollbar drag (issue #60); the header band follows the SAME `viewport-x`
+    // via its existing mirror, so the freeze-pane stays aligned.
+    in-out property <length> scroll-x: 0px;
+
+    // Horizontal env-scrollbar geometry (issue #60), backed by the pure,
+    // unit-tested `scrollbar::*` in Rust (set via `ui.on_sb_*`). The env-body
+    // Flickable is non-interactive (so cell press-and-hold reveal + right-click
+    // work), which dropped ADR 0023 drag-scroll; the bar restores reaching the
+    // off-screen Comparison Columns without re-enabling the Flickable or adding
+    // wheel handling. `sb-visible`: shown only when the columns overflow the
+    // visible band (the env-floor regime). `sb-thumb-len`/`sb-thumb-offset`: the
+    // thumb's pixel length / left offset. `sb-scroll-from-thumb`: the drag
+    // inverse — a dragged thumb position back to a scroll distance.
+    pure callback sb-visible(length, length) -> bool;
+    pure callback sb-max-scroll(length, length) -> length;
+    pure callback sb-thumb-len(length, length, length, length) -> length;
+    pure callback sb-thumb-offset(length, length, length, length) -> length;
+    pure callback sb-scroll-from-thumb(length, length, length, length) -> length;
+    // Scrollbar chrome metrics: the track/thumb thickness and the minimum thumb
+    // length (so a many-column matrix still has a grabbable thumb).
+    property <length> scrollbar-h: 12px;
+    property <length> scrollbar-min-thumb: 32px;
 
     // --- Chrome (issue #23): non-secret context strings pushed from Rust. No
     // Values ever — identity strings, the Application name/breadcrumb, the Secret
@@ -685,6 +710,12 @@ export component MainWindow inherits Window {
                             horizontal-stretch: 1;
                             viewport-width: matrix.envs-w;
                             viewport-height: self.height;
+                            // Mirror the live horizontal offset out to `scroll-x`
+                            // (px scrolled right; viewport-x is ≤ 0) so a view test
+                            // can observe a scrollbar drag / shift-wheel. The
+                            // scrollbar writes `viewport-x` directly; the header
+                            // band reads the same value, so the freeze-pane holds.
+                            changed viewport-x => { root.scroll-x = -self.viewport-x; }
                             VerticalLayout {
                                 for item[i] in items : Rectangle {
                                     height: item.is-header ? root.header-h : root.row-h;
@@ -861,6 +892,115 @@ export component MainWindow inherits Window {
                             Rectangle {
                                 y: parent.height - 1px; height: 1px;
                                 background: root.grid;
+                            }
+                        }
+                    }
+                }
+
+                // Always-visible horizontal scrollbar for the env region (issue
+                // #60). Shown only when the Comparison Columns overflow the visible
+                // band (the ADR 0023 env-floor regime); it drives env-body's
+                // viewport-x and the header band follows via the existing mirror.
+                // It does NOT re-enable the interactive Flickable (that breaks
+                // press-hold / right-click) and adds no wheel handling (shift+wheel
+                // already scrolls sideways). The track's TouchArea is a SIBLING of
+                // the non-interactive env-body, so it owns its own pointer grab and
+                // the drag works; all thumb math is the pure `scrollbar::*` (ADR 0003).
+                //
+                // The row is ALWAYS present (and collapses to zero HEIGHT when the
+                // columns fit) rather than guarded by an `if` on the overflow: an
+                // `if` keyed on `envs-w`/`available` would make the row's PRESENCE —
+                // and thus `matrix.layoutinfo-h` — depend on `envs-w`, closing the
+                // ADR 0023 binding loop (envs-w → layoutinfo-h → root.width →
+                // available → col-w → envs-w). Visibility lives on the vertical axis
+                // (height), which never feeds back into the env width.
+                HorizontalLayout {
+                    vertical-stretch: 0;
+                    // Spacer under the frozen ENTRY+STATE columns so the track lines
+                    // up with the env region (same left origin as the header band).
+                    Rectangle {
+                        min-width: root.state-w + root.entry-w;
+                        max-width: root.state-w + root.entry-w;
+                    }
+                    sb-track := Rectangle {
+                        horizontal-stretch: 1;
+                        // Collapse to zero height when the columns fit (so the bar is
+                        // shown only on overflow) — a vertical-axis toggle, loop-safe.
+                        height: root.sb-visible(matrix.envs-w, matrix.available) ? root.scrollbar-h : 0px;
+                        background: root.dark ? #1b1f26 : #e0e3e8;
+                        border-radius: root.scrollbar-h / 2;
+                        accessible-role: text;
+                        accessible-label: "env-scrollbar-track";
+                        // The thumb's width/x derive from `envs-w`; `clip: true`
+                        // makes this Rectangle take its own (stretch) size and stops
+                        // that geometry bubbling up into the matrix's layout-info →
+                        // root.width → available → col-w → envs-w binding loop — the
+                        // same shield the env-head clip wrapper provides (ADR 0023).
+                        clip: true;
+                        // The track spans exactly the visible env band, so its width
+                        // and the viewport width are both `matrix.available` — a
+                        // window-derived, cycle-free value, never read from inside the
+                        // matrix subtree (the ADR 0023 binding-loop rule).
+                        property <length> track-w: matrix.available;
+                        property <length> content-w: matrix.envs-w;
+                        property <length> max-scroll: root.sb-max-scroll(self.content-w, self.track-w);
+                        property <length> thumb-len:
+                            root.sb-thumb-len(self.track-w, self.track-w, self.content-w, root.scrollbar-min-thumb);
+
+                        sb-thumb := Rectangle {
+                            accessible-role: text;
+                            accessible-label: "env-scrollbar-thumb";
+                            // Left offset derived from the live scroll offset
+                            // (−viewport-x); the thumb follows shift-wheel and drag
+                            // alike because both move viewport-x.
+                            x: root.sb-thumb-offset(sb-track.track-w, sb-track.thumb-len,
+                                -env-body.viewport-x, sb-track.max-scroll);
+                            width: sb-track.thumb-len;
+                            y: 0;
+                            height: 100%;
+                            border-radius: parent.height / 2;
+                            background: sb-touch.dragging ? #8a8f98
+                                : (sb-touch.has-hover ? #6b7280 : #4b5563);
+                        }
+                        // Drag sensor over the WHOLE track, anchored to the track's
+                        // fixed left edge (x: 0) so `mouse-x` is measured from a
+                        // stationary origin — the same anti-feedback trick the ENTRY
+                        // resize handle uses (a sensor pinned to the moving thumb would
+                        // read a position a frame ahead of its own geometry). A press
+                        // on the thumb drags from where it was grabbed (no jump); a
+                        // press on the bare track centres the thumb on the cursor then
+                        // drags. Each update writes env-body.viewport-x; the
+                        // `scroll-from-thumb` inverse clamps to the scroll range.
+                        sb-touch := TouchArea {
+                            x: 0;
+                            width: 100%;
+                            height: 100%;
+                            property <bool> dragging;
+                            property <length> grab-offset;
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.left
+                                    && e.kind == PointerEventKind.down) {
+                                    self.grab-offset =
+                                        (self.mouse-x >= sb-thumb.x
+                                            && self.mouse-x <= sb-thumb.x + sb-thumb.width)
+                                        ? self.mouse-x - sb-thumb.x
+                                        : sb-track.thumb-len / 2;
+                                    self.dragging = true;
+                                    env-body.viewport-x = -root.sb-scroll-from-thumb(
+                                        self.mouse-x - self.grab-offset,
+                                        sb-track.track-w, sb-track.thumb-len, sb-track.max-scroll);
+                                }
+                                if (e.kind == PointerEventKind.up
+                                    || e.kind == PointerEventKind.cancel) {
+                                    self.dragging = false;
+                                }
+                            }
+                            moved => {
+                                if (self.dragging) {
+                                    env-body.viewport-x = -root.sb-scroll-from-thumb(
+                                        self.mouse-x - self.grab-offset,
+                                        sb-track.track-w, sb-track.thumb-len, sb-track.max-scroll);
+                                }
                             }
                         }
                     }

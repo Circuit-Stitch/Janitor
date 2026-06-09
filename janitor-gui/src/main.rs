@@ -4,6 +4,7 @@ mod logpane;
 mod pane;
 mod reveal;
 mod rows;
+mod scrollbar;
 mod sidebar;
 #[cfg(test)]
 mod view_tests;
@@ -1024,6 +1025,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // whole row/column) lives in tested Rust, not an inline `.slint` predicate. Pure
     // + stateless, so no `state` capture.
     ui.on_is_cell_revealed(reveal::is_revealed);
+    // Horizontal env-scrollbar geometry (issue #60): the `.slint` binds the thumb's
+    // visibility / length / position and the drag inverse to these pure callbacks,
+    // whose handlers ARE the unit-tested `scrollbar::*` functions — so the thumb
+    // math (clamping, the min-thumb floor, the divide-by-zero degenerate cases)
+    // lives in tested Rust, not inline `.slint` expressions. Pure + stateless.
+    ui.on_sb_visible(scrollbar::is_scrollable);
+    ui.on_sb_max_scroll(scrollbar::max_scroll);
+    ui.on_sb_thumb_len(scrollbar::thumb_len);
+    ui.on_sb_thumb_offset(scrollbar::thumb_offset);
+    ui.on_sb_scroll_from_thumb(scrollbar::scroll_from_thumb);
     // Reveal → an on-demand round-trip to the Provider via dispatch.
     {
         let state = state.clone();
