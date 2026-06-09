@@ -69,8 +69,10 @@ Rejected alternatives:
   synced flickables and loses single-scroll row-lockstep / wheel-anywhere. The
   metric-locked strip is observationally identical for the user.
 - *A configurable / persisted per-column width here.* Out of scope; that is the
-  resizable-ENTRY work (issue #42), which resizes the *frozen* column and lets
-  these Comparison Columns reflow into whatever width remains.
+  resizable-ENTRY work (issue #42, now
+  [ADR 0030](0030-matrix-sticky-group-headers-and-resizable-entry-column.md)),
+  which resizes the *frozen* column and lets these Comparison Columns reflow into
+  whatever width remains.
 
 This stays inside [ADR 0003](0003-core-gui-split-slint-and-secret-display.md): a
 pure-view layout change in `app.slint` (`col_w` is a Slint layout expression), no

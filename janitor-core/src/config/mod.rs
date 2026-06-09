@@ -24,6 +24,12 @@ pub struct Config {
     /// default next run. A `Mapping` (its `environment` is `"live"` for guided
     /// picks). `None` until the first successful pick.
     pub last_pick: Option<Mapping>,
+    /// Persisted width (logical px) of the matrix ENTRY column (#42). View-state,
+    /// not a location and never a Value — structurally a number, so it is safe on
+    /// disk (THREAT-MODEL). `None` until the user first drags the resize handle;
+    /// the GUI then falls back to its layout default. Stored values are clamped to
+    /// the layout floor by [`Config::set_entry_column_width`].
+    pub entry_column_width: Option<f64>,
     /// Saved Applications, each tying a logical Entry set to a Set per Environment.
     pub applications: Vec<Application>,
 }
@@ -141,6 +147,26 @@ impl Config {
         }
     }
 
+    /// Resolve the persisted matrix ENTRY-column width (#42) in logical px,
+    /// clamped to the `min` floor: a stored width is returned as-is when at/above
+    /// the floor, clamped up to `min` if a stale or hand-edited value sits below
+    /// it, and `default` (itself floored to `min`) when nothing is stored yet. The
+    /// caller (the GUI) supplies the layout's floor/default so this stays ignorant
+    /// of view px (ADR 0003) — it only enforces the never-below-floor invariant.
+    pub fn entry_column_width_or(&self, min: f64, default: f64) -> f64 {
+        match self.entry_column_width {
+            Some(w) => w.max(min),
+            None => default.max(min),
+        }
+    }
+
+    /// Persist a resized matrix ENTRY-column width (#42), clamping to the `min`
+    /// floor so a stored width can never violate the layout floor (even if a
+    /// future caller passes a smaller value). View-state only — never a Value.
+    pub fn set_entry_column_width(&mut self, px: f64, min: f64) {
+        self.entry_column_width = Some(px.max(min));
+    }
+
     /// The default config file path: `<OS config dir>/config.toml`.
     ///
     /// The `(qualifier, organization, application)` triple below is a **stable
@@ -205,6 +231,7 @@ mod tests {
                 secret_id: "myapp/live".into(),
                 permission_set: "ReadOnly".into(),
             }),
+            entry_column_width: Some(280.0),
             applications: vec![Application {
                 name: "myapp".into(),
                 environments: vec![
@@ -363,7 +390,45 @@ mod tests {
         assert!(c.sso_start_url.is_empty());
         assert!(c.secret_region.is_empty());
         assert!(c.last_pick.is_none());
+        assert!(c.entry_column_width.is_none());
         assert!(c.applications.is_empty());
+    }
+
+    #[test]
+    fn entry_column_width_or_falls_back_to_default_when_unset() {
+        // Never resized → the GUI's layout default (floored to `min`).
+        let c = Config::default();
+        assert_eq!(c.entry_column_width_or(200.0, 300.0), 300.0);
+    }
+
+    #[test]
+    fn entry_column_width_or_returns_a_stored_value_at_or_above_the_floor() {
+        let c = Config {
+            entry_column_width: Some(420.0),
+            ..Config::default()
+        };
+        assert_eq!(c.entry_column_width_or(200.0, 300.0), 420.0);
+    }
+
+    #[test]
+    fn entry_column_width_or_clamps_a_below_floor_value_up_to_the_floor() {
+        // A stale or hand-edited config below the layout floor must never render a
+        // sub-floor column — the never-below-floor invariant holds on read too.
+        let c = Config {
+            entry_column_width: Some(120.0),
+            ..Config::default()
+        };
+        assert_eq!(c.entry_column_width_or(200.0, 300.0), 200.0);
+    }
+
+    #[test]
+    fn set_entry_column_width_stores_and_clamps_to_the_floor() {
+        let mut c = Config::default();
+        c.set_entry_column_width(360.0, 200.0);
+        assert_eq!(c.entry_column_width, Some(360.0));
+        // Below the floor → stored at the floor, never below it.
+        c.set_entry_column_width(50.0, 200.0);
+        assert_eq!(c.entry_column_width, Some(200.0));
     }
 
     #[test]
@@ -401,6 +466,10 @@ applications = []
         assert_eq!(c.sso_start_url, "https://old.awsapps.com/start");
         assert_eq!(c.secret_region, "", "missing secret_region → default empty");
         assert!(c.last_pick.is_none(), "missing last_pick → default None");
+        assert!(
+            c.entry_column_width.is_none(),
+            "missing entry_column_width → default None (GUI falls back to its layout default)"
+        );
     }
 
     #[test]

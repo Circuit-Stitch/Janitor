@@ -22,6 +22,13 @@ export struct MatrixItemView {
     state: string,        // data row: "Aligned"/"Drift"/"Gap"
     glyph: string,        // data row: order-independent =/≠/∅
     zebra: bool,          // data row: shaded stripe (resets per group)
+    // Sticky group headers (#42): how many headers / data rows precede this item
+    // in display order (`rows::item_offsets`). A header's pixel top is
+    // `headers-before · header-h + rows-before · row-h`, so the pinned overlay can
+    // locate each cluster's scroll span without re-summing heights. Unused on data
+    // rows (the overlay pins headers only).
+    headers-before: int,
+    rows-before: int,
     cells: [CellView],
 }
 
@@ -109,6 +116,13 @@ export component MainWindow inherits Window {
     callback set-theme(bool);
     callback set-sort(int);
     callback set-grouped(bool);
+    // Persist a resized ENTRY column width (#42) — fired on drag release, routed to
+    // Config::set_entry_column_width (view-state, never a Value).
+    callback commit-entry-width(length);
+    // The matrix body's current vertical scroll offset (px from the top), driven by
+    // the body ScrollView's `viewport-y`. Sticky group headers (#42) read it to pin
+    // the active cluster's header; `in-out` so a view test can drive it directly.
+    in-out property <length> scroll-y: 0px;
 
     // --- Chrome (issue #23): non-secret context strings pushed from Rust. No
     // Values ever — identity strings, the Application name/breadcrumb, the Secret
@@ -145,7 +159,14 @@ export component MainWindow inherits Window {
     // State no longer adds a second line — it lives in the STATE glyph column.
     property <length> row-h: root.name-fs + 2 * root.row-pad;
     property <length> header-h: root.sub-fs + 2 * root.row-pad;
-    property <length> entry-w: 300px;
+    // ENTRY column width (#42). `in-out` so Rust seeds the persisted width on
+    // launch and the drag handle updates it live; `commit-entry-width` persists it
+    // on release. `entry-min` is the resize floor — the column never shrinks below
+    // it, and the persisted value is clamped to it (Config::set_entry_column_width).
+    in-out property <length> entry-w: 300px;
+    property <length> entry-min: 200px;
+    // Width of the right-edge grab zone where the resize drag arms (#42).
+    property <length> entry-handle-zone: 12px;
     property <length> state-w: 46px;
     // Comparison Column content floor (ADR 0023): wide enough for a cell's
     // `dot · mask · length · hex`. Columns stretch above this to fill the env
@@ -384,11 +405,74 @@ export component MainWindow inherits Window {
                         horizontal-alignment: center; vertical-alignment: center;
                         accessible-label: "statehdr";
                     }
-                    Text {
-                        text: "ENTRY"; color: #8a8f98; font-size: 11px;
+                    // ENTRY header — fixed to the (resizable) column width, with a
+                    // drag handle on its right edge (#42). Dragging resizes `entry-w`
+                    // (floored at `entry-min`); the env columns reflow because
+                    // `matrix.available` derives from `entry-w`.
+                    Rectangle {
                         min-width: root.entry-w; max-width: root.entry-w;
-                        vertical-alignment: center;
+                        accessible-role: text;
                         accessible-label: "entryhdr";
+                        Text {
+                            text: "ENTRY"; color: #8a8f98; font-size: 11px;
+                            width: 100%; height: 100%;
+                            vertical-alignment: center;
+                        }
+                        // A thin grip line at the right edge — the visual affordance,
+                        // brighter when hovered/dragged near it.
+                        Rectangle {
+                            accessible-role: text;
+                            accessible-label: "entry-resize-handle";
+                            x: parent.width - 6px;
+                            width: 2px;
+                            height: parent.height * 60%;
+                            y: (parent.height - self.height) / 2;
+                            background: entry-resize.resizing
+                                || (entry-resize.has-hover
+                                    && entry-resize.mouse-x >= parent.width - root.entry-handle-zone)
+                                ? #8a8f98 : #3a3f48;
+                        }
+                        // Drag sensor, LEFT-anchored to the ENTRY column's fixed left
+                        // edge (`x: 0`). Because that origin never moves when `entry-w`
+                        // changes, `mouse-x` is the pointer's distance from the fixed
+                        // left edge — independent of the column width — so the resizing
+                        // column can't feed back into the measurement. (A handle pinned
+                        // to the *moving* right edge instead would jitter/overshoot
+                        // under continuous motion: each `moved` would read an `entry-w`
+                        // a frame ahead of the handle geometry `mouse-x` is measured
+                        // against.) The new width is the pointer position plus the grab
+                        // offset captured at press (so the edge tracks the cursor with
+                        // no jump), floored at `entry-min`. Only arms when the press
+                        // lands in the right-edge handle zone; release persists.
+                        entry-resize := TouchArea {
+                            x: 0;
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: self.mouse-x >= parent.width - root.entry-handle-zone
+                                ? MouseCursor.ew-resize : MouseCursor.default;
+                            property <bool> resizing;
+                            property <length> grab-offset;
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.left
+                                    && e.kind == PointerEventKind.down
+                                    && self.mouse-x >= parent.width - root.entry-handle-zone) {
+                                    self.resizing = true;
+                                    self.grab-offset = root.entry-w - self.mouse-x;
+                                }
+                                if (e.kind == PointerEventKind.up
+                                    || e.kind == PointerEventKind.cancel) {
+                                    if (self.resizing) {
+                                        self.resizing = false;
+                                        root.commit-entry-width(root.entry-w);
+                                    }
+                                }
+                            }
+                            moved => {
+                                if (self.resizing) {
+                                    root.entry-w = max(root.entry-min, self.mouse-x + self.grab-offset);
+                                }
+                            }
+                        }
                     }
                     // Clip wrapper (ADR 0023): decouples the env-head Flickable's
                     // max-width (= its viewport-width = col-w·N) from the header
@@ -429,12 +513,22 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Body: one vertical ScrollView holds both the frozen column and
-                // the horizontally-flickable env region, so they scroll vertically
-                // together; only the env region scrolls horizontally.
-                ScrollView {
+                // Body: a vertical ScrollView holds the frozen column + the
+                // horizontally-flickable env region (they scroll vertically
+                // together; only the env region scrolls horizontally). It is wrapped
+                // in a clipping container so the sticky group-header overlay (#42)
+                // can pin atop the scrolled content as a sibling drawn over it.
+                Rectangle {
                     vertical-stretch: 1;
-                    HorizontalLayout {
+                    clip: true;
+                    body-scroll := ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        // Mirror the live scroll offset out to `scroll-y` (px from
+                        // the top; viewport-y is ≤ 0 as you scroll down) so the
+                        // sticky overlay — outside the scrolled content — reads it.
+                        changed viewport-y => { root.scroll-y = -self.viewport-y; }
+                        HorizontalLayout {
                         // FROZEN: ENTRY (2-line) + STATE glyph, per item. Pinned to
                         // the exact frozen width (state-w + entry-w) so the body's
                         // env region starts at the SAME x as the header band's
@@ -708,6 +802,56 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    }
+                    // Sticky group headers (#42): while any row of a prefix cluster
+                    // occupies the top of the scroll area, that cluster's header pins
+                    // here, above the scrolled content. Each header self-selects when
+                    // `scroll-y` falls in its cluster's span
+                    // `[top, top + header-h + count·row-h)` — `top` derived from the
+                    // precomputed headers-before/rows-before counts (rows::item_offsets)
+                    // and the in-view heights (the ADR 0023 single source of truth).
+                    // Contiguous clusters hand off seamlessly (this `end` == the next
+                    // `top`); over a lone row (no cluster) nothing pins. As the next
+                    // header arrives the outgoing one slides up (negative y) while the
+                    // incoming in-flow header rises beneath it — the classic push.
+                    // Per-item container holds the conditional pinned header (Slint
+                    // can't put an `if` directly after `for :`, so it lives as a
+                    // child). The container fills the body and is transparent with no
+                    // TouchArea, so it never intercepts cell presses below.
+                    for item[i] in items : Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        if (item.is-header
+                            && root.scroll-y >= item.headers-before * root.header-h
+                                + item.rows-before * root.row-h
+                            && root.scroll-y < (item.headers-before + 1) * root.header-h
+                                + (item.rows-before + item.count) * root.row-h)
+                          : Rectangle {
+                            property <length> cluster-end:
+                                (item.headers-before + 1) * root.header-h
+                                + (item.rows-before + item.count) * root.row-h;
+                            accessible-role: text;
+                            accessible-label: "pinned-" + item.label;
+                            x: 0;
+                            y: min(0px, self.cluster-end - root.scroll-y - root.header-h);
+                            width: 100%;
+                            height: root.header-h;
+                            background: root.header-bg;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 10px;
+                                Text {
+                                    text: item.label + "   " + item.count;
+                                    color: #8a8f98; font-size: root.sub-fs;
+                                    font-weight: 700; vertical-alignment: center;
+                                }
+                            }
+                            // Grid baseline, matching the in-flow header row.
+                            Rectangle {
+                                y: parent.height - 1px; height: 1px;
+                                background: root.grid;
                             }
                         }
                     }
