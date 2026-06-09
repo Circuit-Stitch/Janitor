@@ -78,6 +78,12 @@ export component MainWindow inherits Window {
     in-out property <string> revealed-text;
 
     callback reveal-cell(int, int);
+    // The per-cell reveal gate (issue #47): backed by the exhaustively-tested pure
+    // `reveal::is_revealed` in Rust, so the security rule — un-mask EXACTLY the one
+    // targeted cell, never a whole row/column — is tested Rust, not an inline
+    // predicate here. A cell binds `is-revealed` to this; both coords must match the
+    // single revealed coordinate (`-1` sentinel when nothing is revealed).
+    pure callback is-cell-revealed(int, int, int, int) -> bool;
     // Release/cancel of a press-held reveal — clears the reveal guard and logs the
     // hide. The view also zeroes revealed-row/col/text inline so the hide is instant.
     callback hide-cell();
@@ -96,6 +102,11 @@ export component MainWindow inherits Window {
     // whether any Applications exist). One of "signin" | "signing" | "loading" |
     // "empty-apps" | "matrix" | "error".
     in property <string> pane: "signin";
+    // Pane-derived chrome (issue #47), computed in Rust (pane::MainPane) instead of
+    // duplicated `?:` ladders here: the top-bar title and the centered body copy
+    // shown on a non-matrix / non-empty pane (the latter folds in `status-message`).
+    in property <string> pane-title;
+    in property <string> body-copy;
     in property <string> status-message;        // banner text for "error"/"signing"
     callback sign-in();
     callback refresh();
@@ -278,11 +289,7 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                 }
                 Text {
-                    text: root.pane == "matrix" ? "Drift matrix"
-                        : root.pane == "empty-apps" ? "No Applications"
-                        : root.pane == "loading" ? "Loading…"
-                        : root.pane == "signing" ? "Signing in…"
-                        : "Not signed in";
+                    text: root.pane-title;
                     color: #c8ccd4;
                     horizontal-stretch: 1;
                     horizontal-alignment: right;
@@ -707,10 +714,12 @@ export component MainWindow inherits Window {
                                             // grab, so `pressed` is stuck false. So
                                             // revealed-row/col itself is the source of
                                             // truth (press-and-hold momentary reveal —
-                                            // THREAT-MODEL / ADR 0003).
+                                            // THREAT-MODEL / ADR 0003). The gate itself is
+                                            // the tested pure `reveal::is_revealed` (#47),
+                                            // reached via the `is-cell-revealed` callback so
+                                            // the un-mask-exactly-one rule lives in Rust.
                                             property <bool> is-revealed:
-                                                root.revealed-row == item.row-index
-                                                && root.revealed-col == j;
+                                                root.is-cell-revealed(root.revealed-row, root.revealed-col, item.row-index, j);
                                             // Right-click actions (native menu). Copy is
                                             // the only live one in read-only v1 (ADR 0004);
                                             // Edit / View history are disabled placeholders
@@ -871,11 +880,7 @@ export component MainWindow inherits Window {
             if root.pane != "matrix" && root.pane != "empty-apps" : Rectangle {
                 vertical-stretch: 1;
                 Text {
-                    text: root.pane == "signin" ? "Sign in to load this Application's secrets."
-                        : root.pane == "signing" ? "A browser tab has opened — complete sign-in there."
-                        : root.pane == "loading" ? "Fetching secrets…"
-                        : root.status-message != "" ? "Could not load — " + root.status-message
-                        : "Could not load. See the message above, then Sign in to retry.";
+                    text: root.body-copy;
                     color: #6b7280;
                     horizontal-alignment: center;
                     vertical-alignment: center;
