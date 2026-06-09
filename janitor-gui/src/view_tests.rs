@@ -641,3 +641,433 @@ fn main_header_carries_arn_subtitle_and_snapshot_anchor() {
     one_by_label(&ui, "header-arn");
     one_by_label(&ui, "header-snapshot");
 }
+
+// --- Issue #42: sticky group headers + a resizable, persisted ENTRY column. ---
+
+// MUST match `entry-min` and `entry-w`'s default in app.slint (the resize floor /
+// default), the way ENV_FLOOR mirrors `env-floor`.
+const ENTRY_MIN: f32 = 200.0;
+const ENTRY_DEFAULT: f32 = 300.0;
+// MUST match `header-h` / `row-h` in app.slint (font-size + 2·row-pad): the row
+// kinds the sticky-header offset math sums. header-h = 11 + 2·8; row-h = 14 + 2·8.
+const HEADER_H: f32 = 27.0;
+const ROW_H: f32 = 30.0;
+
+fn label_count(ui: &MainWindow, label: &str) -> usize {
+    ElementHandle::find_by_accessible_label(ui, label).count()
+}
+
+#[test]
+fn entry_column_drag_handle_resizes_and_clamps_to_the_floor_and_persists_on_release() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    // A wide window so there is room to drag the ENTRY column wider without the
+    // env columns hitting their floor (the drag is about the frozen column).
+    let ui = matrix_window();
+    let window = ui.window();
+
+    // Capture the persisted width on release (the real app routes this to
+    // Config::set_entry_column_width).
+    let committed = Rc::new(std::cell::RefCell::new(None::<f32>));
+    {
+        let committed = committed.clone();
+        ui.on_commit_entry_width(move |w| *committed.borrow_mut() = Some(w));
+    }
+
+    let start = ui.get_entry_w();
+    assert!(
+        (start - ENTRY_DEFAULT).abs() <= 0.5,
+        "ENTRY column should start at its layout default {ENTRY_DEFAULT}, got {start}"
+    );
+
+    // Grab the handle (its grip carries the structural label).
+    let grip = cell_center(&ui, "entry-resize-handle");
+    window.dispatch_event(WindowEvent::PointerMoved { position: grip });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: grip,
+        button: PointerEventButton::Left,
+    });
+
+    // Drag RIGHT by 80px → the column widens by ~80 (the right edge tracks the
+    // cursor; no feedback drift from the handle moving with the column).
+    let right = slint::LogicalPosition::new(grip.x + 80.0, grip.y);
+    window.dispatch_event(WindowEvent::PointerMoved { position: right });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    let wider = ui.get_entry_w();
+    assert!(
+        (wider - (start + 80.0)).abs() <= 2.0,
+        "dragging the handle right by 80px should widen ENTRY to ~{} (got {wider})",
+        start + 80.0
+    );
+
+    // Drag far LEFT, past the floor → ENTRY clamps to the 200px floor, never below.
+    let far_left = slint::LogicalPosition::new(grip.x - 400.0, grip.y);
+    window.dispatch_event(WindowEvent::PointerMoved { position: far_left });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    let clamped = ui.get_entry_w();
+    assert!(
+        (clamped - ENTRY_MIN).abs() <= 0.5,
+        "ENTRY must not shrink below the {ENTRY_MIN}px floor (got {clamped})"
+    );
+
+    // Release → the final (clamped) width is persisted exactly once.
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: far_left,
+        button: PointerEventButton::Left,
+    });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    let persisted = committed.borrow().expect("release must persist the width");
+    assert!(
+        (persisted - ENTRY_MIN).abs() <= 0.5,
+        "release must persist the final clamped width {ENTRY_MIN} (got {persisted})"
+    );
+}
+
+#[test]
+fn resizing_entry_reflows_the_comparison_columns() {
+    i_slint_backend_testing::init_no_event_loop();
+    // AC3: a wider ENTRY column leaves less width for the env region, so the
+    // Comparison Columns re-stretch (shrink) into what remains. Both widths stay
+    // above the env floor here, so the change is genuine reflow, not floor-clamping.
+    let ui = matrix_window(); // 2 envs, 1400px wide, ENTRY default 300
+    let col_at_default = body_col_w(&ui);
+
+    ui.set_entry_w(ENTRY_DEFAULT + 200.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    let col_when_wide = body_col_w(&ui);
+
+    assert!(
+        col_when_wide < col_at_default - 50.0,
+        "widening ENTRY by 200px must reflow (shrink) the Comparison Columns: \
+         {col_when_wide} vs {col_at_default}"
+    );
+    assert!(
+        col_when_wide > ENV_FLOOR,
+        "both column widths should stay above the env floor so this is reflow, \
+         not floor-clamping (got {col_when_wide})"
+    );
+}
+
+/// A pinned-header window: a matrix in the matrix pane whose `items` carry the
+/// header/row offsets `rows::item_offsets` would compute. The cell text is a short
+/// structural fixture, never a Value.
+fn sticky_window(items: Vec<MatrixItemView>) -> MainWindow {
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_pane(SharedString::from("matrix"));
+    ui.set_environments(ModelRc::from(Rc::new(VecModel::from(vec![
+        SharedString::from("prod"),
+    ]))));
+    ui.set_items(ModelRc::from(Rc::new(VecModel::from(items))));
+    ui.window().set_size(LogicalSize::new(1000.0, 700.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    ui
+}
+
+fn header_item(label: &str, count: i32, headers_before: i32, rows_before: i32) -> MatrixItemView {
+    MatrixItemView {
+        is_header: true,
+        label: SharedString::from(label),
+        count,
+        headers_before,
+        rows_before,
+        ..Default::default()
+    }
+}
+
+fn row_item(headers_before: i32, rows_before: i32) -> MatrixItemView {
+    let cells = vec![CellView {
+        absent: false,
+        dots: SharedString::from("··"),
+        length: SharedString::from("2"),
+        hex: SharedString::from("ab"),
+    }];
+    MatrixItemView {
+        is_header: false,
+        row_index: rows_before,
+        state: SharedString::from("Aligned"),
+        glyph: SharedString::from("="),
+        headers_before,
+        rows_before,
+        cells: ModelRc::from(Rc::new(VecModel::from(cells))),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn sticky_header_pins_the_cluster_owning_the_scroll_top_and_hands_off() {
+    i_slint_backend_testing::init_no_event_loop();
+    // Two 2-member clusters (offsets as rows::item_offsets would emit them):
+    //   db.* span [0, 1·H + 2·R) = [0, 87); gh.* span [87, 2·H + 4·R) = [87, 174).
+    let ui = sticky_window(vec![
+        header_item("db.*", 2, 0, 0),
+        row_item(1, 0),
+        row_item(1, 1),
+        header_item("gh.*", 2, 1, 2),
+        row_item(2, 2),
+        row_item(2, 3),
+    ]);
+
+    // At the top, the first cluster's header is pinned; the next is not.
+    ui.set_scroll_y(0.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        label_count(&ui, "pinned-db.*"),
+        1,
+        "first cluster pins at the top"
+    );
+    assert_eq!(label_count(&ui, "pinned-gh.*"), 0);
+
+    // Scrolled within the first cluster's rows, it stays pinned.
+    ui.set_scroll_y(50.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        label_count(&ui, "pinned-db.*"),
+        1,
+        "the first cluster's header stays pinned while its rows occupy the top"
+    );
+    assert_eq!(label_count(&ui, "pinned-gh.*"), 0);
+
+    // Scrolled into the second cluster, its header takes the next one's place.
+    ui.set_scroll_y(100.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        label_count(&ui, "pinned-db.*"),
+        0,
+        "the next cluster's header replaces the previous when it reaches the top"
+    );
+    assert_eq!(label_count(&ui, "pinned-gh.*"), 1);
+}
+
+#[test]
+fn no_sticky_header_pins_over_a_lone_row_with_no_cluster() {
+    i_slint_backend_testing::init_no_event_loop();
+    // A lone row (no cluster) precedes the first cluster:
+    //   lone row span [0, 30); db.* span [1·R, 1·R + 1·H + 2·R) = [30, 117).
+    let ui = sticky_window(vec![
+        row_item(0, 0),
+        header_item("db.*", 2, 0, 1),
+        row_item(1, 1),
+        row_item(1, 2),
+    ]);
+
+    // Over the lone row at the top → nothing pins (it belongs to no cluster).
+    ui.set_scroll_y(10.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        label_count(&ui, "pinned-db.*"),
+        0,
+        "no group context to pin while a lone row occupies the top"
+    );
+
+    // Scrolled into the cluster → its header pins.
+    ui.set_scroll_y(50.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        label_count(&ui, "pinned-db.*"),
+        1,
+        "the cluster's header pins once its rows occupy the top"
+    );
+}
+
+// Heights referenced in the span arithmetic above, asserted so a future font /
+// padding change to header-h / row-h fails here loudly instead of silently
+// drifting the sticky-header spans.
+#[test]
+fn sticky_header_height_constants_match_the_view() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = sticky_window(vec![header_item("db.*", 1, 0, 0), row_item(1, 0)]);
+    // The frozen ENTRY cell fills the row, so its height is the data-row height.
+    let row_h = one_by_label(&ui, "entry-cell").size().height;
+    assert!(
+        (row_h - ROW_H).abs() <= 1.0,
+        "row-h drifted from the {ROW_H}px the sticky-header spans assume (got {row_h})"
+    );
+    // At the top the first cluster pins; the overlay's height is header-h.
+    ui.set_scroll_y(0.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    let header_h = one_by_label(&ui, "pinned-db.*").size().height;
+    assert!(
+        (header_h - HEADER_H).abs() <= 1.0,
+        "header-h drifted from the {HEADER_H}px the sticky-header spans assume (got {header_h})"
+    );
+}
+
+#[test]
+fn entry_column_drag_tracks_the_cursor_under_continuous_motion() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    // Many small steps with NO layout settle between them — exactly the
+    // multiple-events-per-frame case where a drag anchored to the *moving* column
+    // edge would accumulate error and overshoot. The fixed-left-frame drag measures
+    // the pointer from the column's stationary left edge, so the column tracks the
+    // cursor exactly: +100px of motion → +100px of width, not more.
+    let ui = matrix_window();
+    let window = ui.window();
+    let start = ui.get_entry_w();
+    let grip = cell_center(&ui, "entry-resize-handle");
+
+    window.dispatch_event(WindowEvent::PointerMoved { position: grip });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: grip,
+        button: PointerEventButton::Left,
+    });
+    for k in 1..=20 {
+        let p = slint::LogicalPosition::new(grip.x + (k as f32) * 5.0, grip.y);
+        window.dispatch_event(WindowEvent::PointerMoved { position: p });
+    }
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+
+    let w = ui.get_entry_w();
+    assert!(
+        (w - (start + 100.0)).abs() <= 2.0,
+        "continuous drag of +100px should widen ENTRY to ~{} with no overshoot (got {w})",
+        start + 100.0
+    );
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: slint::LogicalPosition::new(grip.x + 100.0, grip.y),
+        button: PointerEventButton::Left,
+    });
+}
+
+#[test]
+fn cell_reveal_fires_through_the_sticky_header_overlay() {
+    i_slint_backend_testing::init_no_event_loop();
+    // Grouped data → the sticky overlay (full-body transparent per-item containers
+    // + one pinned header) is active. A press on a value cell must still reach its
+    // TouchArea: the overlay elements carry no TouchArea, so they must not swallow
+    // input bound for the cells below them.
+    let ui = sticky_window(vec![header_item("db.*", 1, 0, 0), row_item(1, 0)]);
+    ui.set_scroll_y(0.0); // pin the header → overlay rendered
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    // Sanity: the overlay really is present for this fixture.
+    assert_eq!(label_count(&ui, "pinned-db.*"), 1);
+
+    let pressed = Rc::new(std::cell::RefCell::new(None::<(i32, i32)>));
+    {
+        let pressed = pressed.clone();
+        ui.on_reveal_cell(move |r, c| *pressed.borrow_mut() = Some((r, c)));
+    }
+    one_by_label(&ui, "envcell-0").mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(
+        *pressed.borrow(),
+        Some((0, 0)),
+        "the sticky-header overlay must not intercept the press meant for the value cell"
+    );
+}
+
+#[test]
+fn to_item_models_offsets_drive_sticky_pinning_end_to_end() {
+    use janitor_core::compare::{EntryState, RowKey};
+    use janitor_core::view::{MatrixRow, MatrixView};
+    i_slint_backend_testing::init_no_event_loop();
+    // Two clustered names + a lone row, through the REAL assembly path
+    // (matrix_items + item_offsets), not hand-built offsets. Grouped:
+    //   header(db.*) + db.a + db.b + LONE → db.* span [0, 1·H + 2·R) = [0, 87);
+    //   LONE is a lone row [87, 117) that pins nothing.
+    let view = MatrixView {
+        environments: vec!["prod".into()],
+        rows: ["db.a", "db.b", "LONE"]
+            .iter()
+            .map(|n| MatrixRow {
+                key: RowKey::WholeSet,
+                name: (*n).into(),
+                state: EntryState::Aligned,
+                kind: None,
+                cells: Vec::new(),
+            })
+            .collect(),
+    };
+
+    // Grouped: scroll within the cluster pins db.*; over the lone row, nothing pins.
+    let ui = sticky_from_items(crate::to_item_models(&view, true));
+    ui.set_scroll_y(40.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        label_count(&ui, "pinned-db.*"),
+        1,
+        "to_item_models must emit offsets that pin the real cluster"
+    );
+    ui.set_scroll_y(100.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert_eq!(
+        label_count(&ui, "pinned-db.*"),
+        0,
+        "nothing pins while the trailing lone row occupies the top"
+    );
+
+    // Ungrouped: no headers are emitted at all, so nothing ever pins.
+    let flat = sticky_from_items(crate::to_item_models(&view, false));
+    for y in [0.0_f32, 40.0, 100.0] {
+        flat.set_scroll_y(y);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+        assert_eq!(
+            label_count(&flat, "pinned-db.*"),
+            0,
+            "ungrouped mode emits no headers, so no cluster pins (scroll-y={y})"
+        );
+    }
+}
+
+/// A matrix window fed a prebuilt item model (from the real `to_item_models`).
+fn sticky_from_items(items: ModelRc<MatrixItemView>) -> MainWindow {
+    let ui = MainWindow::new().expect("create MainWindow");
+    ui.set_pane(SharedString::from("matrix"));
+    ui.set_environments(ModelRc::from(Rc::new(VecModel::from(vec![
+        SharedString::from("prod"),
+    ]))));
+    ui.set_items(items);
+    ui.window().set_size(LogicalSize::new(1000.0, 700.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    ui
+}
+#[test]
+fn real_wheel_scroll_mirrors_to_scroll_y_and_repins_the_active_cluster() {
+    use slint::platform::WindowEvent;
+    i_slint_backend_testing::init_no_event_loop();
+    // The view tests above drive `scroll-y` directly; this one exercises the full
+    // path — a real wheel scroll → the body ScrollView's viewport-y →
+    // `changed viewport-y => scroll-y` → the overlay repins. Two 20-member clusters
+    // make the body genuinely taller than its viewport so it scrolls past the first
+    // cluster's span [0, 1·H + 20·R) into the second.
+    let mut items = vec![header_item("db.*", 20, 0, 0)];
+    for r in 0..20 {
+        items.push(row_item(1, r));
+    }
+    items.push(header_item("gh.*", 20, 1, 20));
+    for r in 0..20 {
+        items.push(row_item(2, 20 + r));
+    }
+    let ui = sticky_window(items);
+
+    // At the top: scroll-y is zero and the first cluster is pinned.
+    assert!(ui.get_scroll_y().abs() < 0.5, "starts unscrolled");
+    assert_eq!(label_count(&ui, "pinned-db.*"), 1);
+
+    // Wheel-scroll down until we pass the first cluster's span (or give up).
+    let pos = slint::LogicalPosition::new(500.0, 400.0);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos });
+    let db_end = HEADER_H + 20.0 * ROW_H; // gh.* begins here
+    let mut crossed = false;
+    for _ in 0..40 {
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: pos,
+            delta_x: 0.0,
+            delta_y: -120.0,
+        });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+        if ui.get_scroll_y() > db_end + 5.0 {
+            crossed = true;
+            break;
+        }
+    }
+    assert!(
+        crossed,
+        "wheel scroll must mirror into scroll-y via `changed viewport-y` and pass the \
+         first cluster's span (reached scroll-y={})",
+        ui.get_scroll_y()
+    );
+    // The mirrored offset repinned the overlay to the second cluster.
+    assert_eq!(label_count(&ui, "pinned-db.*"), 0);
+    assert_eq!(label_count(&ui, "pinned-gh.*"), 1);
+}

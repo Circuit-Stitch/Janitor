@@ -68,6 +68,41 @@ pub fn matrix_items(names: &[&str], grouped: bool) -> Vec<MatrixItem> {
     items
 }
 
+/// How many headers and data rows precede an item, in display order — the input
+/// the view needs to pin sticky group headers (#42).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ItemOffset {
+    /// Cluster headers strictly before this item.
+    pub headers_before: u32,
+    /// Data rows strictly before this item.
+    pub rows_before: u32,
+}
+
+/// The cumulative (headers_before, rows_before) preceding each item, in display
+/// order — index-aligned with `items` (#42 sticky group headers). A header's
+/// pixel top is then `headers_before · header_h + rows_before · row_h`; the
+/// per-kind heights stay in the view (the single source of truth, ADR 0023), so
+/// this carries only the counts. Headers and rows are summed separately because
+/// a header row is shorter than a data row.
+pub fn item_offsets(items: &[MatrixItem]) -> Vec<ItemOffset> {
+    let mut headers_before = 0;
+    let mut rows_before = 0;
+    items
+        .iter()
+        .map(|item| {
+            let here = ItemOffset {
+                headers_before,
+                rows_before,
+            };
+            match item {
+                MatrixItem::Header { .. } => headers_before += 1,
+                MatrixItem::Row { .. } => rows_before += 1,
+            }
+            here
+        })
+        .collect()
+}
+
 /// The type-badge text for a row's representative [`LeafKind`] — uppercase JSON
 /// type, or `""` for a Binary row (no leaf type). Sourced from the engine's
 /// kind, never hard-coded (issue #20).
@@ -252,6 +287,55 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn item_offsets_count_headers_and_rows_separately_in_display_order() {
+        // Two 2-member clusters then a lone row. Headers and rows are tallied on
+        // separate axes (a header is shorter than a row), and each item's offset is
+        // the count of what came *before* it.
+        let items = matrix_items(&["db.a", "db.b", "gh.a", "gh.b", "LONE"], true);
+        // Display order: H(db) r r H(gh) r r r(lone)  → 2 headers, 5 rows.
+        let offsets = item_offsets(&items);
+        let pairs: Vec<(u32, u32)> = offsets
+            .iter()
+            .map(|o| (o.headers_before, o.rows_before))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (0, 0), // header db.*  — nothing before it
+                (1, 0), // db.a         — 1 header before
+                (1, 1), // db.b
+                (1, 2), // header gh.*  — 1 header, 2 rows before
+                (2, 2), // gh.a
+                (2, 3), // gh.b
+                (2, 4), // LONE (lone row, no header) — 2 headers, 4 rows before
+            ]
+        );
+    }
+
+    #[test]
+    fn item_offsets_are_all_zero_when_flat_and_ungrouped() {
+        // No headers → every item's headers_before is 0 and rows_before just counts.
+        let offsets = item_offsets(&matrix_items(&["a", "b", "c"], false));
+        assert_eq!(
+            offsets,
+            vec![
+                ItemOffset {
+                    headers_before: 0,
+                    rows_before: 0
+                },
+                ItemOffset {
+                    headers_before: 0,
+                    rows_before: 1
+                },
+                ItemOffset {
+                    headers_before: 0,
+                    rows_before: 2
+                },
+            ]
+        );
     }
 
     #[test]

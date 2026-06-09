@@ -22,6 +22,14 @@ use janitor_core::view::{sort_rows, state_glyph, MatrixCell, MatrixView, SortKey
 use rows::{matrix_items, MatrixItem};
 use worker::{Command, Event, ProviderKind};
 
+/// ENTRY-column resize bounds (#42), in logical px. These MIRROR `entry-min` (the
+/// floor) and `entry-w`'s default in `ui/app.slint`, kept in sync the same way
+/// `view_tests::ENV_FLOOR` mirrors `env-floor`. The floor also clamps the
+/// persisted width in Config (`set_entry_column_width`), so a stored width can
+/// never render a sub-floor column.
+const ENTRY_MIN_PX: f64 = 200.0;
+const ENTRY_DEFAULT_PX: f64 = 300.0;
+
 // The UI-thread-owned shared state. The worker bridge cannot capture an `Rc`
 // (its `upgrade_in_event_loop` closure is `Send + 'static`, and `Rc` is
 // `!Send`), so the bridge reaches the state through this thread-local — which
@@ -100,42 +108,55 @@ fn to_cell_views(cells: &[MatrixCell]) -> ModelRc<CellView> {
 /// and its zebra parity. `grouped` toggles clustering (default on, issue #20).
 fn to_item_models(view: &MatrixView, grouped: bool) -> ModelRc<MatrixItemView> {
     let names: Vec<&str> = view.rows.iter().map(|r| r.name.as_str()).collect();
-    let items: Vec<MatrixItemView> = matrix_items(&names, grouped)
+    let items = matrix_items(&names, grouped);
+    // Per-item header/row counts so the view can pin sticky group headers (#42)
+    // without re-summing heights; index-aligned with `items`.
+    let offsets = rows::item_offsets(&items);
+    let views: Vec<MatrixItemView> = items
         .into_iter()
-        .map(|item| match item {
-            MatrixItem::Header { label, count } => MatrixItemView {
-                is_header: true,
-                label: label.into(),
-                count: count as i32,
-                ..Default::default()
-            },
-            MatrixItem::Row {
-                index,
-                zebra,
-                group_label,
-            } => {
-                let r = &view.rows[index];
-                // Omit the cluster's common prefix the header already shows, then
-                // the muted-prefix / bold-leaf split over what remains (#40). Flat
-                // / lone rows (group_label None) keep the full name.
-                let (prefix, leaf) = rows::display_name_parts(group_label.as_deref(), &r.name);
-                MatrixItemView {
-                    is_header: false,
-                    row_index: index as i32,
-                    prefix: prefix.into(),
-                    leaf: leaf.into(),
-                    full_name: r.name.as_str().into(),
-                    badge: rows::badge_label(r.kind).into(),
-                    state: state_label(r.state).into(),
-                    glyph: state_glyph(r.state).into(),
-                    zebra,
-                    cells: to_cell_views(&r.cells),
+        .zip(offsets)
+        .map(|(item, off)| {
+            let headers_before = off.headers_before as i32;
+            let rows_before = off.rows_before as i32;
+            match item {
+                MatrixItem::Header { label, count } => MatrixItemView {
+                    is_header: true,
+                    label: label.into(),
+                    count: count as i32,
+                    headers_before,
+                    rows_before,
                     ..Default::default()
+                },
+                MatrixItem::Row {
+                    index,
+                    zebra,
+                    group_label,
+                } => {
+                    let r = &view.rows[index];
+                    // Omit the cluster's common prefix the header already shows, then
+                    // the muted-prefix / bold-leaf split over what remains (#40). Flat
+                    // / lone rows (group_label None) keep the full name.
+                    let (prefix, leaf) = rows::display_name_parts(group_label.as_deref(), &r.name);
+                    MatrixItemView {
+                        is_header: false,
+                        row_index: index as i32,
+                        prefix: prefix.into(),
+                        leaf: leaf.into(),
+                        full_name: r.name.as_str().into(),
+                        badge: rows::badge_label(r.kind).into(),
+                        state: state_label(r.state).into(),
+                        glyph: state_glyph(r.state).into(),
+                        zebra,
+                        headers_before,
+                        rows_before,
+                        cells: to_cell_views(&r.cells),
+                        ..Default::default()
+                    }
                 }
             }
         })
         .collect();
-    ModelRc::from(Rc::new(VecModel::from(items)))
+    ModelRc::from(Rc::new(VecModel::from(views)))
 }
 
 /// Copy a (non-secret) Entry name to the OS clipboard, reusing the long-lived
@@ -959,6 +980,12 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_sso_region(st.config.sso_region.as_str().into());
         ui.set_dark(st.prefs.dark);
         ui.set_grouped(st.prefs.grouped);
+        // Restore the persisted ENTRY-column width (#42), floored; falls back to
+        // the layout default when never resized. View-state only — never a Value.
+        ui.set_entry_w(
+            st.config
+                .entry_column_width_or(ENTRY_MIN_PX, ENTRY_DEFAULT_PX) as f32,
+        );
         ui.set_status(st.status.as_str().into());
     }
     push_matrix(&ui, &state);
@@ -1095,6 +1122,18 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut st = state.borrow_mut();
             st.config.sso_start_url = ui.get_sso_start_url().to_string();
             st.config.sso_region = ui.get_sso_region().to_string();
+            st.maybe_save();
+        });
+    }
+    // Persist a resized ENTRY column width (#42) on drag release — view-state,
+    // never a Value (THREAT-MODEL). Mock-guarded by `maybe_save` (the seeded demo
+    // Config is never written to a real org's file). The live width already applies
+    // — the drag drives `entry-w` directly — so this only records it for next launch.
+    {
+        let state = state.clone();
+        ui.on_commit_entry_width(move |w| {
+            let mut st = state.borrow_mut();
+            st.config.set_entry_column_width(w as f64, ENTRY_MIN_PX);
             st.maybe_save();
         });
     }
