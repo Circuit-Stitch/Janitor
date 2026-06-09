@@ -1,37 +1,34 @@
-//! `Discovery` (ADR 0013): the single, presenter-agnostic step-machine that
-//! drives the guided account → role → secret walk and yields one `Mapping`.
+//! `Discovery` (ADR 0013 / ADR 0026): the Secrets Manager Provider's guided
+//! account → role → secret walk, expressed as a `janitor_core::discovery` *method*
+//! ([`Steps`]) driven by the shared [`Orchestrator`].
 //!
-//! It knows nothing of stdin, channels, or Slint — `start()`/`advance()` return
-//! a `Step` describing either what to ask next or a terminal outcome, and each
-//! consumer writes a thin presenter. The interleaved sequencing (which step is
-//! next, auto-pick collapsing, the per-step listing + credential mint) is the
-//! real logic that ADR 0003 keeps in a tested crate; it reuses the pure
-//! `select::plan_selection` to collapse `0/1` choices and pre-select a
-//! remembered default on `many`. Fully tested against `wire::fakes`.
+//! It knows nothing of stdin, channels, or Slint — `start()`/`advance()` return a
+//! `Step` describing either what to ask next or a terminal outcome, and each
+//! consumer writes a thin presenter. The walk *sequencing* (auto-pick collapsing,
+//! stop-at-first-`Ask`, resume, index clamping) now lives once in the provider-
+//! agnostic [`Orchestrator`] (ADR 0026, #33); this file supplies only the AWS
+//! *method*: the shared `account → role → mint` front half (via
+//! [`front_half`], ADR 0024 Decision 6) plus the Secrets Manager tail (list secrets
+//! → pick). Fully tested against `wire::fakes`.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use janitor_core::config::Mapping;
-
-use janitor_aws_auth::types::{Credential, SsoToken};
-use janitor_aws_auth::wire::{AccountCatalog, AccountSummary, RoleCredentialClient, RoleSummary};
+use janitor_core::discovery::{Choice, Orchestrator, StepPlan, Steps};
 use janitor_core::provider::{Step, What};
-use janitor_core::select::{plan_selection, Selectable, SelectionPlan};
 
-use crate::wire::{SecretSummary, SecretsApi};
+use janitor_aws_auth::authwalk::{front_half, terminal_for, FrontHalf};
+use janitor_aws_auth::types::{Credential, SsoToken};
+use janitor_aws_auth::wire::{AccountCatalog, RoleCredentialClient};
 
-/// The choices the machine listed for the step it is currently blocked on, so
-/// [`Discovery::advance`] can resolve a chosen index back to the item without
-/// re-listing.
-enum Awaiting {
-    Account(Vec<AccountSummary>),
-    Role(Vec<RoleSummary>),
-    Secret(Vec<SecretSummary>),
-}
+use crate::wire::SecretsApi;
 
-/// The guided discovery walk for one Environment. Holds the SSO token and the
-/// AWS seams; accumulates the account/role/credential picks as it advances.
-pub struct Discovery {
+/// The Secrets Manager Discovery method. Holds the SSO token and the AWS seams; the
+/// only state it carries across the (re-entrant) walk is the once-minted Credential
+/// — the chosen account/role/secret keys live in the orchestrator's `chosen`.
+struct AwsSteps {
     token: Arc<SsoToken>,
     catalog: Arc<dyn AccountCatalog>,
     role_client: Arc<dyn RoleCredentialClient>,
@@ -42,10 +39,81 @@ pub struct Discovery {
     region: String,
     /// The previous guided pick, offered as the default on a `many` step.
     remembered: Option<Mapping>,
-    account: Option<AccountSummary>,
-    role: Option<RoleSummary>,
+    /// The role Credential, minted once when account+role are chosen (guards the
+    /// one-shot front-half mint against a re-entrant `next`).
     cred: Option<Credential>,
-    awaiting: Option<Awaiting>,
+}
+
+impl AwsSteps {
+    fn remembered_account(&self) -> Option<&str> {
+        self.remembered.as_ref().map(|m| m.account_id.as_str())
+    }
+    fn remembered_role(&self) -> Option<&str> {
+        self.remembered.as_ref().map(|m| m.permission_set.as_str())
+    }
+    fn remembered_secret(&self) -> Option<&str> {
+        self.remembered.as_ref().map(|m| m.secret_id.as_str())
+    }
+
+    /// Assemble the completed Mapping from the chosen keys. `secret_id` is the ARN
+    /// (the stable id); `region` is the resolved browse region; `permission_set` is
+    /// the role.
+    fn build_mapping(&self, account_id: &str, role: &str, secret_arn: &str) -> Mapping {
+        Mapping {
+            environment: self.environment.clone(),
+            account_id: account_id.to_string(),
+            region: self.region.clone(),
+            secret_id: secret_arn.to_string(),
+            permission_set: role.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl Steps for AwsSteps {
+    /// `chosen` accumulates `[account_id, role, secret_arn]`. The shared front half
+    /// owns the first two (and the credential mint); the tail lists secrets with the
+    /// minted Credential and assembles the Mapping.
+    async fn next(&mut self, chosen: &[String]) -> StepPlan {
+        // Front half: account → role → mint (runs only until we hold a Credential).
+        if self.cred.is_none() {
+            match front_half(
+                chosen,
+                &self.token,
+                self.catalog.as_ref(),
+                self.role_client.as_ref(),
+                &self.region,
+                self.remembered_account(),
+                self.remembered_role(),
+            )
+            .await
+            {
+                FrontHalf::Plan(plan) => return plan,
+                FrontHalf::Ready { cred, .. } => self.cred = Some(cred),
+            }
+        }
+
+        // Tail: list secrets with the minted Credential, then pick one → Done.
+        if chosen.len() < 3 {
+            let cred = self.cred.as_ref().unwrap();
+            return match self.secrets.list_secrets(cred, &self.region).await {
+                Ok(items) => StepPlan::List {
+                    what: What::Secrets,
+                    choices: Choice::project(&items),
+                    remembered: self.remembered_secret().map(str::to_string),
+                },
+                Err(e) => StepPlan::Terminal(terminal_for(&e)),
+            };
+        }
+        StepPlan::Done(self.build_mapping(&chosen[0], &chosen[1], &chosen[2]))
+    }
+}
+
+/// The guided Secrets Manager discovery walk for one Environment: a thin handle over
+/// the shared [`Orchestrator`] driving an [`AwsSteps`] method. The public
+/// `new`/`start`/`advance` surface is unchanged (the worker/presenter are untouched).
+pub struct Discovery {
+    orch: Orchestrator<AwsSteps>,
 }
 
 impl Discovery {
@@ -61,184 +129,39 @@ impl Discovery {
         remembered: Option<Mapping>,
     ) -> Self {
         Discovery {
-            token,
-            catalog,
-            role_client,
-            secrets,
-            environment,
-            region,
-            remembered,
-            account: None,
-            role: None,
-            cred: None,
-            awaiting: None,
+            orch: Orchestrator::new(AwsSteps {
+                token,
+                catalog,
+                role_client,
+                secrets,
+                environment,
+                region,
+                remembered,
+                cred: None,
+            }),
         }
     }
 
-    /// Begin the walk: list accounts and auto-collapse singleton steps until the
-    /// first `many` choice (an `Ask`) or a terminal outcome.
+    /// Begin the walk: auto-collapse singleton steps until the first `many` choice
+    /// (an `Ask`) or a terminal outcome.
     pub async fn start(&mut self) -> Step {
-        self.resume().await
+        self.orch.start().await
     }
 
-    /// Feed back the user's chosen index for the step the machine is blocked on,
-    /// then continue collapsing singletons until the next `Ask` or a terminal
-    /// outcome. Out-of-range indices are clamped (mirrors `select::resolve`).
+    /// Feed back the user's chosen index for the step the walk is blocked on, then
+    /// continue collapsing singletons until the next `Ask` or a terminal outcome.
+    /// Out-of-range indices are clamped.
     pub async fn advance(&mut self, choice: usize) -> Step {
-        match self.awaiting.take() {
-            Some(Awaiting::Account(items)) => {
-                self.account = Some(pick(items, choice));
-                self.resume().await
-            }
-            Some(Awaiting::Role(items)) => {
-                self.role = Some(pick(items, choice));
-                self.resume().await
-            }
-            Some(Awaiting::Secret(items)) => {
-                let secret = pick(items, choice);
-                Step::Done(self.build_mapping(&secret))
-            }
-            // advance() with nothing pending is a presenter bug; re-drive so we
-            // never wedge (resume is idempotent on already-made picks).
-            None => self.resume().await,
-        }
+        self.orch.advance(choice).await
     }
-
-    /// The shared forward drive: process whichever step is not yet decided,
-    /// auto-picking singletons and falling through to the next, stopping at the
-    /// first `Ask`/terminal state.
-    async fn resume(&mut self) -> Step {
-        if self.account.is_none() {
-            let items = match self.catalog.list_accounts(&self.token).await {
-                Ok(v) => v,
-                Err(e) => return terminal_for(&e),
-            };
-            match plan_selection(&items, self.remembered_account()) {
-                SelectionPlan::Empty => return Step::Empty(What::Accounts),
-                SelectionPlan::Ask { default } => {
-                    let step = ask(What::Accounts, &items, default);
-                    self.awaiting = Some(Awaiting::Account(items));
-                    return step;
-                }
-                SelectionPlan::Auto(i) => self.account = Some(pick(items, i)),
-            }
-        }
-
-        if self.role.is_none() {
-            let account_id = self.account.as_ref().unwrap().id.clone();
-            let items = match self
-                .catalog
-                .list_account_roles(&self.token, &account_id)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => return terminal_for(&e),
-            };
-            match plan_selection(&items, self.remembered_role()) {
-                SelectionPlan::Empty => return Step::Empty(What::Roles),
-                SelectionPlan::Ask { default } => {
-                    let step = ask(What::Roles, &items, default);
-                    self.awaiting = Some(Awaiting::Role(items));
-                    return step;
-                }
-                SelectionPlan::Auto(i) => self.role = Some(pick(items, i)),
-            }
-        }
-
-        // Mint one role Credential for the chosen account+role+region so we can
-        // list secrets. A dead token / policy refusal surfaces as `Failed`.
-        if self.cred.is_none() {
-            let account_id = self.account.as_ref().unwrap().id.clone();
-            let role = self.role.as_ref().unwrap().name.clone();
-            match self
-                .role_client
-                .get_role_credentials(&self.token, &account_id, &role, &self.region)
-                .await
-            {
-                Ok(c) => self.cred = Some(c),
-                Err(e) => return terminal_for(&e),
-            }
-        }
-
-        let cred = self.cred.as_ref().unwrap();
-        let items = match self.secrets.list_secrets(cred, &self.region).await {
-            Ok(v) => v,
-            Err(e) => return terminal_for(&e),
-        };
-        match plan_selection(&items, self.remembered_secret()) {
-            SelectionPlan::Empty => Step::Empty(What::Secrets),
-            SelectionPlan::Ask { default } => {
-                let step = ask(What::Secrets, &items, default);
-                self.awaiting = Some(Awaiting::Secret(items));
-                step
-            }
-            SelectionPlan::Auto(i) => {
-                let secret = pick(items, i);
-                Step::Done(self.build_mapping(&secret))
-            }
-        }
-    }
-
-    fn remembered_account(&self) -> Option<&str> {
-        self.remembered.as_ref().map(|m| m.account_id.as_str())
-    }
-    fn remembered_role(&self) -> Option<&str> {
-        self.remembered.as_ref().map(|m| m.permission_set.as_str())
-    }
-    fn remembered_secret(&self) -> Option<&str> {
-        self.remembered.as_ref().map(|m| m.secret_id.as_str())
-    }
-
-    /// Assemble the completed Mapping. `secret_id` is the ARN (the stable id);
-    /// `region` is the resolved browse region; `permission_set` is the role.
-    fn build_mapping(&self, secret: &SecretSummary) -> Mapping {
-        let account = self.account.as_ref().expect("account chosen before Done");
-        let role = self.role.as_ref().expect("role chosen before Done");
-        Mapping {
-            environment: self.environment.clone(),
-            account_id: account.id.clone(),
-            region: self.region.clone(),
-            secret_id: secret.arn.clone(),
-            permission_set: role.name.clone(),
-        }
-    }
-}
-
-/// Build a presenter-ready `Step::Ask`: project the listed items to their
-/// `Selectable::label` lines (in list order, so the returned index maps straight
-/// back to the kept items) and carry the remembered `default`.
-fn ask<T: Selectable>(what: What, items: &[T], default: Option<usize>) -> Step {
-    Step::Ask {
-        what,
-        choices: items.iter().map(|it| it.label()).collect(),
-        default,
-    }
-}
-
-/// Classify a `SessionError` into the right terminal `Step`. `ReauthRequired`
-/// (a dead token the facade could not silently refresh) becomes `Reauth` so the
-/// presenter routes back to Sign-in; everything else becomes a masked,
-/// retryable `Failed` carrying only the tested `FetchFailReason` (no SDK text —
-/// THREAT-MODEL).
-fn terminal_for(e: &janitor_aws_auth::error::SessionError) -> Step {
-    match e {
-        janitor_aws_auth::error::SessionError::ReauthRequired => Step::Reauth,
-        _ => Step::Failed(e.into()),
-    }
-}
-
-/// Resolve a chosen index against a listed set, clamping out-of-range to the
-/// last item (a misbehaving presenter must never panic the walk).
-fn pick<T>(mut items: Vec<T>, choice: usize) -> T {
-    let i = choice.min(items.len() - 1);
-    items.swap_remove(i)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::fakes::FakeSecretsApi;
+    use crate::wire::{fakes::FakeSecretsApi, SecretSummary};
     use janitor_aws_auth::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient};
+    use janitor_aws_auth::wire::{AccountSummary, RoleSummary};
     use janitor_core::provider::FetchFailReason;
     use std::time::{Duration, SystemTime};
 

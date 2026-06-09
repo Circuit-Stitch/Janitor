@@ -16,6 +16,7 @@
 pub mod cluster;
 pub mod compare;
 pub mod config;
+pub mod discovery;
 pub mod provider;
 pub mod secret;
 pub mod select;

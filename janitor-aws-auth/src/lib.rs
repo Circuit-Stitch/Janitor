@@ -18,6 +18,7 @@
 //! are untested. The fakes are exposed to dependent crates' tests via the
 //! `test-support` feature (ADR 0024); they are not compiled into normal builds.
 
+pub mod authwalk;
 pub mod broker;
 pub mod error;
 pub mod pkce;
