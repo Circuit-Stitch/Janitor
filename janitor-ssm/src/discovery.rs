@@ -1,56 +1,50 @@
-//! `SsmDiscovery` (ADR 0013 / ADR 0025): the remote-`.env`-over-SSM guided walk.
-//! It mirrors `janitor-aws::Discovery`'s shared front half — `account → role →
-//! mint Credential` (over the same `janitor-aws-auth` primitives) — then walks
-//! its own tail: `instance → .env path → read+parse`. Like the SM walk it is
-//! presenter-agnostic: `start()`/`advance()`/`provide_input()` return a `Step`
-//! describing what to ask next or a terminal outcome, and it reuses the pure
-//! `select::plan_selection` to collapse `0/1` choices and pre-select a remembered
-//! default on `many`. Fully tested against the front-half `wire::fakes` plus
-//! `FakeInstanceCatalog` / `FakeRemoteFileReader`.
+//! `SsmDiscovery` (ADR 0013 / ADR 0025 / ADR 0026): the remote-`.env`-over-SSM
+//! guided walk, expressed as a `janitor_core::discovery` *method* ([`Steps`]) driven
+//! by the shared [`Orchestrator`].
 //!
-//! Two things differ from the SM walk. The Instance step lists with the **minted
-//! Credential** (not the SSO token), exactly as the SM walk lists secrets. And
-//! the `.env path` step is **free-text** (`Step::Input`, fed back via
-//! [`SsmDiscovery::provide_input`]), not a list pick — then the file is read +
-//! parsed **at the end of the walk**, so an unreadable or unparseable path fails
-//! *in the wizard* (masked), not later at load (ADR 0025).
+//! It mirrors `janitor-aws::Discovery`'s shared front half — `account → role → mint
+//! Credential` (via [`front_half`] over the same `janitor-aws-auth` primitives, ADR
+//! 0024 Decision 6) — then walks its own tail: `instance → .env path → read+parse`.
+//! Like the SM walk it is presenter-agnostic: `start()`/`advance()`/`provide_input()`
+//! return a `Step` describing what to ask next or a terminal outcome, and each
+//! consumer writes a thin presenter. The walk *sequencing* (auto-pick collapsing,
+//! stop-at-first-`Ask`/`Input`, resume, index clamping) now lives once in the
+//! provider-agnostic [`Orchestrator`] (ADR 0026, #33); this file supplies only the
+//! SSM *method*.
 //!
-//! The `account → role → mint` sequencing is deliberately duplicated with
-//! `janitor-aws::Discovery` (ADR 0024/0025): that duplication across two *real*
-//! shapes is the evidence #33/ADR 0026 extracts a shared `core` orchestrator from.
+//! Two things differ from the SM tail. The Instance step lists with the **minted
+//! Credential** (not the SSO token), exactly as the SM walk lists secrets. And the
+//! `.env path` step is **free-text** (`StepPlan::Input`, fed back via
+//! [`Orchestrator::provide_input`]), not a list pick — then the file is read +
+//! parsed **at the end of the walk**, so an unreadable or unparseable path fails *in
+//! the wizard* (masked), not later at load (ADR 0025). Fully tested against the
+//! front-half `wire::fakes` plus `FakeInstanceCatalog` / `FakeRemoteFileReader`.
 
 use std::sync::Arc;
 
-use janitor_core::config::Mapping;
-use janitor_core::provider::{Step, What};
-use janitor_core::select::{plan_selection, Selectable, SelectionPlan};
+use async_trait::async_trait;
 
+use janitor_core::config::Mapping;
+use janitor_core::discovery::{Choice, Orchestrator, StepPlan, Steps};
+use janitor_core::provider::{Step, What};
+
+use janitor_aws_auth::authwalk::{front_half, terminal_for, FrontHalf};
 use janitor_aws_auth::types::{Credential, SsoToken};
-use janitor_aws_auth::wire::{AccountCatalog, AccountSummary, RoleCredentialClient, RoleSummary};
+use janitor_aws_auth::wire::{AccountCatalog, RoleCredentialClient};
 
 use crate::logging::{session_logging_advisory, LoggingPreference};
 use crate::source::{read_and_parse, split_secret_id};
-use crate::wire::{InstanceCatalog, InstanceSummary, RemoteFileReader};
+use crate::wire::{InstanceCatalog, RemoteFileReader};
 
 /// The conventional default `.env` path, pre-filled into the path `Input` when no
 /// remembered path exists for this Environment (ADR 0025 §2).
 const DEFAULT_DOTENV_PATH: &str = "/app/.env";
 
-/// What the machine is currently blocked on. The list variants hold the items
-/// they listed so [`SsmDiscovery::advance`] resolves a chosen index back to the
-/// item without re-listing; `Path` marks a walk paused on the free-text path
-/// `Input`, answered through [`SsmDiscovery::provide_input`].
-enum Awaiting {
-    Account(Vec<AccountSummary>),
-    Role(Vec<RoleSummary>),
-    Instance(Vec<InstanceSummary>),
-    Path,
-}
-
-/// The guided remote-`.env`-over-SSM walk for one Environment. Holds the SSO
-/// token and the AWS seams; accumulates the account/role/credential/instance
-/// picks and the typed path as it advances.
-pub struct SsmDiscovery {
+/// The remote-`.env`-over-SSM Discovery method. Holds the SSO token and the AWS
+/// seams; the state it carries across the (re-entrant) walk is the once-minted
+/// Credential and the session-logging advisory — the chosen account/role/instance
+/// keys and the typed path live in the orchestrator's `chosen`.
+struct SsmSteps {
     token: Arc<SsoToken>,
     catalog: Arc<dyn AccountCatalog>,
     role_client: Arc<dyn RoleCredentialClient>,
@@ -63,225 +57,20 @@ pub struct SsmDiscovery {
     region: String,
     /// The previous guided pick, offered as the default on a `many`/`Input` step.
     remembered: Option<Mapping>,
-    account: Option<AccountSummary>,
-    role: Option<RoleSummary>,
+    /// The role Credential, minted once when account+role are chosen (guards the
+    /// one-shot front-half mint + logging probe against a re-entrant `next`).
     cred: Option<Credential>,
-    instance: Option<InstanceSummary>,
-    path: Option<String>,
-    awaiting: Option<Awaiting>,
-    /// The session-logging advisory computed at the read (probed once we hold a
+    /// The session-logging advisory computed at the mint (probed once we hold a
     /// credential), pulled up by the Provider after each step (ADR 0025).
     advisory: Option<String>,
 }
 
-impl SsmDiscovery {
-    /// Build a walk. No I/O happens until [`start`](Self::start).
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        environment: String,
-        region: String,
-        token: Arc<SsoToken>,
-        catalog: Arc<dyn AccountCatalog>,
-        role_client: Arc<dyn RoleCredentialClient>,
-        instances: Arc<dyn InstanceCatalog>,
-        reader: Arc<dyn RemoteFileReader>,
-        logging: Arc<dyn LoggingPreference>,
-        remembered: Option<Mapping>,
-    ) -> Self {
-        SsmDiscovery {
-            token,
-            catalog,
-            role_client,
-            instances,
-            reader,
-            logging,
-            environment,
-            region,
-            remembered,
-            account: None,
-            role: None,
-            cred: None,
-            instance: None,
-            path: None,
-            awaiting: None,
-            advisory: None,
-        }
-    }
-
-    /// Take the session-logging advisory computed during the read (the wizard
-    /// surfaces it). `None` until the walk has reached the read, or if logging is
-    /// off. Drained so the Provider surfaces it at most once.
-    pub fn take_advisory(&mut self) -> Option<String> {
+impl SsmSteps {
+    /// Take the session-logging advisory computed at the credential mint (the wizard
+    /// surfaces it). `None` until the walk has minted, or if logging is off. Drained
+    /// so the Provider surfaces it at most once.
+    fn take_advisory(&mut self) -> Option<String> {
         self.advisory.take()
-    }
-
-    /// Begin the walk: collapse singleton steps until the first `many` choice (an
-    /// `Ask`), the free-text path `Input`, or a terminal outcome.
-    pub async fn start(&mut self) -> Step {
-        self.resume().await
-    }
-
-    /// Feed back the user's chosen index for the list step the machine is blocked
-    /// on, then continue. Out-of-range indices are clamped (mirrors
-    /// `select::resolve`). An index fed while the walk awaits the path `Input` (or
-    /// nothing) is a presenter bug; re-drive so we never wedge.
-    pub async fn advance(&mut self, choice: usize) -> Step {
-        match self.awaiting.take() {
-            Some(Awaiting::Account(items)) => {
-                self.account = Some(pick(items, choice));
-                self.resume().await
-            }
-            Some(Awaiting::Role(items)) => {
-                self.role = Some(pick(items, choice));
-                self.resume().await
-            }
-            Some(Awaiting::Instance(items)) => {
-                self.instance = Some(pick(items, choice));
-                self.resume().await
-            }
-            // The path step wants text, not an index; re-drive re-emits the Input
-            // (instance already chosen, so no re-listing). Nothing pending → same.
-            Some(Awaiting::Path) | None => self.resume().await,
-        }
-    }
-
-    /// Feed the user's typed `.env` path into a walk paused on the path `Input`,
-    /// then read+parse the file to reach `Done`/`Failed`/`Reauth`. Text fed while
-    /// a list `Ask` is pending (or nothing) is a presenter bug; re-drive.
-    pub async fn provide_input(&mut self, text: String) -> Step {
-        match self.awaiting.take() {
-            Some(Awaiting::Path) => {
-                self.path = Some(text);
-                self.resume().await
-            }
-            other => {
-                self.awaiting = other;
-                self.resume().await
-            }
-        }
-    }
-
-    /// The shared forward drive: process whichever step is not yet decided,
-    /// auto-picking singletons and falling through, stopping at the first
-    /// `Ask`/`Input`/terminal state.
-    async fn resume(&mut self) -> Step {
-        if self.account.is_none() {
-            let items = match self.catalog.list_accounts(&self.token).await {
-                Ok(v) => v,
-                Err(e) => return terminal_for(&e),
-            };
-            match plan_selection(&items, self.remembered_account()) {
-                SelectionPlan::Empty => return Step::Empty(What::Accounts),
-                SelectionPlan::Ask { default } => {
-                    let step = ask(What::Accounts, &items, default);
-                    self.awaiting = Some(Awaiting::Account(items));
-                    return step;
-                }
-                SelectionPlan::Auto(i) => self.account = Some(pick(items, i)),
-            }
-        }
-
-        if self.role.is_none() {
-            let account_id = self.account.as_ref().unwrap().id.clone();
-            let items = match self
-                .catalog
-                .list_account_roles(&self.token, &account_id)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => return terminal_for(&e),
-            };
-            match plan_selection(&items, self.remembered_role()) {
-                SelectionPlan::Empty => return Step::Empty(What::Roles),
-                SelectionPlan::Ask { default } => {
-                    let step = ask(What::Roles, &items, default);
-                    self.awaiting = Some(Awaiting::Role(items));
-                    return step;
-                }
-                SelectionPlan::Auto(i) => self.role = Some(pick(items, i)),
-            }
-        }
-
-        // Mint one role Credential for the chosen account+role+region so we can
-        // list Instances and read the file. A dead token / policy refusal is terminal.
-        if self.cred.is_none() {
-            let account_id = self.account.as_ref().unwrap().id.clone();
-            let role = self.role.as_ref().unwrap().name.clone();
-            match self
-                .role_client
-                .get_role_credentials(&self.token, &account_id, &role, &self.region)
-                .await
-            {
-                Ok(c) => self.cred = Some(c),
-                Err(e) => return terminal_for(&e),
-            }
-            // Now we hold a credential, probe the org's SSM session-logging policy
-            // *before* the instance/path steps and the read, so the wizard can warn
-            // — while it is still open — that a read may be archived to S3/CloudWatch
-            // (ADR 0025 / THREAT-MODEL). A probe failure biases toward warning; it
-            // never blocks the walk.
-            let probe = self
-                .logging
-                .session_logging(self.cred.as_ref().unwrap(), &self.region)
-                .await;
-            self.advisory = session_logging_advisory(&probe);
-        }
-
-        if self.instance.is_none() {
-            let cred = self.cred.as_ref().unwrap();
-            let items = match self.instances.describe_instances(cred, &self.region).await {
-                Ok(v) => v,
-                Err(e) => return terminal_for(&e),
-            };
-            match plan_selection(&items, self.remembered_instance()) {
-                SelectionPlan::Empty => return Step::Empty(What::Instances),
-                SelectionPlan::Ask { default } => {
-                    let step = ask(What::Instances, &items, default);
-                    self.awaiting = Some(Awaiting::Instance(items));
-                    return step;
-                }
-                SelectionPlan::Auto(i) => self.instance = Some(pick(items, i)),
-            }
-        }
-
-        // Instance chosen → ask for the free-text `.env` path (a remembered path
-        // for this Environment, else the conventional default).
-        if self.path.is_none() {
-            self.awaiting = Some(Awaiting::Path);
-            return Step::Input {
-                what: What::FilePath,
-                prompt: format!("Path to {}'s remote .env file", self.environment),
-                default: Some(
-                    self.remembered_path()
-                        .unwrap_or_else(|| DEFAULT_DOTENV_PATH.to_string()),
-                ),
-            };
-        }
-
-        // Path supplied → read the file now so an unreadable/unparseable path
-        // fails masked in the wizard (ADR 0025), not later at load.
-        self.read_and_finish().await
-    }
-
-    /// Read+parse the chosen path to validate it, then build the `Done` Mapping
-    /// (the parsed Set is validation-only here — `load` re-reads every Environment).
-    async fn read_and_finish(&mut self) -> Step {
-        let cred = self.cred.as_ref().unwrap();
-        let instance_id = self.instance.as_ref().unwrap().id.clone();
-        let path = self.path.as_ref().unwrap().clone();
-        match read_and_parse(
-            self.reader.as_ref(),
-            cred,
-            &instance_id,
-            &self.region,
-            &path,
-        )
-        .await
-        {
-            Ok(_shape) => Step::Done(self.build_mapping(&instance_id, &path)),
-            Err(e) if e.is_reauth() => Step::Reauth,
-            Err(e) => Step::Failed(e.reason()),
-        }
     }
 
     fn remembered_account(&self) -> Option<&str> {
@@ -307,49 +96,173 @@ impl SsmDiscovery {
             .map(|(_, path)| path.to_string())
     }
 
-    /// Assemble the completed Mapping. `secret_id` is `<instance-id>:<path>` (the
-    /// remote-`.env` Provider's "where the Set lives"); `region` is the resolved
-    /// browse region; `permission_set` is the role (ADR 0025).
-    fn build_mapping(&self, instance_id: &str, path: &str) -> Mapping {
-        let account = self.account.as_ref().expect("account chosen before Done");
-        let role = self.role.as_ref().expect("role chosen before Done");
+    /// Assemble the completed Mapping from the chosen keys. `secret_id` is
+    /// `<instance-id>:<path>` (the remote-`.env` Provider's "where the Set lives");
+    /// `region` is the resolved browse region; `permission_set` is the role (ADR 0025).
+    fn build_mapping(
+        &self,
+        account_id: &str,
+        role: &str,
+        instance_id: &str,
+        path: &str,
+    ) -> Mapping {
         Mapping {
             environment: self.environment.clone(),
-            account_id: account.id.clone(),
+            account_id: account_id.to_string(),
             region: self.region.clone(),
             secret_id: format!("{instance_id}:{path}"),
-            permission_set: role.name.clone(),
+            permission_set: role.to_string(),
         }
     }
 }
 
-/// Build a presenter-ready `Step::Ask`: project the listed items to their
-/// `Selectable::label` lines (in list order, so the returned index maps straight
-/// back to the kept items) and carry the remembered `default`.
-fn ask<T: Selectable>(what: What, items: &[T], default: Option<usize>) -> Step {
-    Step::Ask {
-        what,
-        choices: items.iter().map(|it| it.label()).collect(),
-        default,
+#[async_trait]
+impl Steps for SsmSteps {
+    /// `chosen` accumulates `[account_id, role, instance_id, path]`. The shared front
+    /// half owns the first two (and the credential mint, after which we probe the
+    /// org's SSM logging policy); the tail lists Instances, asks for the free-text
+    /// path, then reads+parses to validate before assembling the Mapping.
+    async fn next(&mut self, chosen: &[String]) -> StepPlan {
+        // Front half: account → role → mint (runs only until we hold a Credential).
+        if self.cred.is_none() {
+            match front_half(
+                chosen,
+                &self.token,
+                self.catalog.as_ref(),
+                self.role_client.as_ref(),
+                &self.region,
+                self.remembered_account(),
+                self.remembered_role(),
+            )
+            .await
+            {
+                FrontHalf::Plan(plan) => return plan,
+                FrontHalf::Ready { cred, .. } => {
+                    self.cred = Some(cred);
+                    // Now we hold a credential, probe the org's SSM session-logging
+                    // policy *before* the instance/path steps and the read, so the
+                    // wizard can warn — while it is still open — that a read may be
+                    // archived to S3/CloudWatch (ADR 0025 / THREAT-MODEL). A probe
+                    // failure biases toward warning; it never blocks the walk.
+                    let probe = self
+                        .logging
+                        .session_logging(self.cred.as_ref().unwrap(), &self.region)
+                        .await;
+                    self.advisory = session_logging_advisory(&probe);
+                }
+            }
+        }
+
+        // Tail: list Instances with the minted Credential (chosen[2]).
+        if chosen.len() < 3 {
+            let cred = self.cred.as_ref().unwrap();
+            return match self.instances.describe_instances(cred, &self.region).await {
+                Ok(items) => StepPlan::List {
+                    what: What::Instances,
+                    choices: Choice::project(&items),
+                    remembered: self.remembered_instance().map(str::to_string),
+                },
+                Err(e) => StepPlan::Terminal(terminal_for(&e)),
+            };
+        }
+
+        // Instance chosen → ask for the free-text `.env` path (chosen[3]): a
+        // remembered path for this Environment, else the conventional default.
+        if chosen.len() < 4 {
+            return StepPlan::Input {
+                what: What::FilePath,
+                prompt: format!("Path to {}'s remote .env file", self.environment),
+                default: Some(
+                    self.remembered_path()
+                        .unwrap_or_else(|| DEFAULT_DOTENV_PATH.to_string()),
+                ),
+            };
+        }
+
+        // Path supplied → read the file now so an unreadable/unparseable path fails
+        // masked in the wizard (ADR 0025), not later at load. The parsed Set is
+        // validation-only here — `load` re-reads every Environment.
+        let cred = self.cred.as_ref().unwrap();
+        match read_and_parse(
+            self.reader.as_ref(),
+            cred,
+            &chosen[2],
+            &self.region,
+            &chosen[3],
+        )
+        .await
+        {
+            Ok(_shape) => {
+                StepPlan::Done(self.build_mapping(&chosen[0], &chosen[1], &chosen[2], &chosen[3]))
+            }
+            Err(e) if e.is_reauth() => StepPlan::Terminal(Step::Reauth),
+            Err(e) => StepPlan::Terminal(Step::Failed(e.reason())),
+        }
     }
 }
 
-/// Classify a `SessionError` into the right terminal `Step` (shared with the SM
-/// walk's logic): `ReauthRequired` → `Reauth` so the presenter routes back to
-/// Sign-in; everything else → a masked, retryable `Failed` carrying only the
-/// tested `FetchFailReason` (no SDK text — THREAT-MODEL).
-fn terminal_for(e: &janitor_aws_auth::error::SessionError) -> Step {
-    match e {
-        janitor_aws_auth::error::SessionError::ReauthRequired => Step::Reauth,
-        _ => Step::Failed(e.into()),
-    }
+/// The guided remote-`.env`-over-SSM discovery walk for one Environment: a thin
+/// handle over the shared [`Orchestrator`] driving an [`SsmSteps`] method. The
+/// public `new`/`start`/`advance`/`provide_input`/`take_advisory` surface is
+/// unchanged (the worker/presenter are untouched).
+pub struct SsmDiscovery {
+    orch: Orchestrator<SsmSteps>,
 }
 
-/// Resolve a chosen index against a listed set, clamping out-of-range to the last
-/// item (a misbehaving presenter must never panic the walk).
-fn pick<T>(mut items: Vec<T>, choice: usize) -> T {
-    let i = choice.min(items.len() - 1);
-    items.swap_remove(i)
+impl SsmDiscovery {
+    /// Build a walk. No I/O happens until [`start`](Self::start).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        environment: String,
+        region: String,
+        token: Arc<SsoToken>,
+        catalog: Arc<dyn AccountCatalog>,
+        role_client: Arc<dyn RoleCredentialClient>,
+        instances: Arc<dyn InstanceCatalog>,
+        reader: Arc<dyn RemoteFileReader>,
+        logging: Arc<dyn LoggingPreference>,
+        remembered: Option<Mapping>,
+    ) -> Self {
+        SsmDiscovery {
+            orch: Orchestrator::new(SsmSteps {
+                token,
+                catalog,
+                role_client,
+                instances,
+                reader,
+                logging,
+                environment,
+                region,
+                remembered,
+                cred: None,
+                advisory: None,
+            }),
+        }
+    }
+
+    /// Take the session-logging advisory computed during the walk (the wizard
+    /// surfaces it). Drained so the Provider surfaces it at most once.
+    pub fn take_advisory(&mut self) -> Option<String> {
+        self.orch.steps_mut().take_advisory()
+    }
+
+    /// Begin the walk: collapse singleton steps until the first `many` choice (an
+    /// `Ask`), the free-text path `Input`, or a terminal outcome.
+    pub async fn start(&mut self) -> Step {
+        self.orch.start().await
+    }
+
+    /// Feed back the user's chosen index for the list step the walk is blocked on,
+    /// then continue. Out-of-range indices are clamped.
+    pub async fn advance(&mut self, choice: usize) -> Step {
+        self.orch.advance(choice).await
+    }
+
+    /// Feed the user's typed `.env` path into a walk paused on the path `Input`, then
+    /// read+parse the file to reach `Done`/`Failed`/`Reauth`.
+    pub async fn provide_input(&mut self, text: String) -> Step {
+        self.orch.provide_input(text).await
+    }
 }
 
 #[cfg(test)]
@@ -358,8 +271,10 @@ mod tests {
     use crate::logging::fakes::FakeLoggingPreference;
     use crate::logging::LoggingState;
     use crate::wire::fakes::{FakeInstanceCatalog, FakeRemoteFileReader};
+    use crate::wire::InstanceSummary;
     use janitor_aws_auth::error::SessionError;
     use janitor_aws_auth::wire::fakes::{CredSpec, FakeAccountCatalog, FakeRoleClient};
+    use janitor_aws_auth::wire::{AccountSummary, RoleSummary};
     use janitor_core::provider::FetchFailReason;
     use std::time::{Duration, SystemTime};
 

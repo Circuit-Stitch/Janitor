@@ -2,6 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the shared provider-agnostic Discovery orchestrator landed (ADR 0026, #33).**
+> With two *real* Discovery walks to learn from, the engine was extracted **from
+> evidence** as a **dual-layer interface**: a `core` `Orchestrator<S: Steps>` owns all
+> the walk *sequencing* (auto-collapse singletons, stop at the first `Ask`/`Input`,
+> resume, clamp) and speaks only `Choice`/`Step`/`What` — **zero AWS vocabulary**;
+> each Provider supplies its *method* as a `Steps::next(chosen: &[String]) -> StepPlan`
+> impl (the inner seam that lets one auth layer swap resource backends). The unlock:
+> every Provider only ever needs each pick's `Selectable::key` downstream, so the
+> engine type-erases to `Choice { key, label }` and accumulates chosen **keys** in one
+> `chosen: Vec<String>` — the heterogeneous typed picks and per-step `Awaiting` enums
+> the two walks each carried are **deleted**. The shared `account → role → mint` front
+> half moved to `janitor-aws-auth::authwalk::front_half` (repaying ADR 0024 Decision 6;
+> `terminal_for` deduped there too); both AWS-family methods compose it with their own
+> tail. `Discovery`/`SsmDiscovery` are now thin handles over `Orchestrator<…Steps>`
+> with **unchanged** public surface, so the `Provider` port, worker, and presenter are
+> untouched; the mid-walk advisory (ADR 0025) stays the method's state, drained via
+> `Orchestrator::steps_mut()`. Behaviour-preserving: both crates' full discovery+session
+> suites pass unchanged; coverage holds (core 94.5%, aws-auth 94%, aws 96.8%, ssm 95.5%).
+> The two Provider crates stay separate (janitor-ssm still never depends on
+> janitor-aws). **Still deferred:** a runtime "one AWS Provider, swappable method" (incl.
+> per-Mapping method selection) unification — the dual layer *enables* it but it also
+> varies `load`/`reveal`/`write`, beyond #33. Design:
+> [`docs/adr/0026-shared-discovery-orchestrator-in-core.md`](docs/adr/0026-shared-discovery-orchestrator-in-core.md).
+>
 > **Latest: the remote-`.env` WRITE engine + transport landed (ADR 0029, B5 / #70).**
 > Research against the `amazon-ssm-agent` source overturned ADR 0028's central
 > assumption: **`AWS-StartNonInteractiveCommand` never connects stdin to the command**

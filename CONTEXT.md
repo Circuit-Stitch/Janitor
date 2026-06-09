@@ -78,8 +78,12 @@ Janitor's *only* diagnostic surface: an in-app, in-memory panel showing AWS erro
 _Avoid_: console output, stderr, log file (Janitor emits none — the panel is the only surface)
 
 **Discovery**:
-The post-Sign-in process of browsing which AWS accounts, roles (permission sets), and Secret Sets the signed-in user can actually reach, to assemble an Application's Mappings without hand-typing account IDs or ARNs. Walks account → role → Secret Set, auto-selecting whenever there is exactly one choice and asking only when there are several. Yields locations (a Mapping), never Values.
+The post-Sign-in process of browsing what a Provider can actually reach — for AWS, which accounts, roles (permission sets), and then Secret Sets or remote `.env` Instances+paths — to assemble an Application's Mappings without hand-typing account IDs, ARNs, or paths. Auto-selects whenever there is exactly one choice and asks only when there are several. Yields locations (a Mapping), never Values. One provider-agnostic **orchestrator** drives every Provider's walk (collapse singletons, stop at the first question, resume on the pick); each Provider supplies its own **Discovery method** — the steps that vary.
 _Avoid_: scan, import (use Discovery)
+
+**Discovery method**:
+A Provider's particular Discovery walk — the ordered steps it poses and the side effects between them — plugged into the shared orchestrator. The two real methods share an `account → role → mint` front half and diverge at the tail: Secrets Manager picks a Set; the remote-`.env` Provider picks an Instance then asks for a file path. A step is either a *list pick* (choose one of several, auto-collapsed when there is one) or a free-text *input* (the `.env` path).
+_Avoid_: walk engine, state machine (the shared driver is the orchestrator; a method is the per-Provider part)
 
 ## Comparison states
 
