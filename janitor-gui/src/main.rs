@@ -1,7 +1,10 @@
 slint::include_modules!();
+mod errors;
 mod logpane;
 mod pane;
+mod reveal;
 mod rows;
+mod sidebar;
 #[cfg(test)]
 mod view_tests;
 mod worker;
@@ -16,7 +19,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use janitor_core::compare::EntryState;
 use janitor_core::config::{Application, Config, Mapping};
-use janitor_core::provider::{AppError, What};
+use janitor_core::provider::What;
 use janitor_core::view::{sort_rows, state_glyph, MatrixCell, MatrixView, SortKey};
 
 use rows::{matrix_items, MatrixItem};
@@ -363,7 +366,7 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             set_status(ui, state, "loaded", "");
             push_matrix(ui, state);
         }
-        Event::AppFailed(err) => set_status(ui, state, "error", &banner(&err)),
+        Event::AppFailed(err) => set_status(ui, state, "error", &errors::banner(&err)),
         Event::Revealed { row, col, text } => {
             // Drop a Value that arrives after the user already released (a quick tap):
             // only show it if this is still the cell being held.
@@ -757,16 +760,6 @@ fn clear_manage_choice() {
     });
 }
 
-/// "<env>: <real AWS detail>; …". ADR 0017: the banner shows the real, error-safe
-/// `code: message` (never a Value/Credential/token), not just the masked phrase.
-fn banner(err: &AppError) -> String {
-    err.failures
-        .iter()
-        .map(|f| format!("{}: {}", f.environment, f.detail))
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
 fn set_status(ui: &MainWindow, state: &Rc<RefCell<AppState>>, status: &str, msg: &str) {
     state.borrow_mut().status = status.to_string();
     ui.set_status(status.into());
@@ -780,7 +773,14 @@ fn set_status(ui: &MainWindow, state: &Rc<RefCell<AppState>>, status: &str, msg:
 fn push_pane(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     let st = state.borrow();
     let has_apps = !st.config.applications.is_empty();
-    ui.set_pane(pane::main_pane(&st.status, has_apps).as_token().into());
+    let pane = pane::main_pane(&st.status, has_apps);
+    ui.set_pane(pane.as_token().into());
+    // Pane-derived chrome (issue #47), extracted from the `app.slint` `?:` ladders:
+    // the top-bar title and the centered non-matrix body copy. `body_copy` also
+    // folds in the current status message (the error-safe reason), which the UI
+    // already holds — read it back so this stays the single push site.
+    ui.set_pane_title(pane.title().into());
+    ui.set_body_copy(pane.body_copy(ui.get_status_message().as_str()).into());
 }
 
 /// Push the current view's rows/envs + sidebar into the UI.
@@ -846,39 +846,23 @@ fn snapshot_label(at: Option<std::time::SystemTime>) -> String {
     format!("Snapshot {hh:02}:{mm:02} UTC / {ago}")
 }
 
-/// Sidebar items. Drift badge shows ONLY for the selected, loaded app — never a
-/// per-app refetch (that would be a sign-in/GetSecretValue storm on real AWS).
+/// Sidebar items. The drift-badge suppression rule (show ONLY for the selected,
+/// loaded app — never a per-app refetch, which would be a sign-in/GetSecretValue
+/// storm on real AWS) lives in the pure, tested `sidebar::sidebar_apps` seam (#47);
+/// this only maps its rows onto Slint `AppItem`s.
 fn app_models(
     config: &Config,
     selected: usize,
     view: &MatrixView,
     status: &str,
 ) -> ModelRc<AppItem> {
-    let items: Vec<AppItem> = config
-        .applications
-        .iter()
-        .enumerate()
-        .map(|(i, app)| {
-            let drift = if i == selected && status == "loaded" {
-                let n = view
-                    .rows
-                    .iter()
-                    .filter(|r| r.state == EntryState::Drift)
-                    .count();
-                if n > 0 {
-                    format!("{n} drift").into()
-                } else {
-                    SharedString::new()
-                }
-            } else {
-                SharedString::new()
-            };
-            AppItem {
-                name: app.name.clone().into(),
-                subtitle: format!("{} envs", app.environments.len()).into(),
-                drift,
-                selected: i == selected,
-            }
+    let items: Vec<AppItem> = sidebar::sidebar_apps(config, selected, view, status)
+        .into_iter()
+        .map(|s| AppItem {
+            name: s.name.into(),
+            subtitle: s.subtitle.into(),
+            drift: s.drift.into(),
+            selected: s.selected,
         })
         .collect();
     ModelRc::from(Rc::new(VecModel::from(items)))
@@ -1034,6 +1018,12 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    // The per-cell reveal gate (issue #47): the `.slint` cell binds its `is-revealed`
+    // to this pure callback, whose handler IS the exhaustively-tested
+    // `reveal::is_revealed` — so the security rule (un-mask exactly one cell, never a
+    // whole row/column) lives in tested Rust, not an inline `.slint` predicate. Pure
+    // + stateless, so no `state` capture.
+    ui.on_is_cell_revealed(reveal::is_revealed);
     // Reveal → an on-demand round-trip to the Provider via dispatch.
     {
         let state = state.clone();

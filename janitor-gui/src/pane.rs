@@ -46,6 +46,42 @@ impl MainPane {
             MainPane::Error => "error",
         }
     }
+
+    /// The top-bar pane title (issue #47). Extracted from the `app.slint` `?:`
+    /// ladder that duplicated the pane tokens a second time — Rust is now the one
+    /// place that maps a pane to its title; the view binds the pushed `pane-title`
+    /// property. SignIn and Error share "Not signed in" (the top bar shows the
+    /// banner separately, and Error routes the user back to Sign-in).
+    pub fn title(self) -> &'static str {
+        match self {
+            MainPane::Matrix => "Drift matrix",
+            MainPane::EmptyApps => "No Applications",
+            MainPane::Loading => "Loading…",
+            MainPane::Signing => "Signing in…",
+            MainPane::SignIn | MainPane::Error => "Not signed in",
+        }
+    }
+
+    /// The centered body copy for a non-matrix / non-empty pane (issue #47),
+    /// extracted from the second `app.slint` `?:` ladder. Only rendered for the
+    /// SignIn / Signing / Loading / Error panes (the matrix and empty-apps panes
+    /// have their own content), so those two route through the error catch-all and
+    /// their value is never displayed. On an error the `status_message` carries the
+    /// real, error-safe reason (ADR 0017) — shown when present, else a retry hint.
+    pub fn body_copy(self, status_message: &str) -> String {
+        match self {
+            MainPane::SignIn => "Sign in to load this Application's secrets.".to_string(),
+            MainPane::Signing => "A browser tab has opened — complete sign-in there.".to_string(),
+            MainPane::Loading => "Fetching secrets…".to_string(),
+            MainPane::Error | MainPane::Matrix | MainPane::EmptyApps => {
+                if status_message.is_empty() {
+                    "Could not load. See the message above, then Sign in to retry.".to_string()
+                } else {
+                    format!("Could not load — {status_message}")
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -90,5 +126,45 @@ mod tests {
         // the sign-in prompt whether or not Applications exist.
         assert_eq!(main_pane("unauth", false), MainPane::SignIn);
         assert_eq!(main_pane("unauth", true), MainPane::SignIn);
+    }
+
+    #[test]
+    fn title_matches_the_extracted_slint_ladder() {
+        // The exact strings the app.slint `?:` ladder produced (issue #47); Rust is
+        // now their single source. SignIn and Error fold into "Not signed in".
+        assert_eq!(MainPane::Matrix.title(), "Drift matrix");
+        assert_eq!(MainPane::EmptyApps.title(), "No Applications");
+        assert_eq!(MainPane::Loading.title(), "Loading…");
+        assert_eq!(MainPane::Signing.title(), "Signing in…");
+        assert_eq!(MainPane::SignIn.title(), "Not signed in");
+        assert_eq!(MainPane::Error.title(), "Not signed in");
+    }
+
+    #[test]
+    fn body_copy_matches_the_extracted_slint_ladder() {
+        assert_eq!(
+            MainPane::SignIn.body_copy(""),
+            "Sign in to load this Application's secrets."
+        );
+        assert_eq!(
+            MainPane::Signing.body_copy("ignored"),
+            "A browser tab has opened — complete sign-in there.",
+            "the signing copy is fixed, independent of any message"
+        );
+        assert_eq!(MainPane::Loading.body_copy(""), "Fetching secrets…");
+    }
+
+    #[test]
+    fn error_body_copy_shows_the_reason_when_present_else_a_retry_hint() {
+        // With a (scrubbed, error-safe) reason the body surfaces it; without one it
+        // points the user at the banner above and the retry path.
+        assert_eq!(
+            MainPane::Error.body_copy("secret not found"),
+            "Could not load — secret not found"
+        );
+        assert_eq!(
+            MainPane::Error.body_copy(""),
+            "Could not load. See the message above, then Sign in to retry."
+        );
     }
 }

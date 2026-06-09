@@ -99,6 +99,12 @@ fn body_x(ui: &MainWindow, col: usize) -> f32 {
 /// alive by the caller). The env names are structural fixtures, never Values.
 fn matrix_window_n(env_count: usize, w: f32, h: f32) -> MainWindow {
     let ui = MainWindow::new().expect("create MainWindow");
+    // Install the real reveal gate (issue #47) just as `main()` does, so the cell's
+    // `is-revealed` binding resolves to the tested pure `reveal::is_revealed`. Without
+    // it the unset pure callback returns the `false` default and nothing ever reveals
+    // — so `value_cell_reveals_while_held_and_hides_on_release` now exercises the
+    // extracted function end-to-end (exactly-one-cell un-masks).
+    ui.on_is_cell_revealed(crate::reveal::is_revealed);
     ui.set_pane(SharedString::from("matrix"));
     let envs: Vec<SharedString> = (0..env_count)
         .map(|j| SharedString::from(format!("env{j}")))
