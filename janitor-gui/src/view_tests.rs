@@ -105,6 +105,15 @@ fn matrix_window_n(env_count: usize, w: f32, h: f32) -> MainWindow {
     // — so `value_cell_reveals_while_held_and_hides_on_release` now exercises the
     // extracted function end-to-end (exactly-one-cell un-masks).
     ui.on_is_cell_revealed(crate::reveal::is_revealed);
+    // Install the env-scrollbar geometry (issue #60) the same way `main()` does, so
+    // the bar's `sb-*` bindings resolve to the tested pure `scrollbar::*` — otherwise
+    // the unset pure callbacks return their defaults (length 0 / false) and the bar
+    // never renders, so the scrollbar view tests below exercise the real functions.
+    ui.on_sb_visible(crate::scrollbar::is_scrollable);
+    ui.on_sb_max_scroll(crate::scrollbar::max_scroll);
+    ui.on_sb_thumb_len(crate::scrollbar::thumb_len);
+    ui.on_sb_thumb_offset(crate::scrollbar::thumb_offset);
+    ui.on_sb_scroll_from_thumb(crate::scrollbar::scroll_from_thumb);
     ui.set_pane(SharedString::from("matrix"));
     let envs: Vec<SharedString> = (0..env_count)
         .map(|j| SharedString::from(format!("env{j}")))
@@ -1076,4 +1085,109 @@ fn real_wheel_scroll_mirrors_to_scroll_y_and_repins_the_active_cluster() {
     // The mirrored offset repinned the overlay to the second cluster.
     assert_eq!(label_count(&ui, "pinned-db.*"), 0);
     assert_eq!(label_count(&ui, "pinned-gh.*"), 1);
+}
+
+// --- Issue #60: an always-visible horizontal scrollbar under the env region,
+// shown only when the Comparison Columns overflow the visible band (the ADR 0023
+// hold-floor-and-scroll regime). It drives env-body's viewport-x (mirrored out to
+// scroll-x); the header band follows via the existing viewport-x binding. The
+// track is always present and collapses to zero HEIGHT when the columns fit — an
+// `if` keyed on the overflow would reintroduce the ADR 0023 binding loop (the row
+// PRESENCE, hence matrix.layoutinfo-h, would depend on envs-w). ---
+
+#[test]
+fn horizontal_scrollbar_is_hidden_when_columns_fit() {
+    i_slint_backend_testing::init_no_event_loop();
+    // 2 envs in a wide window → stretch-to-fill regime (envs-w == available), no
+    // overflow → the always-present track collapses to ~0 height (shown only on
+    // overflow). size() is reliable headlessly (only offsets aren't).
+    let ui = matrix_window(); // 2 env, 1400px
+    let h = one_by_label(&ui, "env-scrollbar-track").size().height;
+    assert!(
+        h < 2.0,
+        "the env scrollbar must collapse to ~0 height when the columns fit (got {h})"
+    );
+}
+
+#[test]
+fn horizontal_scrollbar_shows_a_partial_thumb_when_columns_overflow() {
+    i_slint_backend_testing::init_no_event_loop();
+    // 8 envs / 1000px → hold-floor-and-scroll regime (envs-w ≫ available) → the
+    // track is shown at full height with a partial, grabbable thumb.
+    let ui = matrix_window_n(8, 1000.0, 700.0);
+
+    let track = one_by_label(&ui, "env-scrollbar-track");
+    let track_h = track.size().height;
+    let track_w = track.size().width;
+    assert!(
+        (10.0..14.0).contains(&track_h),
+        "the env scrollbar track must be shown (~12px) when columns overflow (got {track_h})"
+    );
+
+    let thumb_w = one_by_label(&ui, "env-scrollbar-thumb").size().width;
+    // Partial: the thumb is a fraction of the track (content ≫ viewport), floored
+    // at the 32px min so it stays grabbable, and strictly narrower than the track.
+    assert!(
+        thumb_w >= 30.0 && thumb_w < track_w - 50.0,
+        "the thumb must be a partial, grabbable fraction of the track \
+         (thumb {thumb_w}, track {track_w})"
+    );
+}
+
+#[test]
+fn dragging_the_scrollbar_thumb_scrolls_the_env_region_and_back() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    // Dragging the thumb right scrolls the env region right: the SIBLING track
+    // TouchArea writes env-body.viewport-x (mirrored to scroll-x) and slides the
+    // env cells left under the frozen columns. env-body is non-interactive, so a
+    // working drag proves the track owns its own pointer grab — the point of #60.
+    let ui = matrix_window_n(8, 1000.0, 700.0);
+    let window = ui.window();
+
+    assert!(
+        ui.get_scroll_x().abs() < 0.5,
+        "starts at the leftmost column"
+    );
+    let cell_x_before = body_x(&ui, 0);
+
+    // Grab the thumb at its centre and drag right by 30px (small enough that the
+    // leftmost cell stays partially on-screen, so it is still instantiated).
+    let thumb = cell_center(&ui, "env-scrollbar-thumb");
+    window.dispatch_event(WindowEvent::PointerMoved { position: thumb });
+    window.dispatch_event(WindowEvent::PointerPressed {
+        position: thumb,
+        button: PointerEventButton::Left,
+    });
+    let dragged = slint::LogicalPosition::new(thumb.x + 30.0, thumb.y);
+    window.dispatch_event(WindowEvent::PointerMoved { position: dragged });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+
+    let scrolled = ui.get_scroll_x();
+    assert!(
+        scrolled > 40.0,
+        "dragging the thumb right must scroll the env region right (scroll-x {scrolled})"
+    );
+    // The env cells actually shifted left by the scroll amount (freeze-pane slid
+    // the leftmost Environment under the frozen ENTRY/STATE columns).
+    let cell_x_after = body_x(&ui, 0);
+    assert!(
+        cell_x_before - cell_x_after > 40.0,
+        "the env cells must shift left when scrolled (before {cell_x_before}, after {cell_x_after})"
+    );
+
+    // Still holding, drag back to the start → scroll returns to the leftmost column
+    // (the drag inverse is symmetric; the thumb tracks the cursor with no drift).
+    window.dispatch_event(WindowEvent::PointerMoved { position: thumb });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert!(
+        ui.get_scroll_x().abs() < 5.0,
+        "dragging the thumb back must return to the leftmost column (scroll-x {})",
+        ui.get_scroll_x()
+    );
+
+    window.dispatch_event(WindowEvent::PointerReleased {
+        position: thumb,
+        button: PointerEventButton::Left,
+    });
 }
