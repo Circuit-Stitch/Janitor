@@ -19,7 +19,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use janitor_core::compare::EntryState;
-use janitor_core::config::{Application, Config, Mapping};
+use janitor_core::config::{Application, Config, Mapping, Method};
 use janitor_core::provider::What;
 use janitor_core::view::{sort_rows, state_glyph, MatrixCell, MatrixView, SortKey};
 
@@ -555,7 +555,9 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
     let win = ManageWindow::new().expect("create Manage window");
     {
         let state = state.clone();
-        win.on_add_env_discover(move |env| begin_discovery(&state, env.to_string()));
+        win.on_add_env_discover(move |env, method_index| {
+            begin_discovery(&state, env.to_string(), method_index as usize)
+        });
     }
     {
         let state = state.clone();
@@ -593,10 +595,30 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
     win
 }
 
-/// Start a guided walk for a typed Environment name on the bound Application.
-/// Region resolves to `secret_region` else `sso_region` (ADR 0013); the
-/// remembered last-pick seeds the defaults.
-fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String) {
+/// Short display label for a Mapping's [`Method`] (ADR 0031) — a location tag for
+/// the Manage window's Environment rows, never a Value.
+fn method_label(method: Method) -> &'static str {
+    match method {
+        Method::SecretsManager => "SM",
+        Method::SsmDotenv => "SSM",
+    }
+}
+
+/// Map the Manage-window picker index (0 = Secrets Manager, 1 = remote `.env`/SSM)
+/// to a [`Method`]; anything else falls back to the Secrets Manager default
+/// (ADR 0031 Decision 7).
+fn method_from_index(index: usize) -> Method {
+    match index {
+        1 => Method::SsmDotenv,
+        _ => Method::SecretsManager,
+    }
+}
+
+/// Start a guided walk for a typed Environment name on the bound Application, using
+/// the [`Method`] chosen in the per-row picker (ADR 0031). Region resolves to
+/// `secret_region` else `sso_region` (ADR 0013); the remembered last-pick seeds the
+/// defaults.
+fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String, method_index: usize) {
     let env = env.trim().to_string();
     if env.is_empty() {
         return;
@@ -609,6 +631,7 @@ fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String) {
             st.config.secret_region.clone()
         };
         Command::BeginDiscovery {
+            method: method_from_index(method_index),
             environment: env,
             region,
             remembered: st.config.last_pick.clone(),
@@ -883,6 +906,7 @@ fn env_rows(config: &Config, selected: usize) -> ModelRc<EnvRow> {
                     region: m.region.clone().into(),
                     secret_id: m.secret_id.clone().into(),
                     permission_set: m.permission_set.clone().into(),
+                    method: method_label(m.method).into(),
                 })
                 .collect()
         })
@@ -902,13 +926,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // Provider `kind`. Mock loads the seeded demo Config (never persisted); real
     // loads the user's saved org.
     let mock = env::var("JANITOR_MOCK").is_ok() || env::args().any(|a| a == "--mock");
-    // `--ssm`/`JANITOR_SSM` selects the remote-`.env`-over-SSM Provider (ADR 0025)
-    // against the saved org, instead of the default Secrets Manager Provider.
-    let ssm = env::var("JANITOR_SSM").is_ok() || env::args().any(|a| a == "--ssm");
+    // The real `AwsFamilyProvider` drives both AWS-family methods, chosen per
+    // Mapping (ADR 0031); the old session-global `--ssm` toggle is retired — a
+    // mixed Secrets Manager / remote-`.env`-over-SSM matrix is now per-row.
     let kind = if mock {
         ProviderKind::Mock
-    } else if ssm {
-        ProviderKind::SsmDotenv
     } else {
         ProviderKind::Aws
     };
@@ -1352,6 +1374,21 @@ mod chrome_tests {
     }
 
     #[test]
+    fn method_picker_index_maps_to_the_method_and_back_to_a_label() {
+        // The Manage-window per-row picker (ADR 0031): index 0 = Secrets Manager
+        // (the back-compat default, also for any stray index), 1 = remote .env/SSM.
+        assert_eq!(method_from_index(0), Method::SecretsManager);
+        assert_eq!(method_from_index(1), Method::SsmDotenv);
+        assert_eq!(
+            method_from_index(99),
+            Method::SecretsManager,
+            "out-of-range falls back to the default"
+        );
+        assert_eq!(method_label(Method::SecretsManager), "SM");
+        assert_eq!(method_label(Method::SsmDotenv), "SSM");
+    }
+
+    #[test]
     fn state_counts_tallies_each_entry_state() {
         let view = MatrixView {
             environments: vec!["prod".into()],
@@ -1377,6 +1414,7 @@ mod chrome_tests {
                     region: "us-east-1".into(),
                     secret_id: "arn:aws:secretsmanager:us-east-1:111:secret:payments".into(),
                     permission_set: "ps".into(),
+                    method: Method::SecretsManager,
                 },
                 Mapping {
                     environment: "staging".into(),
@@ -1384,6 +1422,7 @@ mod chrome_tests {
                     region: "us-east-1".into(),
                     secret_id: "arn:other".into(),
                     permission_set: "ps".into(),
+                    method: Method::SecretsManager,
                 },
             ],
         });

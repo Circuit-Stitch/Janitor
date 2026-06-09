@@ -118,6 +118,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "myapp/prod".into(),
             permission_set: "ReadOnly".into(),
+            method: janitor_core::config::Method::SecretsManager,
         }
     }
 

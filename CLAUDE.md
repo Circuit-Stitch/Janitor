@@ -117,7 +117,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > [`docs/superpowers/specs/2026-05-31-gui-aws-bridge-design.md`](docs/superpowers/specs/2026-05-31-gui-aws-bridge-design.md),
 > and [`docs/superpowers/plans/2026-05-31-gui-aws-bridge.md`](docs/superpowers/plans/2026-05-31-gui-aws-bridge.md).
 > Domain glossary: [`CONTEXT.md`](CONTEXT.md); decisions: [`docs/adr/`](docs/adr/)
-> (0001–0030); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+> (0001–0031); security posture: [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 > **Read those first** — this file only summarizes.
 
 ## What this is

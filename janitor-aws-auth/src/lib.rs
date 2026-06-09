@@ -21,10 +21,17 @@
 pub mod authwalk;
 pub mod broker;
 pub mod error;
+pub mod family;
+pub mod method;
 pub mod pkce;
 pub mod state;
 pub mod types;
 pub mod wire;
+pub mod write;
+
+pub use family::AwsFamilyProvider;
+pub use method::{MethodError, ResourceMethod};
+pub use write::{EnvEdit, EnvWriteError, WriteOutcome};
 
 // Untested shell (real I/O); compiled but not coverage-gated.
 pub mod authenticator;

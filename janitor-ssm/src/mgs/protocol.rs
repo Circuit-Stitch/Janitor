@@ -32,6 +32,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use janitor_aws_auth::write::WriteOutcome;
+
 use super::frame::{message_type, payload_type, AgentMessage, FLAG_FIN, FLAG_SYN};
 
 /// The client version advertised in the OpenDataChannel handshake + handshake
@@ -489,19 +491,6 @@ fn nonzero(millis: u64) -> u64 {
 /// the pty in fixed buffers, so any chunk size works; this keeps a few-KB `.env`
 /// to a handful of frames.
 const INPUT_CHUNK_SIZE: usize = 1024;
-
-/// The outcome of a remote `.env` write, parsed from the small status tokens the
-/// CAS-guarded command prints (ADR 0029). Distinct from an [`MgsError`] (a
-/// transport/protocol failure): both `Applied` and `Conflict` are *successful*
-/// round-trips of the protocol — the command ran and reported its result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteOutcome {
-    /// `JANITOR_OK` — the CAS matched and the atomic replace committed.
-    Applied,
-    /// `JANITOR_CONFLICT` — the file's `sha256` no longer matched what we read, so
-    /// the command refused (ADR 0001). The caller re-reads, re-applies, retries.
-    Conflict,
-}
 
 /// Scan the command's accumulated stdout for the status token. `CONFLICT` is
 /// checked first (it is printed and the command exits *before* any `OK` could

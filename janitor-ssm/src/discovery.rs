@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use janitor_core::config::Mapping;
+use janitor_core::config::{Mapping, Method};
 use janitor_core::discovery::{Choice, Orchestrator, StepPlan, Steps};
 use janitor_core::provider::{Step, What};
 
@@ -44,7 +44,10 @@ const DEFAULT_DOTENV_PATH: &str = "/app/.env";
 /// seams; the state it carries across the (re-entrant) walk is the once-minted
 /// Credential and the session-logging advisory — the chosen account/role/instance
 /// keys and the typed path live in the orchestrator's `chosen`.
-struct SsmSteps {
+/// `pub(crate)` so [`SsmDotenvMethod`](crate::method::SsmDotenvMethod) can build it
+/// as its Discovery tail (ADR 0031) — the same steps the `SsmDiscovery` handle the
+/// live-verify binary uses drives.
+pub(crate) struct SsmSteps {
     token: Arc<SsoToken>,
     catalog: Arc<dyn AccountCatalog>,
     role_client: Arc<dyn RoleCredentialClient>,
@@ -61,16 +64,37 @@ struct SsmSteps {
     /// one-shot front-half mint + logging probe against a re-entrant `next`).
     cred: Option<Credential>,
     /// The session-logging advisory computed at the mint (probed once we hold a
-    /// credential), pulled up by the Provider after each step (ADR 0025).
+    /// credential), pulled up by the shell after each step (ADR 0025).
     advisory: Option<String>,
 }
 
 impl SsmSteps {
-    /// Take the session-logging advisory computed at the credential mint (the wizard
-    /// surfaces it). `None` until the walk has minted, or if logging is off. Drained
-    /// so the Provider surfaces it at most once.
-    fn take_advisory(&mut self) -> Option<String> {
-        self.advisory.take()
+    /// Build the remote-`.env`-over-SSM Discovery method (no I/O until driven).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        token: Arc<SsoToken>,
+        catalog: Arc<dyn AccountCatalog>,
+        role_client: Arc<dyn RoleCredentialClient>,
+        instances: Arc<dyn InstanceCatalog>,
+        reader: Arc<dyn RemoteFileReader>,
+        logging: Arc<dyn LoggingPreference>,
+        environment: String,
+        region: String,
+        remembered: Option<Mapping>,
+    ) -> Self {
+        SsmSteps {
+            token,
+            catalog,
+            role_client,
+            instances,
+            reader,
+            logging,
+            environment,
+            region,
+            remembered,
+            cred: None,
+            advisory: None,
+        }
     }
 
     fn remembered_account(&self) -> Option<&str> {
@@ -112,6 +136,7 @@ impl SsmSteps {
             region: self.region.clone(),
             secret_id: format!("{instance_id}:{path}"),
             permission_set: role.to_string(),
+            method: Method::SsmDotenv,
         }
     }
 }
@@ -199,6 +224,13 @@ impl Steps for SsmSteps {
             Err(e) => StepPlan::Terminal(Step::Failed(e.reason())),
         }
     }
+
+    /// Drain the session-logging advisory computed at the credential mint (the
+    /// wizard surfaces it). `None` until the walk has minted, or if logging is off.
+    /// The shell pulls it after each step via [`Orchestrator::take_advisory`].
+    fn take_advisory(&mut self) -> Option<String> {
+        self.advisory.take()
+    }
 }
 
 /// The guided remote-`.env`-over-SSM discovery walk for one Environment: a thin
@@ -224,7 +256,7 @@ impl SsmDiscovery {
         remembered: Option<Mapping>,
     ) -> Self {
         SsmDiscovery {
-            orch: Orchestrator::new(SsmSteps {
+            orch: Orchestrator::new(SsmSteps::new(
                 token,
                 catalog,
                 role_client,
@@ -234,16 +266,14 @@ impl SsmDiscovery {
                 environment,
                 region,
                 remembered,
-                cred: None,
-                advisory: None,
-            }),
+            )),
         }
     }
 
     /// Take the session-logging advisory computed during the walk (the wizard
     /// surfaces it). Drained so the Provider surfaces it at most once.
     pub fn take_advisory(&mut self) -> Option<String> {
-        self.orch.steps_mut().take_advisory()
+        self.orch.take_advisory()
     }
 
     /// Begin the walk: collapse singleton steps until the first `many` choice (an
@@ -392,6 +422,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "i-second:/app/.env".into(),
             permission_set: "ReadOnly".into(),
+            method: Method::SsmDotenv,
         };
         let mut d = discovery(
             "staging",
@@ -434,6 +465,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "i-0abc:/etc/app/.env".into(),
             permission_set: "ReadOnly".into(),
+            method: Method::SsmDotenv,
         };
         let mut d = discovery(
             "prod",

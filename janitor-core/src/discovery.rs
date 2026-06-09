@@ -95,8 +95,32 @@ pub enum StepPlan {
 /// it has already performed — guard those on its own cached state, e.g. a minted
 /// credential).
 #[async_trait]
-pub trait Steps: Send {
+pub trait Steps: Send + Sync {
     async fn next(&mut self, chosen: &[String]) -> StepPlan;
+
+    /// Drain an operator **advisory** the method accumulated mid-walk (ADR 0025 /
+    /// ADR 0031): a masked policy note about an unavoidable side effect of a read
+    /// (e.g. org-wide SSM session logging archives the file to S3/CloudWatch). The
+    /// shell pulls it after each step via [`Orchestrator::take_advisory`] and
+    /// surfaces it once. A method with no such side effect returns `None` (the
+    /// default) — the Secrets Manager and mock methods all do. Never a Value.
+    fn take_advisory(&mut self) -> Option<String> {
+        None
+    }
+}
+
+/// Forward [`Steps`] through a `Box<dyn Steps>` so the AWS-family shell can
+/// type-erase a Method's discovery tail to `Orchestrator<Box<dyn Steps>>`
+/// (ADR 0031): one engine drives the walk regardless of which Method supplied the
+/// steps. The orphan rule allows this here because `core` owns `Steps`.
+#[async_trait]
+impl Steps for Box<dyn Steps> {
+    async fn next(&mut self, chosen: &[String]) -> StepPlan {
+        (**self).next(chosen).await
+    }
+    fn take_advisory(&mut self) -> Option<String> {
+        (**self).take_advisory()
+    }
 }
 
 /// What the orchestrator is paused on, so a resolution maps back without the method
@@ -134,6 +158,13 @@ impl<S: Steps> Orchestrator<S> {
     /// method accumulated mid-walk (ADR 0025), which the engine itself never sees.
     pub fn steps_mut(&mut self) -> &mut S {
         &mut self.steps
+    }
+
+    /// Drain an advisory the method accumulated mid-walk (ADR 0025 / ADR 0031),
+    /// without the shell reaching into the method's concrete type — it works for
+    /// `Orchestrator<Box<dyn Steps>>` too (via the `Box<dyn Steps>` forward).
+    pub fn take_advisory(&mut self) -> Option<String> {
+        self.steps.take_advisory()
     }
 
     /// Begin the walk: drive until the first `Ask`/`Input` or a terminal outcome.
@@ -263,6 +294,7 @@ mod tests {
             region: "r".into(),
             secret_id: chosen.join("|"),
             permission_set: chosen.get(1).cloned().unwrap_or_default(),
+            method: crate::config::Method::SecretsManager,
         }
     }
 
@@ -300,6 +332,42 @@ mod tests {
 
     fn orch(stages: Vec<Stage>) -> Orchestrator<FakeSteps> {
         Orchestrator::new(FakeSteps::new(stages))
+    }
+
+    /// A one-shot method that completes immediately and carries an advisory, to
+    /// exercise the `take_advisory` override forwarded through `Box<dyn Steps>`.
+    struct AdvisorySteps {
+        advisory: Option<String>,
+    }
+    #[async_trait]
+    impl Steps for AdvisorySteps {
+        async fn next(&mut self, chosen: &[String]) -> StepPlan {
+            StepPlan::Done(mapping_from(chosen))
+        }
+        fn take_advisory(&mut self) -> Option<String> {
+            self.advisory.take()
+        }
+    }
+
+    #[tokio::test]
+    async fn boxed_steps_drive_and_forward_take_advisory() {
+        // The AWS-family shell type-erases a Method's tail to `Box<dyn Steps>`; the
+        // engine drives it identically and the advisory forwards through the box,
+        // surfaced once (ADR 0031). An overriding method yields its note then drains.
+        let steps: Box<dyn Steps> = Box::new(AdvisorySteps {
+            advisory: Some("logged to S3".into()),
+        });
+        let mut o = Orchestrator::new(steps);
+        assert!(matches!(o.start().await, Step::Done(_)));
+        assert_eq!(o.take_advisory().as_deref(), Some("logged to S3"));
+        assert!(o.take_advisory().is_none(), "drained — surfaced once");
+
+        // A method that does not override `take_advisory` (the default) returns
+        // `None` through the same box — the Secrets Manager / mock case.
+        let plain: Box<dyn Steps> = Box::new(FakeSteps::new(vec![Stage::Done]));
+        let mut o = Orchestrator::new(plain);
+        assert!(matches!(o.start().await, Step::Done(_)));
+        assert!(o.take_advisory().is_none(), "no advisory by default");
     }
 
     #[tokio::test]

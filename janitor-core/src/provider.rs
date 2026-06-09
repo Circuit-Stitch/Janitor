@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 
 use crate::compare::RowKey;
-use crate::config::{Application, Mapping};
+use crate::config::{Application, Mapping, Method};
 use crate::view::MatrixView;
 
 /// The port's agnostic Sign-in failure: an opaque, error-safe message. A Provider
@@ -181,10 +181,15 @@ pub trait Provider: Send {
     /// `None` if the cell is gone/absent/unrevealable.
     fn reveal(&self, key: &RowKey, col: usize) -> Option<String>;
 
-    /// Begin a guided [`Step`] walk for one new Environment (ADR 0013). A failed
-    /// Sign-in surfaces as the agnostic [`SignInFailed`].
+    /// Begin a guided [`Step`] walk for one new Environment (ADR 0013), backed by
+    /// the chosen [`Method`] (ADR 0031). The method is picked *outside* the walk
+    /// (the Manage window's per-row picker), so it is known before the first step
+    /// and `core`'s `Step`/`What` surface needs no `Method` step. A Provider that
+    /// has only one backend (the mock) ignores it. A failed Sign-in surfaces as the
+    /// agnostic [`SignInFailed`].
     async fn begin_discovery(
         &mut self,
+        method: Method,
         environment: String,
         region: String,
         remembered: Option<Mapping>,

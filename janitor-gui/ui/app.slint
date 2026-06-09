@@ -45,6 +45,9 @@ export struct EnvRow {
     region: string,
     secret_id: string,
     permission_set: string,
+    // Which AWS-family Method backs this Environment (ADR 0031), as a short label
+    // ("SM" / "SSM"). Display-only — a location tag, never a Value.
+    method: string,
 }
 
 // Shared palette helpers so per-row colour logic isn't duplicated or threaded
@@ -1298,7 +1301,9 @@ export component ManageWindow inherits Window {
     // exclusive with the choice picker above (one question at a time).
     in property <string> input-prompt;
     in property <string> input-default;
-    callback add-env-discover(string); // env name only → Discovery fills the rest
+    // env name + chosen Method index (0 = Secrets Manager, 1 = remote .env/SSM) →
+    // Discovery fills the rest (ADR 0031 per-row method picker).
+    callback add-env-discover(string, int);
     callback pick-choice(int);         // chosen index → AdvanceDiscovery
     callback provide-input(string);    // typed path → ProvideInput
     callback back-discovery();         // dismiss a terminal message to adjust/retry
@@ -1332,9 +1337,11 @@ export component ManageWindow inherits Window {
         }
         for env[i] in root.envs : HorizontalLayout {
             spacing: 8px;
-            Text { text: env.environment; color: white; width: 90px; }
-            Text { text: env.account-id; color: #9aa0aa; width: 130px; }
-            Text { text: env.region; color: #9aa0aa; width: 90px; }
+            Text { text: env.environment; color: white; width: 80px; }
+            // The Method tag (ADR 0031) — which backend this env's Set lives in.
+            Text { text: env.method; color: #7ea8d8; width: 44px; }
+            Text { text: env.account-id; color: #9aa0aa; width: 120px; }
+            Text { text: env.region; color: #9aa0aa; width: 84px; }
             Text { text: env.secret-id; color: #9aa0aa; horizontal-stretch: 1; overflow: elide; }
             Button { text: "Remove"; clicked => { root.remove-env(i); } }
         }
@@ -1345,10 +1352,18 @@ export component ManageWindow inherits Window {
                 placeholder-text: "environment name (e.g. prod)";
                 horizontal-stretch: 1;
             }
+            // Per-row Method picker (ADR 0031 Decision 7): the chosen backend rides
+            // on Discovery so the walk runs that method's tail. Default Secrets
+            // Manager (index 0).
+            add-method := ComboBox {
+                model: ["Secrets Manager", "Remote .env / SSM"];
+                current-index: 0;
+                min-width: 170px;
+            }
             Button {
                 text: "+ Add env";
                 clicked => {
-                    root.add-env-discover(new-env.text);
+                    root.add-env-discover(new-env.text, add-method.current-index);
                     new-env.text = "";
                 }
             }

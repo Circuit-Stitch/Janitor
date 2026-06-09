@@ -97,6 +97,30 @@ impl Application {
     }
 }
 
+/// Which AWS-family **Method** backs one Mapping — the swappable resource tail
+/// behind the shared `account → role → mint` auth front half (ADR 0031). A closed
+/// enum: `SecretsManager` reads the Set via `GetSecretValue`; `SsmDotenv` reads a
+/// remote `.env` off an SSM-managed Instance. It is method *identity* (the same
+/// granularity `What::{Secrets,Instances,FilePath}` already carries) — not the AWS
+/// auth vocabulary `core` keeps out (ADR 0019); it lives here because `Mapping`
+/// serializes it and the per-Mapping registry key must be provider-agnostic.
+///
+/// `Default` is `SecretsManager`, and the `Mapping::method` field is
+/// `#[serde(default)]`, so every existing `config.toml` (written before this tag
+/// existed, with no `method` key) loads as `SecretsManager` — exactly the prior
+/// behaviour. `Ord`/`Hash` so it can key the shell's method registry.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Method {
+    /// AWS Secrets Manager (`GetSecretValue`). The back-compat default.
+    #[default]
+    SecretsManager,
+    /// A remote `.env` on an SSM-managed Instance, read over Session Manager.
+    SsmDotenv,
+}
+
 /// Which concrete AWS Secret Set backs one Environment of an Application.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mapping {
@@ -110,6 +134,13 @@ pub struct Mapping {
     pub secret_id: String,
     /// IAM Identity Center permission set used to reach this account.
     pub permission_set: String,
+    /// The [`Method`] that reaches this Set (ADR 0031). `#[serde(default)]` so a
+    /// pre-`method` `config.toml` loads as [`Method::SecretsManager`]. `secret_id`
+    /// keeps overloading the ARN (Secrets Manager) vs `<instance-id>:<path>` (SSM);
+    /// this tag *disambiguates the method* so nothing parses the string to guess
+    /// the backend.
+    #[serde(default)]
+    pub method: Method,
 }
 
 /// Errors loading or saving [`Config`].
@@ -230,6 +261,7 @@ mod tests {
                 region: "us-west-2".into(),
                 secret_id: "myapp/live".into(),
                 permission_set: "ReadOnly".into(),
+                method: Method::SecretsManager,
             }),
             entry_column_width: Some(280.0),
             applications: vec![Application {
@@ -241,6 +273,7 @@ mod tests {
                         region: "us-east-1".into(),
                         secret_id: "myapp/prod".into(),
                         permission_set: "ReadOnly".into(),
+                        method: Method::SecretsManager,
                     },
                     Mapping {
                         environment: "staging".into(),
@@ -248,6 +281,7 @@ mod tests {
                         region: "us-west-2".into(),
                         secret_id: "myapp/staging".into(),
                         permission_set: "ReadOnly".into(),
+                        method: Method::SecretsManager,
                     },
                 ],
             }],
@@ -261,6 +295,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: format!("myapp/{env}"),
             permission_set: "ReadOnly".into(),
+            method: Method::SecretsManager,
         }
     }
 
@@ -469,6 +504,70 @@ applications = []
         assert!(
             c.entry_column_width.is_none(),
             "missing entry_column_width → default None (GUI falls back to its layout default)"
+        );
+    }
+
+    #[test]
+    fn method_defaults_to_secrets_manager() {
+        // The back-compat default (ADR 0031 Decision 6): an untagged Mapping is a
+        // Secrets Manager one, so existing matrices keep working unchanged.
+        assert_eq!(Method::default(), Method::SecretsManager);
+        assert_eq!(mapping("prod").method, Method::SecretsManager);
+    }
+
+    #[test]
+    fn mapping_round_trips_its_method_tag() {
+        // A non-default method survives save → load (the per-Mapping selection a
+        // mixed-method matrix records in Config).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut original = sample();
+        original.applications[0].environments[1].method = Method::SsmDotenv;
+        original.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, original);
+        assert_eq!(
+            loaded.applications[0].environments[0].method,
+            Method::SecretsManager,
+            "prod kept its Secrets Manager method"
+        );
+        assert_eq!(
+            loaded.applications[0].environments[1].method,
+            Method::SsmDotenv,
+            "staging's SSM method round-tripped"
+        );
+    }
+
+    #[test]
+    fn old_config_mapping_without_method_loads_as_secrets_manager() {
+        // A config.toml written before the `method` tag existed (no `method` key on
+        // its Mappings) must still load, defaulting every Mapping to Secrets Manager
+        // — the exact prior behaviour (#[serde(default)], ADR 0031 Decision 6).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+sso_start_url = "https://old.awsapps.com/start"
+sso_region = "us-east-1"
+
+[[applications]]
+name = "myapp"
+
+[[applications.environments]]
+environment = "prod"
+account_id = "111111111111"
+region = "us-east-1"
+secret_id = "myapp/prod"
+permission_set = "ReadOnly"
+"#,
+        )
+        .unwrap();
+        let c = Config::load_from(&path).unwrap();
+        assert_eq!(
+            c.applications[0].environments[0].method,
+            Method::SecretsManager,
+            "a Mapping with no `method` key defaults to Secrets Manager"
         );
     }
 

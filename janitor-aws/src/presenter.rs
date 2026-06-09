@@ -287,6 +287,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "arn:old".into(),
             permission_set: "ReadOnly".into(),
+            method: janitor_core::config::Method::SecretsManager,
         };
         let mut d = two_account_discovery(Some(remembered));
         let mut input = Cursor::new(b"\n".to_vec());
@@ -427,6 +428,7 @@ mod tests {
                 region: "us-east-1".into(),
                 secret_id: format!("i-0abc:{text}"),
                 permission_set: "ReadOnly".into(),
+                method: janitor_core::config::Method::SecretsManager,
             })
         }
     }

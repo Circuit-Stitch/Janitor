@@ -15,6 +15,8 @@ mod channel;
 
 pub use channel::TungsteniteChannel;
 pub use protocol::{
-    read_command_output, write_command_output, DataChannel, MgsError, SessionState, WriteOutcome,
-    WriteSession,
+    read_command_output, write_command_output, DataChannel, MgsError, SessionState, WriteSession,
 };
+// The CAS write outcome lives in the shared base now (ADR 0031); re-export it here
+// so the rest of `janitor-ssm` keeps reaching it as `crate::mgs::WriteOutcome`.
+pub use janitor_aws_auth::write::WriteOutcome;

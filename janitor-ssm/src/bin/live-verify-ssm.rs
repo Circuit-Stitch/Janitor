@@ -4,7 +4,8 @@
 //!
 //!   cargo run -p janitor-ssm --bin live-verify-ssm
 //!
-//! It mirrors `janitor-aws`'s `live-verify`, but drives the **`SsmProvider`**
+//! It mirrors `janitor-aws`'s `live-verify`, but drives the generic
+//! **`AwsFamilyProvider`** with a single-entry SSM method registry (ADR 0031)
 //! through the `core::provider::Provider` port: browser Sign-in → the guided walk
 //! (account → role → mint → instance → free-text `.env` path) → a read over the
 //! pure-Rust Session Manager (MGS) data channel → `parse_dotenv` → a **masked**
@@ -18,16 +19,21 @@
 //! First run prompts once for the org (SSO start URL, SSO region, secret region)
 //! and saves them to Config. `--reset-config` clears the saved Config first.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
 use janitor_aws_auth::authenticator::Authenticator;
 use janitor_aws_auth::aws_impl::{AwsOidcClient, AwsRoleClient};
+use janitor_aws_auth::method::ResourceMethod;
 use janitor_aws_auth::types::SystemClock;
-use janitor_core::config::{Application, Config};
+use janitor_aws_auth::AwsFamilyProvider;
+use janitor_core::config::{Application, Config, Method};
 use janitor_core::provider::{Provider, Step, What};
-use janitor_ssm::{AwsInstanceCatalog, AwsLoggingPreference, SsmFileReader, SsmProvider};
+use janitor_ssm::{
+    AwsInstanceCatalog, AwsLoggingPreference, SsmDotenvMethod, SsmFileReader, SsmFileWriter,
+};
 
 fn arg(flag: &str) -> Option<String> {
     let args: Vec<String> = env::args().collect();
@@ -114,7 +120,7 @@ fn what_word(what: What) -> &'static str {
 
 /// Print (and drain) any session-logging advisories the Provider surfaced — the
 /// masked policy note about org-wide SSM logging (ADR 0025).
-async fn drain_advisories(provider: &mut SsmProvider) {
+async fn drain_advisories(provider: &mut AwsFamilyProvider) {
     for w in provider.take_advisories().await {
         println!("⚠ session-logging: {w}");
     }
@@ -168,20 +174,29 @@ async fn main() {
     config.save().expect("save config");
 
     // 2. Build the real adapters (no ambient credentials — ADR 0010 §10) and the
-    //    SsmProvider with the B4 SSM tail (DescribeInstanceInformation, the MGS
-    //    file read, GetDocument logging detection).
+    //    generic `AwsFamilyProvider` shell driving the SSM method (the B4 SSM tail:
+    //    DescribeInstanceInformation, the MGS file read+write, GetDocument logging
+    //    detection). One registry entry — `Method::SsmDotenv`.
     let oidc = Arc::new(AwsOidcClient::new(config.sso_region.clone()).await);
     let role_client = Arc::new(AwsRoleClient::new(config.sso_region.clone()).await);
     let clock = Arc::new(SystemClock);
     let authenticator = Arc::new(Authenticator::new(oidc, config.sso_start_url.clone()));
-    let mut provider = SsmProvider::new(
+    let ssm: Arc<dyn ResourceMethod> = Arc::new(SsmDotenvMethod::new(
+        role_client.clone(), // AccountCatalog
+        role_client.clone(), // RoleCredentialClient
+        Arc::new(AwsInstanceCatalog),
+        Arc::new(SsmFileReader),
+        Arc::new(SsmFileWriter),
+        Arc::new(AwsLoggingPreference),
+    ));
+    let mut methods: BTreeMap<Method, Arc<dyn ResourceMethod>> = BTreeMap::new();
+    methods.insert(Method::SsmDotenv, ssm);
+    let mut provider = AwsFamilyProvider::new(
         authenticator,
         role_client.clone(),
         role_client,
-        Arc::new(AwsInstanceCatalog),
-        Arc::new(SsmFileReader),
-        Arc::new(AwsLoggingPreference),
         clock,
+        methods,
     );
 
     // 3. Sign in (opens the browser).
@@ -195,6 +210,7 @@ async fn main() {
     //    surface (at the credential mint).
     let mut step = provider
         .begin_discovery(
+            Method::SsmDotenv,
             "live".into(),
             config.secret_region.clone(),
             config.last_pick.clone(),
