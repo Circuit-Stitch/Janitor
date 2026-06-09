@@ -1,14 +1,18 @@
-//! Reading and shaping one remote `.env` (ADR 0025): pull the file off the
-//! Instance through the [`RemoteFileReader`] seam, parse `KEY=VALUE` into the
-//! same flat [`SecretShape`] a JSON Set produces, and mask any failure into the
-//! port's [`FetchFailReason`]. The credential minting for a whole-Application
-//! load is brokered per Environment by [`SsmSource`].
+//! Reading, shaping, and writing one remote `.env` (ADR 0025 / ADR 0029): pull the
+//! file off the Instance through the [`RemoteFileReader`] seam, parse `KEY=VALUE`
+//! into the same flat [`SecretShape`] a JSON Set produces, and mask any failure
+//! into the shared [`MethodError`]. The per-Environment credential mint + the
+//! whole-Application load loop now live in the generic
+//! [`AwsFamilyProvider`](janitor_aws_auth::AwsFamilyProvider) shell (ADR 0031); this
+//! module is the Method's *tail*: the pure read+parse, plus the non-stomping CAS
+//! write engine ([`write_dotenv`]) and the [`SsmWriter`] the live-verify-ssm-write
+//! binary drives.
 //!
-//! Two failure sources fold into one masked classification at this seam, so no
-//! raw SSM/SDK text and no `.env` line content ever reaches a Value, an `Event`,
-//! or the Diagnostic Log (THREAT-MODEL): a read failure ([`SessionError`], via
-//! the shared `From<&SessionError>` impl in `janitor-aws-auth`) and a malformed
-//! `.env` ([`DotenvError`], B2's crate-local error → `Unsupported`).
+//! Two read-failure sources fold into one masked classification at this seam, so no
+//! raw SSM/SDK text and no `.env` line content ever reaches a Value, an `Event`, or
+//! the Diagnostic Log (THREAT-MODEL): a read failure ([`SessionError`] →
+//! [`MethodError::Session`]) and a malformed `.env` ([`DotenvError`] →
+//! [`MethodError::Content`], preserving its `"malformed .env line N"` detail).
 
 use std::sync::Arc;
 
@@ -20,12 +24,12 @@ use janitor_core::secret::SecretShape;
 
 use janitor_aws_auth::broker::CredentialBroker;
 use janitor_aws_auth::error::SessionError;
+use janitor_aws_auth::method::MethodError;
 use janitor_aws_auth::types::Credential;
+use janitor_aws_auth::write::{EnvEdit, EnvWriteError, WriteOutcome};
 
-use crate::dotenv::{parse_dotenv, DotenvError};
-use crate::dotenv_edit::{apply_edits, sha256_hex, validate_edits, EnvEdit, EnvWriteError};
-use crate::logging::{session_logging_advisory, LoggingPreference};
-use crate::mgs::WriteOutcome;
+use crate::dotenv::parse_dotenv;
+use crate::dotenv_edit::{apply_edits, sha256_hex, validate_edits};
 use crate::wire::{RemoteFileReader, RemoteFileWriter};
 
 /// Split a remote-`.env` `Mapping`'s `secret_id` — `"<instance-id>:<path>"`
@@ -35,50 +39,6 @@ use crate::wire::{RemoteFileReader, RemoteFileWriter};
 /// path. `None` if there is no `':'` (a malformed location).
 pub(crate) fn split_secret_id(secret_id: &str) -> Option<(&str, &str)> {
     secret_id.split_once(':')
-}
-
-/// A failed remote-`.env` fetch, masked for the port. Folds the two failure
-/// sources — a read error ([`SessionError`]) and a malformed `.env`
-/// ([`DotenvError`]) — into one classified [`FetchFailReason`] plus an
-/// error-safe `detail`, keeping `ReauthRequired` distinguishable so the walk can
-/// route to `Step::Reauth` rather than a retryable `Failed` (ADR 0013).
-#[derive(Debug)]
-pub(crate) enum DotenvFetchError {
-    /// The SSM read (or credential mint) failed. Masked via the shared
-    /// `From<&SessionError>` impl (ADR 0024) — no SDK text crosses.
-    Read(SessionError),
-    /// The file was read but is not a well-formed `.env`. B2's `DotenvError`
-    /// names only a 1-based line number (never line content); it maps to
-    /// `Unsupported` here at the SSM seam (ADR 0025).
-    Malformed(DotenvError),
-}
-
-impl DotenvFetchError {
-    /// The masked, port-facing classification (drives control flow + a fallback
-    /// label). Never carries SSM/SDK text or `.env` content.
-    pub(crate) fn reason(&self) -> FetchFailReason {
-        match self {
-            DotenvFetchError::Read(e) => FetchFailReason::from(e),
-            DotenvFetchError::Malformed(_) => FetchFailReason::Unsupported,
-        }
-    }
-
-    /// An error-safe detail string for the load banner + Diagnostic Log
-    /// (ADR 0017). For a read error this is the `SessionError`'s already-scrubbed
-    /// `Display`; for a malformed `.env` it is `"malformed .env line N"` — never a
-    /// Value, a Credential, or any `.env` line content.
-    pub(crate) fn detail(&self) -> String {
-        match self {
-            DotenvFetchError::Read(e) => e.to_string(),
-            DotenvFetchError::Malformed(e) => e.to_string(),
-        }
-    }
-
-    /// Whether this is a dead-token failure (routes to `Step::Reauth`, not
-    /// `Step::Failed`). A malformed `.env` is never a re-auth condition.
-    pub(crate) fn is_reauth(&self) -> bool {
-        matches!(self, DotenvFetchError::Read(SessionError::ReauthRequired))
-    }
 }
 
 /// Read `path` off `instance_id` over the [`RemoteFileReader`] seam and parse it
@@ -96,11 +56,11 @@ pub(crate) async fn read_and_parse(
     instance_id: &str,
     region: &str,
     path: &str,
-) -> Result<SecretShape, DotenvFetchError> {
+) -> Result<SecretShape, MethodError> {
     let mut raw = reader
         .read_file(cred, instance_id, region, path)
         .await
-        .map_err(DotenvFetchError::Read)?;
+        .map_err(MethodError::Session)?;
     match raw.secret_string.take() {
         Some(text) => {
             let text = Zeroizing::new(text);
@@ -110,16 +70,19 @@ pub(crate) async fn read_and_parse(
             // ever logging it (ADR 0025 §3 live verify).
             diag_dotenv_structure(&text);
             parse_dotenv(&text).map_err(|e| {
-                let e = DotenvFetchError::Malformed(e);
-                // `detail()` names only a 1-based line number, never content
-                // (THREAT-MODEL) — log it so the live harness / Diagnostic Log can
-                // pinpoint the offending line, as the masked port hides the reason.
-                tracing::warn!(target: "janitor::ssm", "{}", e.detail());
-                e
+                // The malformed-`.env` detail (`"malformed .env line N"`) must
+                // survive the Content path (ADR 0031): it names only a 1-based line
+                // number, never content (THREAT-MODEL). Log it so the live harness /
+                // Diagnostic Log can pinpoint the line the masked port hides.
+                let me = MethodError::Content {
+                    detail: e.to_string(),
+                };
+                tracing::warn!(target: "janitor::ssm", "{}", me.detail());
+                me
             })
         }
         // A `.env` is text; a binary or empty payload is not one we can compare.
-        None => Err(DotenvFetchError::Read(SessionError::Unsupported)),
+        None => Err(MethodError::Session(SessionError::Unsupported)),
     }
 }
 
@@ -157,69 +120,6 @@ fn diag_dotenv_structure(text: &str) {
             "no-eq".to_string()
         };
         tracing::warn!(target: "janitor::ssm", "diag line {n}: len={len} kind={kind} control={control}");
-    }
-}
-
-/// Mints a role Credential per Environment (via the shared [`CredentialBroker`])
-/// and reads+parses that Environment's remote `.env`. The SSM analogue of
-/// `janitor-aws`'s `AuthenticatedSource` — but simpler: the broker already
-/// silently re-mints near expiry, and a dead token / denial surfaces as a masked
-/// whole-app `Failure` that routes the GUI back to Sign-in, so this slice omits
-/// the at-most-once force-refresh + re-Sign-in fetch ladder (it is the kind of
-/// resilience #33/ADR 0026 will unify across both Providers, not re-duplicate).
-pub(crate) struct SsmSource {
-    broker: CredentialBroker,
-    reader: Arc<dyn RemoteFileReader>,
-}
-
-impl SsmSource {
-    pub(crate) fn new(broker: CredentialBroker, reader: Arc<dyn RemoteFileReader>) -> Self {
-        SsmSource { broker, reader }
-    }
-
-    /// Fetch and shape the Set for `mapping`: split its `<instance-id>:<path>`
-    /// location, mint a Credential for it, then read+parse the file.
-    pub(crate) async fn fetch(&self, mapping: &Mapping) -> Result<SecretShape, DotenvFetchError> {
-        let (instance_id, path) = split_secret_id(&mapping.secret_id)
-            // A Mapping whose location is not `<instance-id>:<path>` resolves to
-            // nothing — surface it masked, never echoing the malformed string.
-            .ok_or(DotenvFetchError::Read(SessionError::NotFound))?;
-        let cred = self
-            .broker
-            .credentials_for(mapping)
-            .await
-            .map_err(DotenvFetchError::Read)?;
-        read_and_parse(
-            self.reader.as_ref(),
-            cred.as_ref(),
-            instance_id,
-            &mapping.region,
-            path,
-        )
-        .await
-    }
-
-    /// Probe the org's SSM session-logging policy for `mapping` (mint a Credential,
-    /// then ask `logging`) and distil it to an operator advisory (ADR 0025).
-    /// `None` means "no logging configured" (or the mint failed — see below). Used
-    /// by `load` to warn once per Application before any read.
-    ///
-    /// Only a *successful* mint warrants an advisory. A mint failure is the load's
-    /// real error (surfaced per-Environment as a `Failure`), not a logging-policy
-    /// uncertainty — raising the always-on fallback for it would mislead (it reads
-    /// like a logging-permission problem when the user simply isn't entitled to the
-    /// role). The fallback still fires when the cred mints but `GetDocument` itself
-    /// is denied/unreachable (a genuine "can't determine logging" case).
-    pub(crate) async fn logging_advisory(
-        &self,
-        mapping: &Mapping,
-        logging: &dyn LoggingPreference,
-    ) -> Option<String> {
-        let cred = self.broker.credentials_for(mapping).await.ok()?;
-        let probe = logging
-            .session_logging(cred.as_ref(), &mapping.region)
-            .await;
-        session_logging_advisory(&probe)
     }
 }
 
@@ -391,6 +291,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: secret_id.into(),
             permission_set: "ReadOnly".into(),
+            method: janitor_core::config::Method::SsmDotenv,
         }
     }
     fn cred() -> Credential {
@@ -505,64 +406,11 @@ mod tests {
         assert_eq!(err.reason(), FetchFailReason::NeedsSignIn);
     }
 
-    // ---- SsmSource ----
-
-    #[tokio::test]
-    async fn source_mints_a_credential_then_reads_and_parses() {
-        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
-        let reader = Arc::new(FakeRemoteFileReader::with_dotenv(vec!["A=1"]));
-        let src = SsmSource::new(broker(role.clone()), reader.clone());
-        let shape = src.fetch(&mapping("i-0abc:/app/.env")).await.unwrap();
-        assert!(matches!(shape, SecretShape::Json(_)));
-        assert_eq!(role.call_count(), 1, "minted exactly one credential");
-        assert_eq!(reader.seen(), vec![("i-0abc".into(), "/app/.env".into())]);
-    }
-
-    #[tokio::test]
-    async fn source_malformed_location_is_not_found_without_minting() {
-        // A Mapping whose secret_id is not `<instance>:<path>` fails before any
-        // credential is minted or any read attempted.
-        let role = Arc::new(FakeRoleClient::new(vec![]));
-        let reader = Arc::new(FakeRemoteFileReader::new(vec![]));
-        let src = SsmSource::new(broker(role.clone()), reader.clone());
-        let err = src.fetch(&mapping("i-0abc-no-colon")).await.unwrap_err();
-        assert_eq!(err.reason(), FetchFailReason::NotFound);
-        assert_eq!(role.call_count(), 0, "no mint for an unresolvable location");
-        assert_eq!(reader.call_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn source_propagates_a_dead_token_from_minting() {
-        let role = Arc::new(FakeRoleClient::new(vec![Err(SessionError::ReauthRequired)]));
-        let reader = Arc::new(FakeRemoteFileReader::new(vec![]));
-        let src = SsmSource::new(broker(role), reader.clone());
-        let err = src.fetch(&mapping("i-0abc:/app/.env")).await.unwrap_err();
-        assert!(err.is_reauth());
-        assert_eq!(reader.call_count(), 0, "no read when minting fails");
-    }
-
-    #[tokio::test]
-    async fn logging_advisory_is_none_when_minting_fails() {
-        // A mint failure (e.g. not entitled to the role) is the load's real error,
-        // not a logging-policy uncertainty: no misleading always-on advisory even
-        // though the scripted logging probe says S3 logging is on.
-        use crate::logging::fakes::FakeLoggingPreference;
-        use crate::logging::LoggingState;
-        let role = Arc::new(FakeRoleClient::new(vec![Err(
-            SessionError::RoleNotEntitled {
-                context: "no access".into(),
-            },
-        )]));
-        let logging = FakeLoggingPreference::always(LoggingState {
-            s3: true,
-            ..Default::default()
-        });
-        let src = SsmSource::new(broker(role), Arc::new(FakeRemoteFileReader::new(vec![])));
-        assert!(src
-            .logging_advisory(&mapping("i-0abc:/app/.env"), &logging)
-            .await
-            .is_none());
-    }
+    // The mint-then-read (`SsmSource::fetch`) and mint-then-probe
+    // (`SsmSource::logging_advisory`) moved into `SsmDotenvMethod` (the shell mints;
+    // the Method takes a Credential). Their behaviour is now pinned in
+    // `crate::method` (fetch/advisory) and the shell's ladder/probe in
+    // `janitor_aws_auth::family`.
 
     // ---- write_dotenv (read → hash → apply → write → conflict-retry) ----
 
@@ -746,24 +594,5 @@ mod tests {
         assert_eq!(err.reason(), FetchFailReason::NotFound);
         assert_eq!(role.call_count(), 0, "no mint for an unresolvable location");
         assert_eq!(writer.call_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn logging_advisory_warns_when_minted_and_logging_on() {
-        // The complement: a successful mint plus a logging-on probe yields the
-        // advisory (so the mint-failure short-circuit above didn't break the path).
-        use crate::logging::fakes::FakeLoggingPreference;
-        use crate::logging::LoggingState;
-        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
-        let logging = FakeLoggingPreference::always(LoggingState {
-            cloudwatch: true,
-            ..Default::default()
-        });
-        let src = SsmSource::new(broker(role), Arc::new(FakeRemoteFileReader::new(vec![])));
-        let adv = src
-            .logging_advisory(&mapping("i-0abc:/app/.env"), &logging)
-            .await
-            .expect("logging-on yields an advisory");
-        assert!(adv.contains("CloudWatch"));
     }
 }

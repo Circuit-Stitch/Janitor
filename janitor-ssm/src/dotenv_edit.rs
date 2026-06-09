@@ -22,72 +22,11 @@
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-/// One surgical edit to a remote `.env`, keyed by the **literal** `.env` key (a
-/// `.env` key is a single literal Entry-name segment, ADR 0008 — never a dotted
-/// path). The key is non-secret config metadata; a `Set`'s value is secret and is
-/// held zeroizing until encoded.
-pub enum EnvEdit {
-    /// Set `key` to `value`: rewrite the right-hand side of the **last** physical
-    /// line owning `key` (duplicate keys are last-wins, mirroring the parser); if
-    /// no line owns `key`, append a new `key=value` line.
-    Set {
-        key: String,
-        value: Zeroizing<String>,
-    },
-    /// Remove **every** physical line owning `key` (leaving an earlier duplicate
-    /// would keep the key present under last-wins). A no-op if no line owns `key`.
-    Remove { key: String },
-}
-
-impl EnvEdit {
-    /// A `Set` edit. `value` is the plaintext to write; it is taken into a
-    /// zeroizing buffer immediately.
-    pub fn set(key: impl Into<String>, value: impl Into<String>) -> Self {
-        EnvEdit::Set {
-            key: key.into(),
-            value: Zeroizing::new(value.into()),
-        }
-    }
-
-    /// A `Remove` edit.
-    pub fn remove(key: impl Into<String>) -> Self {
-        EnvEdit::Remove { key: key.into() }
-    }
-
-    /// The (non-secret) key this edit targets.
-    pub fn key(&self) -> &str {
-        match self {
-            EnvEdit::Set { key, .. } | EnvEdit::Remove { key } => key,
-        }
-    }
-}
-
-// Manual Debug: a `Set`'s value is a secret Value and must never be printed
-// (THREAT-MODEL). The key is non-secret metadata.
-impl std::fmt::Debug for EnvEdit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EnvEdit::Set { key, .. } => f
-                .debug_struct("Set")
-                .field("key", key)
-                .field("value", &format_args!("<redacted>"))
-                .finish(),
-            EnvEdit::Remove { key } => f.debug_struct("Remove").field("key", key).finish(),
-        }
-    }
-}
-
-/// Why a set of edits could not be applied. Error-safe: never carries a Value or
-/// any `.env` line content (THREAT-MODEL).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EnvWriteError {
-    /// A `Set` targets a key that is not a valid literal `.env` key — empty, or
-    /// containing `=`, a newline, or leading/trailing whitespace (such a key has
-    /// no unambiguous `KEY=VALUE` spelling, so writing it could corrupt the file).
-    /// The key is non-secret metadata, but it is omitted to keep the error minimal.
-    #[error("invalid .env key for a write")]
-    InvalidKey,
-}
+// The write-edit unit + its validation error live in the shared base now
+// (ADR 0031): every AWS-family Method's `write` takes `&[EnvEdit]`, so the trait's
+// argument types belong in `janitor-aws-auth`. The `.env`-specific *engine* that
+// consumes them (`apply_edits`/`encode_value`) stays here.
+use janitor_aws_auth::write::{EnvEdit, EnvWriteError};
 
 /// Encode `value`'s plaintext into the right-hand side of a `.env` line that
 /// re-parses to exactly `value` (a total inverse of `parse_dotenv`, ADR 0029).
@@ -623,17 +562,8 @@ mod tests {
         assert_eq!(sha256_hex(b"x").len(), 64, "always 64 lowercase hex chars");
     }
 
-    #[test]
-    fn debug_never_leaks_a_set_value() {
-        let e = EnvEdit::set("PASSWORD", "hunter2");
-        let rendered = format!("{e:?}");
-        assert!(!rendered.contains("hunter2"), "Set Debug leaked a Value");
-        assert!(rendered.contains("<redacted>"));
-        assert!(
-            rendered.contains("PASSWORD"),
-            "the key is non-secret metadata"
-        );
-    }
+    // `EnvEdit`'s Debug redaction is tested where the type now lives
+    // (`janitor_aws_auth::write`); the engine tests below exercise it via `set`.
 
     // ---- test helpers ----
 

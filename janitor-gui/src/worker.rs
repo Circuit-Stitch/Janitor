@@ -5,19 +5,24 @@
 //! `Event`s back onto the Slint event loop. This is untested I/O shell
 //! (ADR 0010 §5); all real logic lives in the `Provider` impls.
 
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use janitor_aws::aws_impl::AwsSecretsApi;
-use janitor_aws::session::Session;
+use janitor_aws::SecretsManagerMethod;
 use janitor_aws_auth::authenticator::Authenticator;
 use janitor_aws_auth::aws_impl::{AwsOidcClient, AwsRoleClient};
+use janitor_aws_auth::method::ResourceMethod;
 use janitor_aws_auth::types::SystemClock;
+use janitor_aws_auth::AwsFamilyProvider;
 use janitor_core::compare::RowKey;
-use janitor_core::config::{Application, Config, Mapping};
+use janitor_core::config::{Application, Config, Mapping, Method};
 use janitor_core::provider::{AppError, Provider, Step, What};
 use janitor_core::view::MatrixView;
-use janitor_ssm::{AwsInstanceCatalog, AwsLoggingPreference, SsmFileReader, SsmProvider};
+use janitor_ssm::{
+    AwsInstanceCatalog, AwsLoggingPreference, SsmDotenvMethod, SsmFileReader, SsmFileWriter,
+};
 
 /// UI → worker.
 pub enum Command {
@@ -37,9 +42,11 @@ pub enum Command {
         col: usize,
         key: RowKey,
     },
-    /// Start a guided `Discovery` walk for one new Environment (ADR 0013). The
+    /// Start a guided `Discovery` walk for one new Environment (ADR 0013), backed by
+    /// the chosen [`Method`] (ADR 0031 — the Manage window's per-row picker). The
     /// resolved browse region + remembered last-pick come from `Config`.
     BeginDiscovery {
+        method: Method,
         environment: String,
         region: String,
         remembered: Option<Mapping>,
@@ -121,17 +128,13 @@ pub enum Event {
 
 /// Which [`Provider`] the GUI runs against. The composition root (`main`) picks
 /// this from `JANITOR_MOCK`/`--mock` — its one mock-vs-real decision (ADR 0019).
-/// A future Provider adds one arm here and in [`build_provider`].
+/// The real [`AwsFamilyProvider`] drives **both** AWS-family methods (Secrets
+/// Manager and remote-`.env`-over-SSM), chosen per Mapping (ADR 0031); the old
+/// session-global `--ssm` toggle is retired. A future non-AWS Provider adds one
+/// arm here and in [`build_provider`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Aws,
-    /// The remote-`.env`-over-SSM Provider (ADR 0025). The real front-half shell
-    /// (browser Sign-in + account/role catalog + credential minting) plus the B4
-    /// SSM tail: `DescribeInstanceInformation`, the pure-Rust Session Manager (MGS)
-    /// data-channel file read, and `GetDocument`-based session-logging detection.
-    /// `main` selects it with `--ssm`/`JANITOR_SSM`. The offline end-to-end path is
-    /// exercised by the worker tests against the `janitor-ssm` fakes.
-    SsmDotenv,
     Mock,
 }
 
@@ -166,57 +169,58 @@ pub fn spawn(
 /// boxed `dyn Provider` lets `run_loop` drive one async path for every Provider.
 async fn build_provider(kind: ProviderKind, config: &Config) -> Box<dyn Provider> {
     match kind {
-        ProviderKind::Aws => Box::new(build_session(config).await),
-        ProviderKind::SsmDotenv => Box::new(build_ssm_session(config).await),
+        ProviderKind::Aws => Box::new(build_family(config).await),
         ProviderKind::Mock => Box::new(janitor_mock::MockProvider::new()),
     }
 }
 
-/// Build the real adapters (no ambient credentials — ADR 0010 §10) and the
-/// lazy `Session`. Mirrors `live-verify` steps 2 + facade assembly, minus
-/// discovery.
-async fn build_session(config: &Config) -> Session {
+/// Build the real `AwsFamilyProvider` (no ambient credentials — ADR 0010 §10): the
+/// shared front-half shell (browser Sign-in, the account/role catalog, credential
+/// minting, the fetch ladder + ADR 0018 recovery) plus the **method registry**
+/// (ADR 0031). This is the **only** place both AWS-family tails are named together
+/// (mirroring ADR 0019's "one match arm per Provider"):
+///
+/// - `Method::SecretsManager` → [`SecretsManagerMethod`] (`GetSecretValue` + the SM
+///   Discovery tail);
+/// - `Method::SsmDotenv` → [`SsmDotenvMethod`] (the B4 SSM tail:
+///   `DescribeInstanceInformation`, the pure-Rust Session Manager (MGS) data-channel
+///   file read+write, and `GetDocument` session-logging detection).
+///
+/// A real session can compare both stores in one matrix; `--ssm` is retired.
+async fn build_family(config: &Config) -> AwsFamilyProvider {
     let oidc = Arc::new(AwsOidcClient::new(config.sso_region.clone()).await);
     let role_client = Arc::new(AwsRoleClient::new(config.sso_region.clone()).await);
-    let secrets_api = Arc::new(AwsSecretsApi::new());
     let clock = Arc::new(SystemClock);
     // `sso_start_url` holds the SSO start URL (AWS' term); passed as RegisterClient
     // `issuerUrl`. Must be the instance form (…/ssoins-…), not the portal …/start.
     let authenticator = Arc::new(Authenticator::new(oidc, config.sso_start_url.clone()));
-    // `AwsRoleClient` implements both `RoleCredentialClient` and `AccountCatalog`,
-    // so the same Arc serves credential minting and discovery enumeration.
-    Session::new(
-        authenticator,
-        role_client.clone(),
-        secrets_api,
-        role_client,
-        clock,
-    )
-}
 
-/// Build the remote-`.env`-over-SSM Provider (ADR 0025). The front half is the
-/// same real shell as `build_session` (browser Sign-in, the account/role catalog,
-/// credential minting). The SSM tail is the B4 transport (ADR 0025 §3, transport
-/// b): `AwsInstanceCatalog` for `DescribeInstanceInformation`, `SsmFileReader` for
-/// the `StartSession` then pure-Rust MGS data channel `cat` read, and
-/// `AwsLoggingPreference` for `GetDocument` session-logging detection. The SDK
-/// calls and protocol are tested in `janitor-ssm`; only the live WebSocket socket
-/// is untested shell, verified by `live-verify-ssm`.
-async fn build_ssm_session(config: &Config) -> SsmProvider {
-    let oidc = Arc::new(AwsOidcClient::new(config.sso_region.clone()).await);
-    let role_client = Arc::new(AwsRoleClient::new(config.sso_region.clone()).await);
-    let clock = Arc::new(SystemClock);
-    let authenticator = Arc::new(Authenticator::new(oidc, config.sso_start_url.clone()));
     // `AwsRoleClient` implements both `RoleCredentialClient` and `AccountCatalog`,
-    // so the same Arc serves credential minting and account/role enumeration.
-    SsmProvider::new(
-        authenticator,
+    // so the same Arc serves credential minting and account/role enumeration in the
+    // shell *and* each method's Discovery front half.
+    let sm: Arc<dyn ResourceMethod> = Arc::new(SecretsManagerMethod::new(
         role_client.clone(),
-        role_client,
+        role_client.clone(),
+        Arc::new(AwsSecretsApi::new()),
+    ));
+    let ssm: Arc<dyn ResourceMethod> = Arc::new(SsmDotenvMethod::new(
+        role_client.clone(),
+        role_client.clone(),
         Arc::new(AwsInstanceCatalog),
         Arc::new(SsmFileReader),
+        Arc::new(SsmFileWriter),
         Arc::new(AwsLoggingPreference),
+    ));
+    let mut methods: BTreeMap<Method, Arc<dyn ResourceMethod>> = BTreeMap::new();
+    methods.insert(Method::SecretsManager, sm);
+    methods.insert(Method::SsmDotenv, ssm);
+
+    AwsFamilyProvider::new(
+        authenticator,
+        role_client.clone(),
+        role_client,
         clock,
+        methods,
     )
 }
 
@@ -337,11 +341,12 @@ async fn run_loop(
                 None => on_event(Event::CopyUnavailable),
             },
             Command::BeginDiscovery {
+                method,
                 environment,
                 region,
                 remembered,
             } => match provider
-                .begin_discovery(environment, region, remembered)
+                .begin_discovery(method, environment, region, remembered)
                 .await
             {
                 Ok(step) => on_event(discovery_event(step)),
@@ -602,6 +607,7 @@ mod tests {
         }
         async fn begin_discovery(
             &mut self,
+            _method: Method,
             environment: String,
             _region: String,
             _remembered: Option<Mapping>,
@@ -622,6 +628,7 @@ mod tests {
                 region: "us-east-1".into(),
                 secret_id: format!("i-0abc:{text}"),
                 permission_set: "ReadOnly".into(),
+                method: Method::SsmDotenv,
             }))
         }
     }
@@ -633,6 +640,7 @@ mod tests {
         // walk completes as EnvDiscovered, carrying the path in the Mapping.
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Command::BeginDiscovery {
+            method: Method::SsmDotenv,
             environment: "prod".into(),
             region: "us-east-1".into(),
             remembered: None,
@@ -666,19 +674,23 @@ mod tests {
         assert_eq!(mapping.environment, "prod");
     }
 
-    /// Build a fully-faked `SsmProvider` for the offline end-to-end worker test
-    /// (#64 / ADR 0025): the SSM-tail doubles plus the reused front-half doubles,
-    /// all from each crate's `test-support` feature (never a normal build). Seeds a
-    /// single account/role/instance (so the walk auto-collapses straight to the
-    /// path `Input`) and the scripted reads the discovery validation + the two-env
-    /// load consume in order.
-    fn faked_ssm_provider() -> janitor_ssm::SsmProvider {
+    /// Build a fully-faked `AwsFamilyProvider` driving the SSM method, for the
+    /// offline end-to-end worker test (#64 / ADR 0025 / ADR 0031): the SSM-tail
+    /// doubles plus the reused front-half doubles, all from each crate's
+    /// `test-support` feature (never a normal build). Seeds a single
+    /// account/role/instance (so the walk auto-collapses straight to the path
+    /// `Input`) and the scripted reads the discovery validation + the two-env load
+    /// consume in order — proving the unified shell drives the SSM method exactly as
+    /// the old `SsmProvider` did.
+    fn faked_ssm_provider() -> AwsFamilyProvider {
         use janitor_aws_auth::wire::fakes::{
             CredSpec, FakeAccountCatalog, FakeClock, FakeReauth, FakeRoleClient,
         };
         use janitor_aws_auth::wire::{AccountSummary, RawSecret, RoleSummary};
         use janitor_ssm::logging::fakes::FakeLoggingPreference;
-        use janitor_ssm::wire::fakes::{FakeInstanceCatalog, FakeRemoteFileReader};
+        use janitor_ssm::wire::fakes::{
+            FakeInstanceCatalog, FakeRemoteFileReader, FakeRemoteFileWriter,
+        };
         use janitor_ssm::wire::InstanceSummary;
         use std::time::Duration;
 
@@ -694,19 +706,21 @@ mod tests {
                 secret_binary: None,
             })
         };
-        janitor_ssm::SsmProvider::new(
-            Arc::new(FakeReauth::ok()),
-            // discovery mint + one load mint (the broker caches the second env).
-            Arc::new(FakeRoleClient::new(vec![cred(), cred()])),
-            Arc::new(FakeAccountCatalog::new(
-                vec![Ok(vec![AccountSummary {
-                    id: "111".into(),
-                    name: "Prod".into(),
-                }])],
-                vec![Ok(vec![RoleSummary {
-                    name: "ReadOnly".into(),
-                }])],
-            )),
+        // The real `AwsRoleClient` is both seams; here one fake serves the shell's
+        // broker + recovery catalog AND the method's discovery front half.
+        let role = Arc::new(FakeRoleClient::new(vec![cred(), cred()]));
+        let catalog = Arc::new(FakeAccountCatalog::new(
+            vec![Ok(vec![AccountSummary {
+                id: "111".into(),
+                name: "Prod".into(),
+            }])],
+            vec![Ok(vec![RoleSummary {
+                name: "ReadOnly".into(),
+            }])],
+        ));
+        let ssm: Arc<dyn ResourceMethod> = Arc::new(SsmDotenvMethod::new(
+            catalog.clone(),
+            role.clone(),
             Arc::new(FakeInstanceCatalog::new(vec![Ok(vec![InstanceSummary {
                 id: "i-0abc".into(),
                 name: "web".into(),
@@ -717,9 +731,18 @@ mod tests {
                 dotenv("A=1\nB=x"),
                 dotenv("A=1"),
             ])),
+            Arc::new(FakeRemoteFileWriter::new(vec![])),
             // No org session logging in the offline test → no advisory.
             Arc::new(FakeLoggingPreference::off()),
+        ));
+        let mut methods: BTreeMap<Method, Arc<dyn ResourceMethod>> = BTreeMap::new();
+        methods.insert(Method::SsmDotenv, ssm);
+        AwsFamilyProvider::new(
+            Arc::new(FakeReauth::ok()),
+            role.clone(),
+            catalog,
             Arc::new(FakeClock::at(0)),
+            methods,
         )
     }
 
@@ -744,6 +767,7 @@ mod tests {
                     region: "us-east-1".into(),
                     secret_id: "i-0abc:/app/.env".into(),
                     permission_set: "ReadOnly".into(),
+                    method: Method::SsmDotenv,
                 },
                 Mapping {
                     environment: "staging".into(),
@@ -751,6 +775,7 @@ mod tests {
                     region: "us-east-1".into(),
                     secret_id: "i-stg:/app/.env".into(),
                     permission_set: "ReadOnly".into(),
+                    method: Method::SsmDotenv,
                 },
             ],
         };
@@ -758,6 +783,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Command::SignIn).unwrap();
         tx.send(Command::BeginDiscovery {
+            method: Method::SsmDotenv,
             environment: "prod".into(),
             region: "us-east-1".into(),
             remembered: None,

@@ -18,6 +18,7 @@ pub fn seeded_config() -> Config {
                 region: (*region).into(),
                 secret_id: format!("{base}/{env}"),
                 permission_set: "ReadOnly".into(),
+                method: janitor_core::config::Method::SecretsManager,
             })
             .collect(),
     };

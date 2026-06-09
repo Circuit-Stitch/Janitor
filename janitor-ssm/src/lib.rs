@@ -1,12 +1,14 @@
-//! `janitor-ssm` — Janitor's remote-`.env`-over-SSM [Provider](../../CONTEXT.md)
-//! (ADR 0025), the second real Provider.
+//! `janitor-ssm` — Janitor's remote-`.env`-over-SSM resource **Method**
+//! ([Provider](../../CONTEXT.md) family, ADR 0025 / ADR 0031).
 //!
-//! It mirrors `janitor-aws`'s discovery/session split: an [`SsmDiscovery`]
-//! step-machine drives the guided walk and [`SsmProvider`] implements the
-//! `core::provider::Provider` port over it. The walk runs the shared `account →
-//! role → mint Credential` front half over the [`janitor-aws-auth`](janitor_aws_auth)
-//! base (it depends on `janitor-core` + `janitor-aws-auth`, **never**
-//! `janitor-aws`), then walks its own tail: `instance → .env path → read+parse`.
+//! It supplies a [`SsmDotenvMethod`] (the [`ResourceMethod`](janitor_aws_auth::ResourceMethod)
+//! the generic `AwsFamilyProvider` shell drives) plus the [`SsmDiscovery`]
+//! step-machine for its guided walk. The walk runs the shared `account → role →
+//! mint Credential` front half over the [`janitor-aws-auth`](janitor_aws_auth) base
+//! (it depends on `janitor-core` + `janitor-aws-auth`, **never** `janitor-aws`),
+//! then walks its own tail: `instance → .env path → read+parse`. The auth shell
+//! (sign-in, broker, the fetch ladder, ADR 0018 recovery) lives in the base, so
+//! this crate is the Method's tail only.
 //! A remote `.env` is flat `KEY=VALUE`, so [`parse_dotenv`] turns it into the
 //! same flat [`SecretShape`](janitor_core::secret::SecretShape) a JSON Set
 //! produces and it slots into the existing comparison model with no `core` change
@@ -32,7 +34,7 @@
 mod discovery;
 mod dotenv;
 mod dotenv_edit;
-mod session;
+mod method;
 mod source;
 pub mod wire;
 
@@ -42,11 +44,11 @@ pub mod transport;
 
 pub use discovery::SsmDiscovery;
 pub use dotenv::{parse_dotenv, DotenvError};
-pub use dotenv_edit::{
-    apply_edits, encode_value, sha256_hex, validate_edits, EnvEdit, EnvWriteError,
-};
+pub use dotenv_edit::{apply_edits, encode_value, sha256_hex, validate_edits};
 pub use logging::{LoggingPreference, LoggingState};
-pub use mgs::WriteOutcome;
-pub use session::SsmProvider;
+pub use method::SsmDotenvMethod;
 pub use source::{DotenvWriteError, SsmWriter};
 pub use transport::{AwsInstanceCatalog, AwsLoggingPreference, SsmFileReader, SsmFileWriter};
+// The write-seam types live in the shared base now (ADR 0031); re-export so the
+// public `janitor-ssm` surface (the write binary, the GUI) is unchanged.
+pub use janitor_aws_auth::write::{EnvEdit, EnvWriteError, WriteOutcome};

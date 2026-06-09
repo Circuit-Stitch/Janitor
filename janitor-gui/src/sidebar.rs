@@ -90,6 +90,7 @@ mod tests {
                     region: "us-east-1".into(),
                     secret_id: "arn".into(),
                     permission_set: "ps".into(),
+                    method: janitor_core::config::Method::SecretsManager,
                 })
                 .collect(),
         }

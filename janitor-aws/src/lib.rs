@@ -1,13 +1,16 @@
-//! `janitor-aws` — Janitor's Secrets Manager Provider tail (ADR 0010 / ADR 0024).
+//! `janitor-aws` — Janitor's Secrets Manager resource **Method** (ADR 0010 /
+//! ADR 0024 / ADR 0031).
 //!
 //! Async-native. The shared Identity Center front half (Sign-in, account/role
 //! catalog, credential brokering, the zeroizing `SsoToken`/`Credential` types,
-//! the AWS error taxonomy) lives in `janitor-aws-auth`; this crate holds only
-//! the Secrets Manager tail: `GetSecretValue` reads, the `AuthenticatedSource`
-//! fetch ladder, the `Session` `Provider` impl, and the SM Discovery walk.
-//! Depends on `janitor-core` for domain types (`Mapping`, `SecretShape`,
-//! `Value`) and the `Provider` port its `Session` implements (ADR 0019), and on
-//! `janitor-aws-auth` for the auth primitives; contains **no GUI**.
+//! the AWS error taxonomy) plus the generic `AwsFamilyProvider` shell (the fetch
+//! ladder + ADR 0018 recovery + the `Provider` port) live in `janitor-aws-auth`;
+//! this crate holds only the Secrets Manager *tail*: `GetSecretValue` reads
+//! ([`SecretsClient`](secrets)), the SM Discovery walk ([`discovery`]), and the
+//! [`SecretsManagerMethod`](method::SecretsManagerMethod) that wraps them behind
+//! the shared `ResourceMethod` seam. Depends on `janitor-core` for domain types
+//! (`Mapping`, `SecretShape`, `Value`) and on `janitor-aws-auth` for the auth
+//! primitives + the Provider shell (ADR 0031); contains **no GUI**.
 //!
 //! ## Trust & memory posture
 //! Nothing here is persisted. The SSO token and role Credentials live only in
@@ -22,11 +25,12 @@
 //! [`wire`]). Only [`aws_impl`] (the real SDK calls) is untested.
 
 pub mod discovery;
+pub mod method;
 pub mod presenter;
 pub mod secrets;
-pub mod session;
-pub mod source;
 pub mod wire;
+
+pub use method::SecretsManagerMethod;
 
 // Untested shell (real I/O); compiled but not coverage-gated.
 pub mod aws_impl;

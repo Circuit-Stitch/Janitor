@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use janitor_core::config::Mapping;
+use janitor_core::config::{Mapping, Method};
 use janitor_core::discovery::{Choice, Orchestrator, StepPlan, Steps};
 use janitor_core::provider::{Step, What};
 
@@ -28,7 +28,10 @@ use crate::wire::SecretsApi;
 /// The Secrets Manager Discovery method. Holds the SSO token and the AWS seams; the
 /// only state it carries across the (re-entrant) walk is the once-minted Credential
 /// — the chosen account/role/secret keys live in the orchestrator's `chosen`.
-struct AwsSteps {
+/// `pub(crate)` so [`SecretsManagerMethod`](crate::method::SecretsManagerMethod) can
+/// build it as its Discovery tail (ADR 0031) — the same steps the `Discovery` handle
+/// the live-verify binary uses drives.
+pub(crate) struct AwsSteps {
     token: Arc<SsoToken>,
     catalog: Arc<dyn AccountCatalog>,
     role_client: Arc<dyn RoleCredentialClient>,
@@ -45,6 +48,28 @@ struct AwsSteps {
 }
 
 impl AwsSteps {
+    /// Build the Secrets Manager Discovery method (no I/O until driven).
+    pub(crate) fn new(
+        token: Arc<SsoToken>,
+        catalog: Arc<dyn AccountCatalog>,
+        role_client: Arc<dyn RoleCredentialClient>,
+        secrets: Arc<dyn SecretsApi>,
+        environment: String,
+        region: String,
+        remembered: Option<Mapping>,
+    ) -> Self {
+        AwsSteps {
+            token,
+            catalog,
+            role_client,
+            secrets,
+            environment,
+            region,
+            remembered,
+            cred: None,
+        }
+    }
+
     fn remembered_account(&self) -> Option<&str> {
         self.remembered.as_ref().map(|m| m.account_id.as_str())
     }
@@ -65,6 +90,7 @@ impl AwsSteps {
             region: self.region.clone(),
             secret_id: secret_arn.to_string(),
             permission_set: role.to_string(),
+            method: Method::SecretsManager,
         }
     }
 }
@@ -129,7 +155,7 @@ impl Discovery {
         remembered: Option<Mapping>,
     ) -> Self {
         Discovery {
-            orch: Orchestrator::new(AwsSteps {
+            orch: Orchestrator::new(AwsSteps::new(
                 token,
                 catalog,
                 role_client,
@@ -137,8 +163,7 @@ impl Discovery {
                 environment,
                 region,
                 remembered,
-                cred: None,
-            }),
+            )),
         }
     }
 
@@ -247,6 +272,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "arn:old".into(),
             permission_set: "ReadOnly".into(),
+            method: Method::SecretsManager,
         };
 
         let mut d = Discovery::new(
@@ -349,6 +375,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "arn:old".into(),
             permission_set: "Admin".into(),
+            method: Method::SecretsManager,
         };
         let mut d = Discovery::new(
             "prod".into(),
@@ -408,6 +435,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "arn:b".into(),
             permission_set: "ReadOnly".into(),
+            method: Method::SecretsManager,
         };
         let mut d = Discovery::new(
             "prod".into(),

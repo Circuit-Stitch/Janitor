@@ -25,12 +25,12 @@ use std::sync::Arc;
 
 use janitor_aws::aws_impl::AwsSecretsApi;
 use janitor_aws::discovery::Discovery;
+use janitor_aws::method::SecretsManagerMethod;
 use janitor_aws::presenter::drive_discovery;
-use janitor_aws::secrets::SecretsClient;
-use janitor_aws::source::AuthenticatedSource;
 use janitor_aws_auth::authenticator::Authenticator;
 use janitor_aws_auth::aws_impl::{AwsOidcClient, AwsRoleClient};
 use janitor_aws_auth::broker::CredentialBroker;
+use janitor_aws_auth::method::ResourceMethod;
 use janitor_aws_auth::types::SystemClock;
 use janitor_core::compare::Comparison;
 use janitor_core::config::Config;
@@ -172,11 +172,16 @@ async fn main() {
         Step::Input { .. } => unreachable!("drive_discovery resolves all Input steps"),
     };
 
-    // 5. Fetch the chosen Mapping through the facade.
+    // 5. Fetch the chosen Mapping through the Secrets Manager method: mint a role
+    //    Credential off the live token, then read+shape (the auth ladder this smoke
+    //    test does not need is unit-tested in `janitor-aws-auth::AwsFamilyProvider`).
     let broker = CredentialBroker::new(token.clone(), role_client.clone(), clock.clone());
-    let secrets = SecretsClient::new(secrets_api);
-    let mut source = AuthenticatedSource::new(broker, secrets, authenticator, role_client, clock);
-    let shape = source.fetch(&mapping).await.expect("fetch");
+    let cred = broker
+        .credentials_for(&mapping)
+        .await
+        .expect("mint role credential");
+    let method = SecretsManagerMethod::new(role_client.clone(), role_client.clone(), secrets_api);
+    let shape = method.fetch(cred.as_ref(), &mapping).await.expect("fetch");
 
     // 6. Output discipline: project to a MASKED matrix, never print a Value.
     let sets = vec![(mapping.environment.clone(), shape)];

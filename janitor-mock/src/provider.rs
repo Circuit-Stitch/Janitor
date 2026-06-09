@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 
 use janitor_core::compare::{Comparison, RowKey};
-use janitor_core::config::{Application, Mapping};
+use janitor_core::config::{Application, Mapping, Method};
 use janitor_core::provider::{AppError, Loaded, Provider, SignInFailed, Step, What};
 use janitor_core::secret::SecretShape;
 use janitor_core::view::{project, reveal_value};
@@ -67,11 +67,14 @@ impl Provider for MockProvider {
 
     async fn begin_discovery(
         &mut self,
+        _method: Method,
         environment: String,
         region: String,
         remembered: Option<Mapping>,
     ) -> Result<Step, SignInFailed> {
-        // No AWS, so fabricate a small multi-account org and ask, exercising the
+        // The mock has a single fabricated backend, so it ignores the chosen method
+        // (a real Provider dispatches on it). No AWS, so fabricate a small
+        // multi-account org and ask, exercising the
         // picker (and remembered default) offline without a browser. Role + secret
         // then "auto-pick" — `advance_discovery` goes straight to `Done`.
         let accounts = vec![
@@ -109,6 +112,7 @@ impl Provider for MockProvider {
             region: walk.region,
             secret_id: format!("discovered/{}", walk.environment),
             permission_set: "ReadOnly".into(),
+            method: Method::SecretsManager,
         }))
     }
 
@@ -185,6 +189,7 @@ mod tests {
             region: "us-east-1".into(),
             secret_id: "remembered/secret".into(),
             permission_set: "ReadOnly".into(),
+            method: Method::SecretsManager,
         }
     }
 
@@ -192,7 +197,12 @@ mod tests {
     async fn begin_discovery_asks_for_an_account_honoring_the_remembered_default() {
         let mut p = MockProvider::new();
         let step = p
-            .begin_discovery("prod".into(), "us-east-1".into(), None)
+            .begin_discovery(
+                Method::SecretsManager,
+                "prod".into(),
+                "us-east-1".into(),
+                None,
+            )
             .await
             .unwrap();
         let Step::Ask {
@@ -210,6 +220,7 @@ mod tests {
         // A remembered pick at the second fabricated account preselects index 1.
         let step = p
             .begin_discovery(
+                Method::SecretsManager,
                 "prod".into(),
                 "us-east-1".into(),
                 Some(remembered_account("000000000002")),
@@ -225,9 +236,14 @@ mod tests {
     #[tokio::test]
     async fn advance_discovery_builds_a_mapping_from_the_chosen_account() {
         let mut p = MockProvider::new();
-        p.begin_discovery("prod".into(), "us-east-1".into(), None)
-            .await
-            .unwrap();
+        p.begin_discovery(
+            Method::SecretsManager,
+            "prod".into(),
+            "us-east-1".into(),
+            None,
+        )
+        .await
+        .unwrap();
         let step = p.advance_discovery(1).await.expect("a walk is in progress");
         let Step::Done(m) = step else {
             panic!("expected Done, got {step:?}");
@@ -259,9 +275,14 @@ mod tests {
         // no-op (the additive `Input` rail, #62 / ADR 0025) — even mid-walk.
         let mut p = MockProvider::new();
         assert!(p.provide_input("/app/.env".into()).await.is_none());
-        p.begin_discovery("prod".into(), "us-east-1".into(), None)
-            .await
-            .unwrap();
+        p.begin_discovery(
+            Method::SecretsManager,
+            "prod".into(),
+            "us-east-1".into(),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             p.provide_input("/app/.env".into()).await.is_none(),
             "even with a walk in progress the mock has no Input to satisfy"
