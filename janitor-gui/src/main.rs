@@ -456,6 +456,36 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
         // Log by the worker. Also surface it in the Discovery wizard if it is open
         // (set_manage_status no-ops when the Manage window is closed). Never a Value.
         Event::Warning(msg) => set_manage_status(&msg),
+        // The worker's authoritative read-write lock changed (ADR 0004 / ADR 0032):
+        // mirror it onto the Settings toggle so the UI never disagrees with the gate.
+        Event::ReadWriteModeChanged(on) => ui.set_read_write(on),
+        // Write outcomes (ADR 0032): surface each to the Diagnostic Log — the in-GUI
+        // log pane (ADR 0017) IS the visible result surface for this slice. The label
+        // names the Environment + the masked outcome only (never an edit Value —
+        // THREAT-MODEL). A richer surface (the confirm-diff dialog's result line + a
+        // matrix refresh on `WriteApplied`) lands with the in-matrix cell-edit
+        // affordance (the next #80 slice), the only producer of `Command::ApplyEdits`.
+        Event::WriteApplied { environment } => {
+            tracing::info!(target: "janitor::gui", "{environment}: edits applied");
+        }
+        Event::WriteConflict { environment } => {
+            tracing::warn!(
+                target: "janitor::gui",
+                "{environment}: write conflict — the Set changed underneath; re-read and retry"
+            );
+        }
+        Event::WriteFailed {
+            environment,
+            detail,
+        } => {
+            tracing::warn!(target: "janitor::gui", "{environment}: write failed — {detail}");
+        }
+        Event::WriteRefused { environment } => {
+            tracing::warn!(
+                target: "janitor::gui",
+                "{environment}: write refused — turn on read-write mode in Settings first"
+            );
+        }
     }
 }
 
@@ -1269,6 +1299,13 @@ fn main() -> Result<(), slint::PlatformError> {
             state.borrow_mut().prefs.grouped = grouped;
             push_matrix(&ui_weak.unwrap(), &state);
         });
+    }
+    // Read-write mode unlock (ADR 0004 / ADR 0032): forward the deliberate toggle to
+    // the worker, which is the authoritative lock (it refuses every write until on).
+    // Session-only — never persisted, so a relaunch is read-only again.
+    {
+        let state = state.clone();
+        ui.on_set_read_write(move |on| dispatch(&state, Command::SetReadWrite(on)));
     }
 
     // Diagnostic Log (ADR 0017): the level dropdown sets the max verbosity shown;

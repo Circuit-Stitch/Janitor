@@ -28,6 +28,7 @@ use janitor_core::provider::{
 use janitor_core::secret::SecretShape;
 use janitor_core::select::{plan_selection, SelectionPlan};
 use janitor_core::view::{project, reveal_value};
+use janitor_core::write::{EnvEdit, WriteOutcome};
 
 use crate::broker::CredentialBroker;
 use crate::error::SessionError;
@@ -313,6 +314,80 @@ impl AwsFamilyProvider {
             Err(other) => Err(other),
         }
     }
+
+    /// One write pass over `method` (the `fetch` analogue, ADR 0032): mint/get a
+    /// Credential, dispatch `method.write`, and on an `AccessDenied` force-refresh the
+    /// Credential **once** then retry (ADR 0010 §4 — a stale cached Credential AWS now
+    /// rejects). A `ReauthRequired` (dead token) surfaces to
+    /// [`write_with_ladder`](Self::write_with_ladder), which owns the re-Sign-in.
+    /// Unlike `load`, a write does **not** run ADR 0018 stale-role recovery — it never
+    /// rewrites/persists a Mapping's role (that is load-time Config state); a
+    /// `RoleNotEntitled` masks straight to `AccessDenied`.
+    async fn try_write_once(
+        &self,
+        method: &dyn ResourceMethod,
+        mapping: &Mapping,
+        edits: &[EnvEdit],
+    ) -> Result<WriteOutcome, MethodError> {
+        let broker = self
+            .broker
+            .as_ref()
+            .expect("signed in before try_write_once");
+        let cred = broker
+            .credentials_for(mapping)
+            .await
+            .map_err(MethodError::Session)?;
+        match method.write(&cred, mapping, edits).await {
+            Err(MethodError::Session(SessionError::AccessDenied)) => {
+                let cred = broker
+                    .force_refresh(mapping)
+                    .await
+                    .map_err(MethodError::Session)?;
+                // The retry is final — its result (incl. a second AccessDenied or a
+                // Conflict) passes straight through; never a force-refresh loop.
+                method.write(&cred, mapping, edits).await
+            }
+            other => other,
+        }
+    }
+
+    /// The full write ladder (the `fetch_with_ladder` analogue, ADR 0032):
+    /// [`try_write_once`](Self::try_write_once); on a `ReauthRequired` re-Sign-in
+    /// **once**, rebuild the broker on the fresh token, and retry once. Still
+    /// `ReauthRequired` after a fresh Sign-in → fatal (`AccessDenied`); a failed
+    /// re-Sign-in → `ReauthRequired`. A `Conflict` is a normal outcome, not an error,
+    /// so it is returned as-is for the caller (and the user) to act on.
+    async fn write_with_ladder(
+        &mut self,
+        method: &dyn ResourceMethod,
+        mapping: &Mapping,
+        edits: &[EnvEdit],
+    ) -> Result<WriteOutcome, MethodError> {
+        match self.try_write_once(method, mapping, edits).await {
+            Err(MethodError::Session(SessionError::ReauthRequired)) => {
+                let token = self
+                    .reauth
+                    .sign_in()
+                    .await
+                    .map_err(|_| MethodError::Session(SessionError::ReauthRequired))?;
+                let token = Arc::new(token);
+                self.broker = Some(CredentialBroker::new(
+                    Arc::clone(&token),
+                    Arc::clone(&self.role_client),
+                    Arc::clone(&self.clock),
+                ));
+                self.token = Some(token);
+                match self.try_write_once(method, mapping, edits).await {
+                    // Still unauthorized even after a fresh Sign-in → fatal.
+                    Err(MethodError::Session(SessionError::ReauthRequired)) => {
+                        Err(MethodError::Session(SessionError::AccessDenied))
+                    }
+                    other => other,
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 #[async_trait]
@@ -492,6 +567,40 @@ impl Provider for AwsFamilyProvider {
     async fn take_advisories(&mut self) -> Vec<String> {
         std::mem::take(&mut self.advisories)
     }
+
+    /// Apply `edits` to `mapping`'s Set under the non-stomping CAS engine, dispatched
+    /// to its [`Method`]'s [`ResourceMethod::write`] through the **same broker + ladder**
+    /// `load` uses for `fetch` (ADR 0032): ensure signed in, mint a Credential, and run
+    /// the force-refresh + re-Sign-in resilience ladder. The rich [`MethodError`] is
+    /// masked into the agnostic [`Failure`] (never a Value/Credential/SDK text —
+    /// THREAT-MODEL); a [`WriteOutcome::Conflict`] is returned as `Ok` for the caller
+    /// to surface (the remote Set changed under us — re-read and retry).
+    ///
+    /// Reached only in deliberately-unlocked read-write mode (ADR 0004); the worker is
+    /// the lock and refuses a write otherwise.
+    async fn write(
+        &mut self,
+        mapping: &Mapping,
+        edits: &[EnvEdit],
+    ) -> Result<WriteOutcome, Failure> {
+        self.sign_in().await.map_err(|_| Failure {
+            environment: mapping.environment.clone(),
+            reason: FetchFailReason::NeedsSignIn,
+            detail: "a fresh Sign-in is required".to_string(),
+        })?;
+        let Some(method) = self.method_for(&mapping.method) else {
+            // The registry lacks this Method — a composition-root bug, masked rather
+            // than panicking (mirrors the `load` arm).
+            return Err(Failure {
+                environment: mapping.environment.clone(),
+                reason: FetchFailReason::Other,
+                detail: "no method configured for this Environment".to_string(),
+            });
+        };
+        self.write_with_ladder(method.as_ref(), mapping, edits)
+            .await
+            .map_err(|e| fail_method(mapping, &e))
+    }
 }
 
 /// Stamp the chosen [`Method`] onto a `Done` Mapping (Decision 5) so the discovered
@@ -592,6 +701,7 @@ mod tests {
         advisory_calls: Mutex<u32>,
         disco: Disco,
         writes: Mutex<Vec<Result<WriteOutcome, MethodError>>>,
+        write_calls: Mutex<u32>,
     }
     impl FakeMethod {
         fn new(kind: Method) -> Self {
@@ -603,6 +713,7 @@ mod tests {
                 advisory_calls: Mutex::new(0),
                 disco: Disco::DoneNow { advisory: None },
                 writes: Mutex::new(Vec::new()),
+                write_calls: Mutex::new(0),
             }
         }
         fn fetches(mut self, outcomes: Vec<Result<SecretShape, MethodError>>) -> Self {
@@ -626,6 +737,9 @@ mod tests {
         }
         fn advisory_count(&self) -> u32 {
             *self.advisory_calls.lock().unwrap()
+        }
+        fn write_count(&self) -> u32 {
+            *self.write_calls.lock().unwrap()
         }
     }
     #[async_trait]
@@ -654,6 +768,7 @@ mod tests {
             _mapping: &Mapping,
             _edits: &[EnvEdit],
         ) -> Result<WriteOutcome, MethodError> {
+            *self.write_calls.lock().unwrap() += 1;
             let mut v = self.writes.lock().unwrap();
             if v.is_empty() {
                 panic!("FakeMethod::write called more times than scripted");
@@ -1395,28 +1510,174 @@ mod tests {
         assert!(matches!(step, Step::Failed(FetchFailReason::Other)));
     }
 
-    // ---- the write seam (never called by the shell; pin it directly) -------
+    // ---- the write path through the port (ADR 0032) ------------------------
 
     #[tokio::test]
-    async fn resource_method_write_maps_through_the_seam() {
-        // v1 never calls write via the port, but the seam must carry it: a fake
-        // method's write returns the CAS outcome unchanged.
-        let method = FakeMethod::new(Method::SsmDotenv).writes(vec![Ok(WriteOutcome::Applied)]);
-        let cred = crate::types::Credential::new(
-            "a".into(),
-            "b".into(),
-            "c".into(),
-            std::time::SystemTime::UNIX_EPOCH,
-        );
-        let outcome = method
-            .write(
-                &cred,
-                &mapping("prod", "i-a:/app/.env"),
-                &[EnvEdit::set("A", "2")],
-            )
-            .await
-            .unwrap();
+    async fn write_dispatches_through_the_method_and_returns_the_cas_outcome() {
+        // The headline B5 wiring: `Provider::write` signs in, mints a Credential via
+        // the broker, and dispatches to the Mapping's method — returning the CAS
+        // outcome unchanged.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let method =
+            Arc::new(FakeMethod::new(Method::SsmDotenv).writes(vec![Ok(WriteOutcome::Applied)]));
+        let mut p = provider(reauth.clone(), role.clone(), method.clone());
+        let mut m = mapping("prod", "i-a:/app/.env");
+        m.method = Method::SsmDotenv;
+        let outcome = p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap();
         assert_eq!(outcome, WriteOutcome::Applied);
-        assert_eq!(method.kind(), Method::SsmDotenv);
+        assert_eq!(reauth.count(), 1, "write signs in once");
+        assert_eq!(role.call_count(), 1, "one Credential minted for the write");
+        assert_eq!(method.write_count(), 1, "the method's write ran once");
+    }
+
+    #[tokio::test]
+    async fn write_surfaces_a_cas_conflict_as_ok_not_an_error() {
+        // A Conflict (the remote Set changed under us) is a normal outcome the user
+        // must see — not a masked Failure.
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+        let method =
+            Arc::new(FakeMethod::new(Method::SsmDotenv).writes(vec![Ok(WriteOutcome::Conflict)]));
+        let mut p = provider(Arc::new(FakeReauth::ok()), role, method);
+        let mut m = mapping("prod", "i-a:/app/.env");
+        m.method = Method::SsmDotenv;
+        assert_eq!(
+            p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap(),
+            WriteOutcome::Conflict
+        );
+    }
+
+    #[tokio::test]
+    async fn write_force_refreshes_once_on_access_denied_then_succeeds() {
+        // A stale cached Credential AWS now rejects: force-refresh once, retry, win —
+        // the same ladder `fetch` runs, now on the write path.
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok(), cred_ok()]));
+        let method = Arc::new(FakeMethod::new(Method::SsmDotenv).writes(vec![
+            Err(MethodError::Session(SessionError::AccessDenied)),
+            Ok(WriteOutcome::Applied),
+        ]));
+        let mut p = provider(Arc::new(FakeReauth::ok()), role.clone(), method.clone());
+        let mut m = mapping("prod", "i-a:/app/.env");
+        m.method = Method::SsmDotenv;
+        assert_eq!(
+            p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap(),
+            WriteOutcome::Applied
+        );
+        assert_eq!(role.call_count(), 2, "initial mint + one force_refresh");
+        assert_eq!(method.write_count(), 2, "one denied + one retry");
+    }
+
+    #[tokio::test]
+    async fn write_true_denial_force_refreshes_once_then_masks_access_denied() {
+        let role = Arc::new(FakeRoleClient::new(vec![cred_ok(), cred_ok()]));
+        let method = Arc::new(FakeMethod::new(Method::SsmDotenv).writes(vec![
+            Err(MethodError::Session(SessionError::AccessDenied)),
+            Err(MethodError::Session(SessionError::AccessDenied)),
+        ]));
+        let mut p = provider(Arc::new(FakeReauth::ok()), role.clone(), method.clone());
+        let mut m = mapping("prod", "i-a:/app/.env");
+        m.method = Method::SsmDotenv;
+        let err = p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap_err();
+        assert_eq!(err.reason, FetchFailReason::AccessDenied);
+        assert_eq!(err.environment, "prod");
+        assert_eq!(role.call_count(), 2, "exactly one wasted re-mint, no loop");
+        assert_eq!(method.write_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn write_re_signs_in_once_on_dead_token_then_succeeds() {
+        // First mint → ReauthRequired (dead token). After re-Sign-in the rebuilt
+        // broker mints OK and the write applies.
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![
+            Err(SessionError::ReauthRequired),
+            cred_ok(),
+        ]));
+        let method =
+            Arc::new(FakeMethod::new(Method::SsmDotenv).writes(vec![Ok(WriteOutcome::Applied)]));
+        let mut p = provider(reauth.clone(), role.clone(), method.clone());
+        let mut m = mapping("prod", "i-a:/app/.env");
+        m.method = Method::SsmDotenv;
+        assert_eq!(
+            p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap(),
+            WriteOutcome::Applied
+        );
+        assert_eq!(reauth.count(), 2, "write sign-in + one re-sign-in");
+        assert_eq!(method.write_count(), 1, "write only after a good mint");
+    }
+
+    #[tokio::test]
+    async fn write_still_unauthorized_after_reauth_is_fatal_no_loop() {
+        let reauth = Arc::new(FakeReauth::ok());
+        let role = Arc::new(FakeRoleClient::new(vec![
+            Err(SessionError::ReauthRequired),
+            Err(SessionError::ReauthRequired),
+        ]));
+        let method = Arc::new(FakeMethod::new(Method::SsmDotenv));
+        let mut p = provider(reauth.clone(), role, method);
+        let mut m = mapping("prod", "i-a:/app/.env");
+        m.method = Method::SsmDotenv;
+        let err = p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap_err();
+        assert_eq!(err.reason, FetchFailReason::AccessDenied);
+        assert_eq!(reauth.count(), 2, "write sign-in + at most one re-sign-in");
+    }
+
+    #[tokio::test]
+    async fn write_role_not_entitled_masks_access_denied_without_recovery() {
+        // Unlike `load`, a write never runs stale-role recovery (it would rewrite +
+        // persist a Mapping's role — load-time Config state). A RoleNotEntitled mint
+        // masks straight to AccessDenied; the catalog is never re-listed.
+        let role = Arc::new(FakeRoleClient::new(vec![role_not_entitled()]));
+        let catalog = Arc::new(FakeAccountCatalog::new(vec![], vec![roles(&["PowerUser"])]));
+        let method = Arc::new(FakeMethod::new(Method::SsmDotenv));
+        let mut p = provider_with_catalog(
+            Arc::new(FakeReauth::ok()),
+            role.clone(),
+            catalog.clone(),
+            method.clone(),
+        );
+        let mut m = mapping("prod", "i-a:/app/.env");
+        m.method = Method::SsmDotenv;
+        let err = p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap_err();
+        assert_eq!(err.reason, FetchFailReason::AccessDenied);
+        assert_eq!(
+            catalog.role_call_count(),
+            0,
+            "no recovery re-list on a write"
+        );
+        assert_eq!(
+            method.write_count(),
+            0,
+            "the mint denial precedes any write"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_with_no_method_in_registry_is_a_masked_other_failure() {
+        // A Mapping tagged for a method the registry lacks (composition bug) surfaces
+        // masked, never a panic — and never reaches a write.
+        let mut p = provider(
+            Arc::new(FakeReauth::ok()),
+            Arc::new(FakeRoleClient::new(vec![])),
+            Arc::new(FakeMethod::new(Method::SecretsManager)),
+        );
+        let mut m = mapping("prod", "x");
+        m.method = Method::SsmDotenv; // registry has only SecretsManager
+        let err = p.write(&m, &[EnvEdit::set("A", "2")]).await.unwrap_err();
+        assert_eq!(err.reason, FetchFailReason::Other);
+    }
+
+    #[tokio::test]
+    async fn write_maps_a_sign_in_failure_to_needs_sign_in() {
+        let mut p = provider(
+            Arc::new(FakeReauth::failing()),
+            Arc::new(FakeRoleClient::new(vec![])),
+            Arc::new(FakeMethod::new(Method::SecretsManager)),
+        );
+        let err = p
+            .write(&mapping("prod", "a/prod"), &[EnvEdit::set("A", "2")])
+            .await
+            .unwrap_err();
+        assert_eq!(err.reason, FetchFailReason::NeedsSignIn);
     }
 }

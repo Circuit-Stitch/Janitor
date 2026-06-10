@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use crate::compare::RowKey;
 use crate::config::{Application, Mapping, Method};
 use crate::view::MatrixView;
+use crate::write::{EnvEdit, WriteOutcome};
 
 /// The port's agnostic Sign-in failure: an opaque, error-safe message. A Provider
 /// maps its rich internal Sign-in error taxonomy (browser/loopback/OAuth mechanism
@@ -216,6 +217,32 @@ pub trait Provider: Send {
     async fn take_advisories(&mut self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Apply `edits` to one Environment's Set under the non-stomping CAS engine
+    /// (ADR 0001 / ADR 0029), authorized for `mapping` (its `method` selects the
+    /// backend; ADR 0031/0032). Method-agnostic: the masked `WriteOutcome`
+    /// distinguishes the CAS [`Applied`](WriteOutcome::Applied) from a
+    /// [`Conflict`](WriteOutcome::Conflict) (the remote Set changed under us — re-read
+    /// and retry), and any real failure is masked into a [`Failure`] (same taxonomy
+    /// the read side uses; never a Value/Credential/SDK text — THREAT-MODEL).
+    ///
+    /// **v1 is read-only**: the worker only reaches this in deliberately-unlocked
+    /// read-write mode (ADR 0004), and the GUI confirms the diff first. A Provider
+    /// without a write path degrades gracefully — the default returns a masked
+    /// [`FetchFailReason::Unsupported`] `Failure`, so a presence-only Provider need
+    /// not override it. The edit Values reach only the Provider; nothing here logs
+    /// them.
+    async fn write(
+        &mut self,
+        mapping: &Mapping,
+        _edits: &[EnvEdit],
+    ) -> Result<WriteOutcome, Failure> {
+        Err(Failure {
+            environment: mapping.environment.clone(),
+            reason: FetchFailReason::Unsupported,
+            detail: "writes are not supported".to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +296,11 @@ mod tests {
         assert_send::<AppError>();
         assert_send::<Loaded>();
         assert_send::<Step>();
+        // The worker marshals a pending write's edits + outcome across the thread
+        // boundary too (`Command::ApplyEdits` / the outcome `Event`).
+        assert_send::<EnvEdit>();
+        assert_send::<WriteOutcome>();
+        assert_send::<Failure>();
     }
 
     #[test]
@@ -276,5 +308,62 @@ mod tests {
         // The worker drives `&mut dyn Provider`; this only compiles if the trait
         // is object-safe (async-trait boxes the futures).
         fn _assert_object_safe(_: &mut dyn Provider) {}
+    }
+
+    /// A Provider that overrides only the required methods — exercises the graceful
+    /// `write` default (a presence-only / read-only Provider that cannot mutate).
+    struct ReadOnlyProvider;
+    #[async_trait]
+    impl Provider for ReadOnlyProvider {
+        async fn sign_in(&mut self) -> Result<(), SignInFailed> {
+            Ok(())
+        }
+        async fn load(&mut self, _app: &Application) -> Result<Loaded, AppError> {
+            Err(AppError::needs_sign_in())
+        }
+        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<String> {
+            None
+        }
+        async fn begin_discovery(
+            &mut self,
+            _method: Method,
+            _environment: String,
+            _region: String,
+            _remembered: Option<Mapping>,
+        ) -> Result<Step, SignInFailed> {
+            Ok(Step::Reauth)
+        }
+        async fn advance_discovery(&mut self, _choice: usize) -> Option<Step> {
+            None
+        }
+        async fn provide_input(&mut self, _text: String) -> Option<Step> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn write_default_is_a_masked_unsupported_failure() {
+        // A Provider with no write path degrades gracefully: the default `write`
+        // returns a masked Unsupported `Failure` naming the Environment, never a panic
+        // and never any Value (THREAT-MODEL).
+        let mut p = ReadOnlyProvider;
+        let mapping = Mapping {
+            environment: "prod".into(),
+            account_id: "111".into(),
+            region: "us-east-1".into(),
+            secret_id: "s".into(),
+            permission_set: "ps".into(),
+            method: Method::SecretsManager,
+        };
+        let err = p
+            .write(&mapping, &[crate::write::EnvEdit::set("A", "2")])
+            .await
+            .unwrap_err();
+        assert_eq!(err.environment, "prod");
+        assert_eq!(err.reason, FetchFailReason::Unsupported);
+        assert!(
+            !format!("{err:?}").contains('2'),
+            "the masked failure must not echo the edit Value"
+        );
     }
 }

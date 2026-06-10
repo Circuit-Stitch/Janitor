@@ -22,10 +22,10 @@
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-// The write-edit unit + its validation error live in the shared base now
-// (ADR 0031): every AWS-family Method's `write` takes `&[EnvEdit]`, so the trait's
-// argument types belong in `janitor-aws-auth`. The `.env`-specific *engine* that
-// consumes them (`apply_edits`/`encode_value`) stays here.
+// The write-edit unit + its validation error live in `janitor-core` now (ADR 0032,
+// so the `Provider::write` port can speak them), re-exported through
+// `janitor_aws_auth::write` for the AWS-family callers. The `.env`-specific *engine*
+// that consumes them (`apply_edits`/`encode_value`) stays here.
 use janitor_aws_auth::write::{EnvEdit, EnvWriteError};
 
 /// Encode `value`'s plaintext into the right-hand side of a `.env` line that
@@ -563,7 +563,8 @@ mod tests {
     }
 
     // `EnvEdit`'s Debug redaction is tested where the type now lives
-    // (`janitor_aws_auth::write`); the engine tests below exercise it via `set`.
+    // (`janitor_core::write`, re-exported via `janitor_aws_auth::write`); the engine
+    // tests below exercise it via `set`.
 
     // ---- test helpers ----
 
