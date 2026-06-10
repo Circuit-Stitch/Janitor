@@ -116,6 +116,14 @@ export component MainWindow inherits Window {
     in-out property <bool> settings-open: false;
     in-out property <string> sso-start-url;
     in-out property <string> sso-region;
+    // Discovery browse-region picker (ADR 0015): a selectable region (never free
+    // text), defaulting to the SSO region, persisted as config.secret_region.
+    // `region-choices` is the known commercial regions unioned with the user's
+    // own; `browse-region` is the current selection; picking one fires
+    // `set-browse-region`. Region is a location, never a Value (THREAT-MODEL).
+    in property <[string]> region-choices;
+    in-out property <string> browse-region;
+    callback set-browse-region(string);
     callback toggle-settings();
     callback save-sso();
     callback add-app(string);
@@ -1228,6 +1236,21 @@ export component MainWindow inherits Window {
                         Button { text: "Save accounts"; clicked => { root.save-sso(); } }
                     }
 
+                    Text { text: "Discovery"; color: #8a8f98; font-size: 12px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Browse region"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
+                        // Console-style region picker (ADR 0015): picking one
+                        // persists config.secret_region immediately (sticky), so
+                        // the next walk browses it. No Save click needed.
+                        ComboBox {
+                            model: root.region-choices;
+                            current-value <=> root.browse-region;
+                            selected(region) => { root.set-browse-region(region); }
+                            horizontal-stretch: 1;
+                        }
+                    }
+
                     Text { text: "Applications"; color: #8a8f98; font-size: 12px; font-weight: 700; }
                     for app[i] in apps : HorizontalLayout {
                         spacing: 8px;
@@ -1328,6 +1351,14 @@ export component ManageWindow inherits Window {
     // exclusive with the choice picker above (one question at a time).
     in property <string> input-prompt;
     in property <string> input-default;
+    // At-hand browse-region picker (ADR 0015): the same sticky
+    // config.secret_region the Settings picker writes, surfaced beside `+ Add env`
+    // so the region the next walk uses is visible at the moment of the add and can
+    // be flipped between adds to build a cross-region Application. Region is a
+    // location, never a Value (THREAT-MODEL).
+    in property <[string]> region-choices;
+    in-out property <string> browse-region;
+    callback set-browse-region(string);
     // env name + chosen Method index (0 = Secrets Manager, 1 = remote .env/SSM) →
     // Discovery fills the rest (ADR 0031 per-row method picker).
     callback add-env-discover(string, int);
@@ -1386,6 +1417,16 @@ export component ManageWindow inherits Window {
                 model: ["Secrets Manager", "Remote .env / SSM"];
                 current-index: 0;
                 min-width: 170px;
+            }
+            // At-hand browse-region picker (ADR 0015): flip the region between
+            // successive adds to build a cross-region Application without
+            // detouring into Settings. Bound to the SAME sticky
+            // config.secret_region as the Settings picker, so the two never drift.
+            ComboBox {
+                model: root.region-choices;
+                current-value <=> root.browse-region;
+                selected(region) => { root.set-browse-region(region); }
+                min-width: 150px;
             }
             Button {
                 text: "+ Add env";

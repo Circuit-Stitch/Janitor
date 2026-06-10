@@ -256,6 +256,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_walks_with_different_browse_regions_yield_cross_region_mappings() {
+        // ADR 0015: flipping the at-hand browse region between successive
+        // `+ Add env` runs builds one Application whose Environments span regions.
+        // Each walk takes its own browse region and stamps it onto the completed
+        // Mapping — no new engine surface, just a different region per `start()`.
+        async fn discover_in(region: &str, env: &str) -> Mapping {
+            let cat = Arc::new(FakeAccountCatalog::new(
+                vec![Ok(vec![account("111111111111", "Prod")])],
+                vec![Ok(vec![role("ReadOnly")])],
+            ));
+            let rolec = Arc::new(FakeRoleClient::new(vec![cred_ok()]));
+            let api = Arc::new(FakeSecretsApi::with_lists(vec![Ok(vec![secret(
+                "myapp",
+                "arn:secret:myapp",
+            )])]));
+            let mut d = Discovery::new(env.into(), region.into(), token(), cat, rolec, api, None);
+            let Step::Done(m) = d.start().await else {
+                panic!("expected Done");
+            };
+            m
+        }
+
+        let east = discover_in("us-east-1", "prod").await;
+        let west = discover_in("us-west-2", "staging").await;
+
+        assert_eq!(east.region, "us-east-1");
+        assert_eq!(west.region, "us-west-2");
+        assert_ne!(
+            east.region, west.region,
+            "the two Environments of one Application span regions"
+        );
+    }
+
+    #[tokio::test]
     async fn many_accounts_ask_carries_labels_and_remembered_default() {
         let cat = Arc::new(FakeAccountCatalog::new(
             vec![Ok(vec![account("111", "Prod"), account("222", "Staging")])],
