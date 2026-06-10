@@ -127,9 +127,15 @@ export component MainWindow inherits Window {
 
     in property <bool> dark: true;
     in-out property <bool> grouped: true;
+    // Read-write mode (ADR 0004 / ADR 0032): off by default (read-only) and never
+    // persisted. The worker is the authoritative lock; this is the deliberate unlock
+    // toggle, kept in sync by the worker's `ReadWriteModeChanged` ack. While off, no
+    // mutating AWS call is reachable.
+    in-out property <bool> read-write: false;
     callback set-theme(bool);
     callback set-sort(int);
     callback set-grouped(bool);
+    callback set-read-write(bool);
     // Persist a resized ENTRY column width (#42) — fired on drag release, routed to
     // Config::set_entry_column_width (view-state, never a Value).
     callback commit-entry-width(length);
@@ -1264,6 +1270,27 @@ export component MainWindow inherits Window {
                             selected => { root.set-sort(self.current-index); }
                             accessible-label: "settings-sort";
                         }
+                    }
+
+                    // Read-write mode unlock (ADR 0004 / ADR 0032): off by default —
+                    // v1 is read-only. Turning it on is the deliberate switch into
+                    // read-write mode; the worker is the authoritative lock and refuses
+                    // every write until it is on. Never persisted (read-only each launch).
+                    Text { text: "Danger zone"; color: #d88; font-size: 12px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Read-write mode"; color: #c8ccd4; width: 110px; vertical-alignment: center; }
+                        Switch {
+                            checked: root.read-write;
+                            toggled => { root.set-read-write(self.checked); }
+                            accessible-label: "settings-read-write";
+                        }
+                    }
+                    Text {
+                        text: "Off = read-only (default). On lets Janitor write edits, always through the non-stomping safe-write engine. Resets to off on relaunch.";
+                        color: #6b7280;
+                        font-size: 11px;
+                        wrap: word-wrap;
                     }
                 }
             }

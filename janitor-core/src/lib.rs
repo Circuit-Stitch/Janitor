@@ -21,3 +21,4 @@ pub mod provider;
 pub mod secret;
 pub mod select;
 pub mod view;
+pub mod write;

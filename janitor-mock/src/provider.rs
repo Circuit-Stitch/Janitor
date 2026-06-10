@@ -8,9 +8,10 @@ use async_trait::async_trait;
 
 use janitor_core::compare::{Comparison, RowKey};
 use janitor_core::config::{Application, Mapping, Method};
-use janitor_core::provider::{AppError, Loaded, Provider, SignInFailed, Step, What};
+use janitor_core::provider::{AppError, Failure, Loaded, Provider, SignInFailed, Step, What};
 use janitor_core::secret::SecretShape;
 use janitor_core::view::{project, reveal_value};
+use janitor_core::write::{EnvEdit, WriteOutcome};
 
 use crate::data;
 
@@ -120,6 +121,19 @@ impl Provider for MockProvider {
         // The mock walk only ever poses an account `Ask`, never a free-text
         // `Step::Input`, so there is nothing to feed text into (ADR 0025).
         None
+    }
+
+    /// Offline write stub (ADR 0032): the mock has no remote store, so it reports a
+    /// successful CAS [`Applied`](WriteOutcome::Applied) without touching anything —
+    /// enough for the offline demo to exercise the read-write-mode gate + the worker's
+    /// outcome relay end to end. The edit Values are ignored (never logged); a real
+    /// Provider runs the non-stomping CAS engine here.
+    async fn write(
+        &mut self,
+        _mapping: &Mapping,
+        _edits: &[EnvEdit],
+    ) -> Result<WriteOutcome, Failure> {
+        Ok(WriteOutcome::Applied)
     }
 }
 
@@ -267,6 +281,23 @@ mod tests {
             p.advance_discovery(0).await.is_none(),
             "nothing to advance before begin_discovery"
         );
+    }
+
+    #[tokio::test]
+    async fn write_stub_reports_applied() {
+        // The offline write stub (ADR 0032) reports a successful CAS Applied so the
+        // demo can drive the read-write gate + outcome relay without a remote store.
+        let mut p = MockProvider::new();
+        let mapping = Mapping {
+            environment: "prod".into(),
+            account_id: "000000000001".into(),
+            region: "us-east-1".into(),
+            secret_id: "discovered/prod".into(),
+            permission_set: "ReadOnly".into(),
+            method: Method::SecretsManager,
+        };
+        let outcome = p.write(&mapping, &[EnvEdit::set("A", "2")]).await.unwrap();
+        assert_eq!(outcome, WriteOutcome::Applied);
     }
 
     #[tokio::test]

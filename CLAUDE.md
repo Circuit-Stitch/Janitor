@@ -2,6 +2,33 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the write seam is wired to the `Provider` port behind a worker-held
+> read-write lock (ADR 0032, B5 / #80) — backend + lock slice.** `core::provider::Provider`
+> gains a method-agnostic `write(&mut self, mapping, edits) -> Result<WriteOutcome,
+> Failure>` (defaulted to a masked `Unsupported` so a read-only Provider degrades for
+> free); `AwsFamilyProvider::write` dispatches per `Mapping` to `methods[m.method].write`
+> through the **same broker + force-refresh/re-Sign-in ladder** as `fetch` (but **not**
+> ADR 0018 stale-role recovery — that rewrites/persists Config on *load*, not write);
+> `MockProvider::write` stubs `Applied`. The write-seam types (`EnvEdit`/`WriteOutcome`/
+> `EnvWriteError`) **moved to `core::write`** so the port can speak them (`core` can't
+> depend on an AWS crate); `janitor-aws-auth::write` re-exports them, so every
+> AWS-family `janitor_aws_auth::write::…` path is unchanged. The **worker is the
+> authoritative lock**: `read_write` starts off every launch (never persisted),
+> `Command::SetReadWrite` flips it, and `Command::ApplyEdits` is **refused without any
+> AWS call** while locked (`Event::WriteRefused`) — so "mutating calls are unreachable
+> until unlocked" (ADR 0004) is a *tested* worker invariant, not just a GUI affordance;
+> a Settings "Read-write mode" toggle is the deliberate-unlock control, outcomes relay
+> to the Diagnostic Log. A pure tested `core::write::summarize_edits` masks pending
+> edits to key + **length only** (never the new Value) for the eventual confirm dialog.
+> Edit Values are zeroizing, reach only the Provider, and never touch a log/`Event`/
+> `Debug` (THREAT-MODEL); v1 still ships read-only by default. Coverage holds (core
+> 93.6%, aws-auth 90.0%, ssm 95.6%, aws 94.9%, mock 98.9%). **Still pending (next #80
+> slice):** the in-matrix cell-edit affordance + confirm-diff dialog (the only producer
+> of `ApplyEdits`, shipped here as the enabling rail) + a refresh on `WriteApplied`;
+> separately, the **Secrets Manager** staged-put/CAS write (ADR 0001 — still the masked
+> `Unsupported` stub, deferred as unverifiable without a live org). Design:
+> [`docs/adr/0032-wire-write-seam-to-provider-port-and-read-write-lock.md`](docs/adr/0032-wire-write-seam-to-provider-port-and-read-write-lock.md).
+>
 > **Latest: the shared provider-agnostic Discovery orchestrator landed (ADR 0026, #33).**
 > With two *real* Discovery walks to learn from, the engine was extracted **from
 > evidence** as a **dual-layer interface**: a `core` `Orchestrator<S: Steps>` owns all

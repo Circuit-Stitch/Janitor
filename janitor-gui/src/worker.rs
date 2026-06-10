@@ -18,8 +18,9 @@ use janitor_aws_auth::types::SystemClock;
 use janitor_aws_auth::AwsFamilyProvider;
 use janitor_core::compare::RowKey;
 use janitor_core::config::{Application, Config, Mapping, Method};
-use janitor_core::provider::{AppError, Provider, Step, What};
+use janitor_core::provider::{AppError, Failure, Provider, Step, What};
 use janitor_core::view::MatrixView;
+use janitor_core::write::{EnvEdit, WriteOutcome};
 use janitor_ssm::{
     AwsInstanceCatalog, AwsLoggingPreference, SsmDotenvMethod, SsmFileReader, SsmFileWriter,
 };
@@ -60,6 +61,23 @@ pub enum Command {
     /// (ADR 0025) — the free-text counterpart of `AdvanceDiscovery`, sent by the
     /// Manage window's text field. The text is a location (a path), never a Value.
     ProvideInput(String),
+    /// Deliberately switch the worker into / out of **read-write mode** (ADR 0004 /
+    /// ADR 0032). The worker is the authoritative lock: a write is unreachable until
+    /// this flips it on. Sent by the Settings unlock toggle; off by default each
+    /// launch (read-only) and never persisted.
+    SetReadWrite(bool),
+    /// Apply `edits` to one Environment's Set under the non-stomping CAS engine (B5 /
+    /// ADR 0001 / ADR 0029), via [`Provider::write`]. **Honored only in read-write
+    /// mode** — the worker refuses it otherwise (the mutating call is unreachable
+    /// while locked, ADR 0004). The edit Values are secret and live only here; they
+    /// are never logged (THREAT-MODEL). Its producer — the in-matrix cell-edit
+    /// affordance + confirm-diff dialog — is the next GUI slice (#80 was scoped to the
+    /// backend + lock); this is the enabling rail it sends, mirroring `Step::Input`.
+    #[allow(dead_code)]
+    ApplyEdits {
+        mapping: Mapping,
+        edits: Vec<EnvEdit>,
+    },
     Shutdown,
 }
 
@@ -124,6 +142,33 @@ pub enum Event {
     /// logging archives the file to S3/CloudWatch. Shown in the Discovery wizard;
     /// also written to the Diagnostic Log (the worker logs it). Never a Value.
     Warning(String),
+    /// The worker's read-write-mode lock changed (ADR 0004 / ADR 0032). The worker is
+    /// the authoritative lock; this acks a `SetReadWrite` so the UI can reflect the
+    /// real state (e.g. a "read-write" chrome indicator).
+    ReadWriteModeChanged(bool),
+    /// A write committed: the CAS matched and the atomic replace landed (ADR 0001).
+    /// `environment` names the column for the log/status line — never the edits.
+    WriteApplied {
+        environment: String,
+    },
+    /// A write hit a persistent CAS conflict: the remote Set changed under us and the
+    /// bounded replay-on-fresh retries were exhausted (never a silent stomp). The user
+    /// re-reads and retries.
+    WriteConflict {
+        environment: String,
+    },
+    /// A write failed. `detail` is the masked, error-safe reason (ADR 0017) — never a
+    /// Value/Credential/SDK text.
+    WriteFailed {
+        environment: String,
+        detail: String,
+    },
+    /// A write was attempted while read-only: the worker refused it without making any
+    /// AWS call (the read-write gate, ADR 0004). Should not normally happen (the GUI
+    /// gates the affordance too) — it is the backstop, surfaced so it is visible.
+    WriteRefused {
+        environment: String,
+    },
 }
 
 /// Which [`Provider`] the GUI runs against. The composition root (`main`) picks
@@ -265,6 +310,21 @@ fn discovery_event(step: Step) -> Event {
     }
 }
 
+/// Map a `Provider::write` result to the worker `Event` the GUI relays (ADR 0032).
+/// `environment` names the column for the human-facing line; the masked `Failure`
+/// contributes only its already-error-safe `detail` — never an edit Value, a
+/// Credential, or SDK text (THREAT-MODEL).
+fn write_event(result: Result<WriteOutcome, Failure>, environment: String) -> Event {
+    match result {
+        Ok(WriteOutcome::Applied) => Event::WriteApplied { environment },
+        Ok(WriteOutcome::Conflict) => Event::WriteConflict { environment },
+        Err(f) => Event::WriteFailed {
+            environment,
+            detail: f.detail,
+        },
+    }
+}
+
 /// Drain and surface any Provider advisories (ADR 0025): each to the Diagnostic
 /// Log (the worker's own `tracing::warn`) and to the Discovery wizard
 /// (`Event::Warning`). A no-op for Providers that produce none (AWS/mock).
@@ -280,6 +340,10 @@ async fn run_loop(
     provider: &mut dyn Provider,
     on_event: &(impl Fn(Event) + Send + 'static),
 ) {
+    // The read-write-mode lock (ADR 0004 / ADR 0032). The worker is the authoritative
+    // gate: starts locked (read-only) every launch and is never persisted; a write is
+    // unreachable until `SetReadWrite(true)` deliberately flips it on.
+    let mut read_write = false;
     // `recv()` is blocking; that is fine on the worker's own thread.
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -362,6 +426,37 @@ async fn run_loop(
             Command::ProvideInput(text) => {
                 if let Some(step) = provider.provide_input(text).await {
                     on_event(discovery_event(step));
+                }
+            }
+            Command::SetReadWrite(on) => {
+                read_write = on;
+                tracing::info!(
+                    target: "janitor::gui",
+                    "Read-write mode {}",
+                    if on { "unlocked" } else { "locked" }
+                );
+                on_event(Event::ReadWriteModeChanged(on));
+            }
+            Command::ApplyEdits { mapping, edits } => {
+                if !read_write {
+                    // The gate's backstop: a write while read-only never reaches the
+                    // Provider (no AWS call) — the edits are dropped, never logged
+                    // (THREAT-MODEL). The refusal is surfaced (and logged) by the relay.
+                    on_event(Event::WriteRefused {
+                        environment: mapping.environment.clone(),
+                    });
+                } else {
+                    // Log only the env + edit COUNT (a count, not content) and the
+                    // masked outcome — never the edit Values (THREAT-MODEL).
+                    tracing::info!(
+                        target: "janitor::gui",
+                        env = %mapping.environment,
+                        count = edits.len(),
+                        "Applying edits"
+                    );
+                    let environment = mapping.environment.clone();
+                    let outcome = provider.write(&mapping, &edits).await;
+                    on_event(write_event(outcome, environment));
                 }
             }
         }
@@ -835,5 +930,195 @@ mod tests {
         let state = |name: &str| view.rows.iter().find(|r| r.name == name).map(|r| r.state);
         assert_eq!(state("A"), Some(EntryState::Aligned));
         assert_eq!(state("B"), Some(EntryState::Gap), "B present only in prod");
+    }
+
+    // ---- the read-write-mode gate + write relay (ADR 0032 / #80) -----------
+
+    #[test]
+    fn write_event_maps_each_outcome_without_leaking_the_edit() {
+        // The pure `Provider::write` result → `Event` mapping: Applied/Conflict carry
+        // only the env; a Failure contributes only its masked detail.
+        assert!(matches!(
+            write_event(Ok(WriteOutcome::Applied), "prod".into()),
+            Event::WriteApplied { environment } if environment == "prod"
+        ));
+        assert!(matches!(
+            write_event(Ok(WriteOutcome::Conflict), "prod".into()),
+            Event::WriteConflict { environment } if environment == "prod"
+        ));
+        let Event::WriteFailed {
+            environment,
+            detail,
+        } = write_event(
+            Err(Failure {
+                environment: "prod".into(),
+                reason: janitor_core::provider::FetchFailReason::AccessDenied,
+                detail: "access denied".into(),
+            }),
+            "prod".into(),
+        )
+        else {
+            panic!("a Failure must map to WriteFailed");
+        };
+        assert_eq!(environment, "prod");
+        assert_eq!(detail, "access denied");
+    }
+
+    /// A `Provider` that records every `write` call (with the edit count, never the
+    /// Values) and reports a scripted outcome — to prove the worker's read-write gate
+    /// actually reaches (or refuses to reach) the Provider.
+    struct RecordingProvider {
+        writes: Arc<Mutex<Vec<usize>>>,
+        outcome: WriteOutcome,
+    }
+    impl RecordingProvider {
+        fn new(outcome: WriteOutcome) -> (Self, Arc<Mutex<Vec<usize>>>) {
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            (
+                RecordingProvider {
+                    writes: writes.clone(),
+                    outcome,
+                },
+                writes,
+            )
+        }
+    }
+    #[async_trait::async_trait]
+    impl Provider for RecordingProvider {
+        async fn sign_in(&mut self) -> Result<(), janitor_core::provider::SignInFailed> {
+            Ok(())
+        }
+        async fn load(
+            &mut self,
+            _app: &Application,
+        ) -> Result<janitor_core::provider::Loaded, AppError> {
+            unreachable!("this fake only drives writes")
+        }
+        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<String> {
+            None
+        }
+        async fn begin_discovery(
+            &mut self,
+            _method: Method,
+            _environment: String,
+            _region: String,
+            _remembered: Option<Mapping>,
+        ) -> Result<Step, janitor_core::provider::SignInFailed> {
+            Ok(Step::Reauth)
+        }
+        async fn advance_discovery(&mut self, _choice: usize) -> Option<Step> {
+            None
+        }
+        async fn provide_input(&mut self, _text: String) -> Option<Step> {
+            None
+        }
+        async fn write(
+            &mut self,
+            _mapping: &Mapping,
+            edits: &[EnvEdit],
+        ) -> Result<WriteOutcome, Failure> {
+            self.writes.lock().unwrap().push(edits.len());
+            Ok(self.outcome)
+        }
+    }
+
+    fn ssm_mapping() -> Mapping {
+        Mapping {
+            environment: "prod".into(),
+            account_id: "111".into(),
+            region: "us-east-1".into(),
+            secret_id: "i-0abc:/app/.env".into(),
+            permission_set: "ReadOnly".into(),
+            method: Method::SsmDotenv,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_edits_is_refused_and_never_reaches_the_provider_while_read_only() {
+        // The non-negotiable gate (ADR 0004): a write while locked is refused WITHOUT
+        // any Provider/AWS call. Default mode is read-only — no SetReadWrite is sent.
+        let (provider, writes) = RecordingProvider::new(WriteOutcome::Applied);
+        let mut provider = provider;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::ApplyEdits {
+            mapping: ssm_mapping(),
+            edits: vec![EnvEdit::set("A", "2")],
+        })
+        .unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "a write must never reach the Provider while read-only"
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(events.as_slice(), [Event::WriteRefused { environment }] if environment == "prod"),
+            "a locked write surfaces WriteRefused and nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn unlocking_read_write_lets_apply_edits_reach_the_provider() {
+        // After a deliberate SetReadWrite(true), the same ApplyEdits reaches the
+        // Provider exactly once and its CAS outcome relays as WriteApplied.
+        let (provider, writes) = RecordingProvider::new(WriteOutcome::Applied);
+        let mut provider = provider;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::SetReadWrite(true)).unwrap();
+        tx.send(Command::ApplyEdits {
+            mapping: ssm_mapping(),
+            edits: vec![EnvEdit::set("A", "2"), EnvEdit::remove("B")],
+        })
+        .unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        assert_eq!(
+            *writes.lock().unwrap(),
+            vec![2usize],
+            "the Provider saw exactly one write of two edits"
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [Event::ReadWriteModeChanged(true), Event::WriteApplied { environment }]
+                    if environment == "prod"
+            ),
+            "unlock acks then the write applies"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cas_conflict_relays_as_write_conflict() {
+        let (provider, _writes) = RecordingProvider::new(WriteOutcome::Conflict);
+        let mut provider = provider;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::SetReadWrite(true)).unwrap();
+        tx.send(Command::ApplyEdits {
+            mapping: ssm_mapping(),
+            edits: vec![EnvEdit::set("A", "2")],
+        })
+        .unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        assert!(
+            events.lock().unwrap().iter().any(
+                |e| matches!(e, Event::WriteConflict { environment } if environment == "prod")
+            ),
+            "a persistent CAS conflict surfaces as WriteConflict"
+        );
     }
 }
