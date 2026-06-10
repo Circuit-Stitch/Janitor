@@ -21,6 +21,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use janitor_core::compare::EntryState;
 use janitor_core::config::{Application, Config, Mapping, Method};
 use janitor_core::provider::What;
+use janitor_core::region;
 use janitor_core::view::{sort_rows, state_glyph, MatrixCell, MatrixView, SortKey};
 
 use rows::{matrix_items, MatrixItem};
@@ -251,6 +252,49 @@ fn env_models(view: &MatrixView) -> ModelRc<SharedString> {
         .map(|e| e.as_str().into())
         .collect();
     ModelRc::from(Rc::new(VecModel::from(envs)))
+}
+
+/// The browse-region picker's option list (ADR 0015): [`region::region_choices`]
+/// as a Slint string model. Pure mapping; the region logic stays in `core`.
+fn region_choices_model(config: &Config) -> ModelRc<SharedString> {
+    let regions: Vec<SharedString> = region::region_choices(config)
+        .into_iter()
+        .map(|r| r.into())
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(regions)))
+}
+
+/// Re-publish the browse-region picker — its choices and current selection — to
+/// both surfaces of the one sticky `config.secret_region`: the Settings picker
+/// (main window) and the at-hand picker beside `+ Add env` (Manage window), so
+/// the two never drift (ADR 0015).
+fn publish_browse_region(state: &Rc<RefCell<AppState>>) {
+    let st = state.borrow();
+    let current: SharedString = region::browse_region(&st.config).into();
+    MAIN.with(|m| {
+        if let Some(win) = m.borrow().as_ref().and_then(|w| w.upgrade()) {
+            win.set_region_choices(region_choices_model(&st.config));
+            win.set_browse_region(current.clone());
+        }
+    });
+    MANAGE.with(|m| {
+        if let Some(win) = m.borrow().as_ref() {
+            win.set_region_choices(region_choices_model(&st.config));
+            win.set_browse_region(current.clone());
+        }
+    });
+}
+
+/// Persist a picked browse region as the sticky `config.secret_region` and
+/// re-publish it to both pickers (ADR 0015). Real-only — `maybe_save` skips the
+/// ephemeral mock Config; a region is a location, never a Value (THREAT-MODEL).
+fn set_browse_region(state: &Rc<RefCell<AppState>>, region: String) {
+    {
+        let mut st = state.borrow_mut();
+        st.config.secret_region = region;
+        st.maybe_save();
+    }
+    publish_browse_region(state);
 }
 
 struct Preferences {
@@ -615,6 +659,12 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
         win.on_rename_app(move |name| rename_bound_app(&state, name.to_string()));
     }
     {
+        // At-hand browse-region picker → the same sticky config.secret_region the
+        // Settings picker writes, synced back to both surfaces (ADR 0015).
+        let state = state.clone();
+        win.on_set_browse_region(move |region| set_browse_region(&state, region.to_string()));
+    }
+    {
         let weak = win.as_weak();
         win.on_close_window(move || {
             if let Some(win) = weak.upgrade() {
@@ -645,9 +695,9 @@ fn method_from_index(index: usize) -> Method {
 }
 
 /// Start a guided walk for a typed Environment name on the bound Application, using
-/// the [`Method`] chosen in the per-row picker (ADR 0031). Region resolves to
-/// `secret_region` else `sso_region` (ADR 0013); the remembered last-pick seeds the
-/// defaults.
+/// the [`Method`] chosen in the per-row picker (ADR 0031). Region is the picker's
+/// browse region — `secret_region` else `sso_region` via [`region::browse_region`]
+/// (ADR 0013/0015); the remembered last-pick seeds the defaults.
 fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String, method_index: usize) {
     let env = env.trim().to_string();
     if env.is_empty() {
@@ -655,15 +705,10 @@ fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String, method_index: usi
     }
     let cmd = {
         let st = state.borrow();
-        let region = if st.config.secret_region.is_empty() {
-            st.config.sso_region.clone()
-        } else {
-            st.config.secret_region.clone()
-        };
         Command::BeginDiscovery {
             method: method_from_index(method_index),
             environment: env,
-            region,
+            region: region::browse_region(&st.config).to_string(),
             remembered: st.config.last_pick.clone(),
         }
     };
@@ -729,10 +774,16 @@ fn refresh_manage_window(state: &Rc<RefCell<AppState>>) {
         Some(app) => (app.name.clone(), env_rows(&st.config, target)),
         None => return,
     };
+    let region_choices = region_choices_model(&st.config);
+    let browse_region: SharedString = region::browse_region(&st.config).into();
     MANAGE.with(|m| {
         if let Some(win) = m.borrow().as_ref() {
             win.set_app_name(name.into());
             win.set_envs(envs);
+            // Seed the at-hand browse-region picker so the pop-out opens on the
+            // current sticky region (ADR 0015).
+            win.set_region_choices(region_choices);
+            win.set_browse_region(browse_region);
         }
     });
 }
@@ -1015,6 +1066,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let st = state.borrow();
         ui.set_sso_start_url(st.config.sso_start_url.as_str().into());
         ui.set_sso_region(st.config.sso_region.as_str().into());
+        // Browse-region picker (ADR 0015): the selectable region list and the
+        // current selection (secret_region else sso_region).
+        ui.set_region_choices(region_choices_model(&st.config));
+        ui.set_browse_region(region::browse_region(&st.config).into());
         ui.set_dark(st.prefs.dark);
         ui.set_grouped(st.prefs.grouped);
         // Restore the persisted ENTRY-column width (#42), floored; falls back to
@@ -1172,11 +1227,22 @@ fn main() -> Result<(), slint::PlatformError> {
         let state = state.clone();
         ui.on_save_sso(move || {
             let ui = ui_weak.unwrap();
-            let mut st = state.borrow_mut();
-            st.config.sso_start_url = ui.get_sso_start_url().to_string();
-            st.config.sso_region = ui.get_sso_region().to_string();
-            st.maybe_save();
+            {
+                let mut st = state.borrow_mut();
+                st.config.sso_start_url = ui.get_sso_start_url().to_string();
+                st.config.sso_region = ui.get_sso_region().to_string();
+                st.maybe_save();
+            }
+            // A changed SSO region can add a choice and shift the fallback, so
+            // re-publish both pickers (ADR 0015).
+            publish_browse_region(&state);
         });
+    }
+    // Settings browse-region picker → sticky config.secret_region, synced to the
+    // at-hand picker (ADR 0015).
+    {
+        let state = state.clone();
+        ui.on_set_browse_region(move |region| set_browse_region(&state, region.to_string()));
     }
     // Persist a resized ENTRY column width (#42) on drag release — view-state,
     // never a Value (THREAT-MODEL). Mock-guarded by `maybe_save` (the seeded demo

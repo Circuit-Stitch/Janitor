@@ -2,6 +2,32 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the Discovery browse-region picker + cross-region Discovery landed
+> (ADR 0015, #12).** Discovery's browse region is now a **console-style picker
+> (never free text)** wired in **two surfaces over one sticky value**: Global
+> Settings and at-hand beside `+ Add env` in the Manage window. The testable core
+> is a new pure `core::region` module (100% covered): `region_choices(&Config)` —
+> the static `KNOWN_REGIONS` commercial list **unioned with** the user's own
+> regions (`sso_region`, every saved `Mapping.region`, `last_pick`), deduped,
+> known-first, so a gov/opt-in region always appears; and `browse_region(&Config)`
+> — the `secret_region`-else-`sso_region` resolve rule, **extracted from the GUI's
+> inline copy** so it's finally tested. The GUI (untested shell, ADR 0003/0010 §5)
+> binds both `ComboBox`es to the same `config.secret_region`: a shared
+> `set_browse_region` persists the pick and `publish_browse_region` re-pushes
+> choices + selection to **both** windows, so the two pickers are one value that
+> never drifts; `begin_discovery` now reads `region::browse_region` instead of the
+> deleted inline computation. **No `Config` schema change** (the `secret_region`
+> field + its documented fallback already existed) and **no engine change** —
+> cross-region "falls out for free" because the walk already takes one browse
+> region per `start()` and stamps `Mapping.region`; a `janitor-aws` guard test
+> (`two_walks_with_different_browse_regions_yield_cross_region_mappings`) proves an
+> Application can span regions. Region is a location, never a Value (THREAT-MODEL).
+> Coverage holds (core 97.5%, aws 95.0%). **Out of scope (unchanged):** region as a
+> compare/display axis (rejected, ADR 0013/0015 — Environment stays the compare
+> axis, region stays passive `Mapping` metadata) and the unscheduled "Ad-hoc
+> compare". Design:
+> [`docs/adr/0015-region-picker-and-cross-region-discovery.md`](docs/adr/0015-region-picker-and-cross-region-discovery.md).
+>
 > **Latest: the write seam is wired to the `Provider` port behind a worker-held
 > read-write lock (ADR 0032, B5 / #80) — backend + lock slice.** `core::provider::Provider`
 > gains a method-agnostic `write(&mut self, mapping, edits) -> Result<WriteOutcome,

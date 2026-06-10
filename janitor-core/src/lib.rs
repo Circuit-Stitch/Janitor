@@ -18,6 +18,7 @@ pub mod compare;
 pub mod config;
 pub mod discovery;
 pub mod provider;
+pub mod region;
 pub mod secret;
 pub mod select;
 pub mod view;
