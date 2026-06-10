@@ -128,3 +128,25 @@ signing/notarization — until there is a Mac to build and sign on.
 - Packaging touches **no secret material** — it is outside the threat model, and
   the window icon is pure Slint markup, so it stays within ADR 0003's thin-view
   split (no logic moved into the GUI).
+
+## Amendment (2026-06-09): unsigned macOS build in the release workflow (#55)
+
+The CI release workflow (#55) ships a **macOS `.dmg` built unsigned on a
+`macos-latest` GitHub runner**, walking back this ADR's "macOS is deferred — no
+job ... until there is a Mac to build and sign on." Rationale: the goal became a
+**Windows + macOS + Linux** release set, and GitHub's hosted `macos-latest` runner
+*is* "a Mac to build on" — the only thing still missing is signing. Producing the
+`.dmg` now (cargo-packager derives the `.icns` from the committed PNG set, so no
+new `.icns` asset is needed) gets Mac users an installer; **Developer ID signing +
+notarization remains deferred to #57**.
+
+This is **not** a relaxation of the Windows hard policy. The asymmetry is
+deliberate: an unsigned `.exe`/`.msi` trips SmartScreen with a scary
+"unrecognized app" block and the project owns the Authenticode path (Azure Trusted
+Signing, #56), so Windows stays signed-only. macOS Gatekeeper instead lets a user
+right-click → Open past the warning, and the Apple Developer ID path is a separate
+later effort (#57). The artifacts land on a **draft** Release for human review, not
+an auto-published or auto-updating channel, so the interim Gatekeeper warning is an
+acceptable, clearly-documented cost (see `docs/RELEASING.md`). The macOS build is
+**Apple-Silicon only** for now (`macos-latest`); an Intel/universal build is a
+follow-up.

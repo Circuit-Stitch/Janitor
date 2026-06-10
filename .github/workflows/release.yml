@@ -1,0 +1,219 @@
+# Tag-triggered desktop release (ADR 0022, #55). Pushing a `v*` tag builds the
+# installable packages on native per-OS runners and attaches them to a **draft**
+# GitHub Release for human review. Unlike a JVM app, a Rust/Slint binary is
+# native per-platform, so this is a per-OS matrix (no single-runner cross-build);
+# the packaging tools are the Rust-native ones ADR 0022 chose:
+#   * cargo-generate-rpm — Fedora-native .rpm (the priority install target).
+#   * cargo-packager      — .deb + .AppImage (Linux) and .dmg (macOS).
+#
+# Tag scheme: `vX.Y.Z`, where `X.Y.Z` MUST equal janitor-gui's crate version
+# (verify-version fails the run otherwise). To cut a release: bump
+# janitor-gui/Cargo.toml `version`, then `git tag v0.1.0 && git push origin v0.1.0`.
+#
+# Windows is **skip-gated** on the `WINDOWS_SIGNING_ENABLED` repo variable: while
+# it is unset the job is *skipped* (run stays green) and NO unsigned .exe/.msi is
+# ever produced — the hard policy from ADR 0022. The Azure Trusted Signing wiring
+# that flips the gate is tracked in #56. macOS is built **unsigned** for now
+# (Gatekeeper will warn on first open); Developer ID + notarization is #57 — see
+# the ADR 0022 amendment.
+#
+# `workflow_dispatch` is a **dry-run**: it builds + uploads the artifacts but does
+# NOT publish a Release (the `release` job only runs on a real `v*` tag).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+# The release job creates a draft Release; the built-in GITHUB_TOKEN is read-only
+# by default, so grant contents:write here. Build jobs only read.
+permissions:
+  contents: write
+
+# Never cancel an in-flight release; serialize per ref.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Guard the single version source of truth: a pushed `vX.Y.Z` tag must equal
+  # janitor-gui's crate version, so a forgotten version bump can't publish a
+  # Release whose name disagrees with the binary. Skipped logic is a no-op on
+  # workflow_dispatch (no tag to check) — the build jobs still run for a dry-run.
+  verify-version:
+    name: Verify tag matches crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Assert tag == janitor-gui version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          crate_ver="$(grep -m1 -E '^version[[:space:]]*=' janitor-gui/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          tag_ver="${GITHUB_REF_NAME#v}"
+          echo "crate version: '${crate_ver}'  ·  pushed tag: '${GITHUB_REF_NAME}' (-> '${tag_ver}')"
+          if [ "${crate_ver}" != "${tag_ver}" ]; then
+            echo "::error::Tag '${GITHUB_REF_NAME}' does not match janitor-gui version '${crate_ver}'. Bump janitor-gui/Cargo.toml to ${tag_ver} (or re-tag v${crate_ver}), then push again."
+            exit 1
+          fi
+
+  # Fedora-native rpm (priority target). Built in a fedora:latest container so the
+  # explicit `Requires` (fontconfig / libxkbcommon / libxcb / mesa-libGL) resolve
+  # against the real Fedora package names. `git` must be installed BEFORE checkout
+  # (the bare image has none); the container runs as root, so no sudo.
+  linux-rpm:
+    name: Linux .rpm (Fedora)
+    needs: verify-version
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install toolchain + Slint/X build deps (Fedora)
+        run: |
+          dnf -y install \
+            git gcc gcc-c++ pkgconf-pkg-config \
+            rust cargo \
+            fontconfig-devel libxkbcommon-devel libxcb-devel mesa-libGL-devel
+      - uses: actions/checkout@v5
+      - name: Build release binary
+        run: cargo build --release -p janitor-gui
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+      - name: Build rpm
+        # `source` paths in [package.metadata.generate-rpm] are workspace-root
+        # relative, so run from the root. Output: target/generate-rpm/*.rpm.
+        run: cargo generate-rpm -p janitor-gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm
+          path: target/generate-rpm/*.rpm
+          if-no-files-found: error
+
+  # deb + AppImage on ubuntu-22.04 (old-glibc floor for portability). AppImage
+  # downloads appimagetool at package time, so the job needs network (default).
+  linux-portable:
+    name: Linux .deb + .AppImage
+    needs: verify-version
+    runs-on: ubuntu-22.04
+    # GitHub runners have no FUSE, so appimagetool must self-extract instead of
+    # mounting its own AppImage — the standard CI workaround.
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Slint Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      - name: Package deb + AppImage
+        # cargo-packager runs its own `before-packaging-command` (the release
+        # build). --out-dir is resolved relative to the package manifest dir, so
+        # the bundles land in janitor-gui/dist/.
+        run: cargo packager -p janitor-gui --release --formats deb appimage --out-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-portable
+          path: |
+            janitor-gui/dist/*.deb
+            janitor-gui/dist/*.AppImage
+          if-no-files-found: error
+
+  # macOS .dmg, built UNSIGNED for now (#57 wires Developer ID + notarization;
+  # until then Gatekeeper warns on first open — acceptable for a draft Release
+  # reviewed by a human, not auto-published). macos-latest is Apple Silicon; an
+  # Intel/universal build is a follow-up.
+  macos:
+    name: macOS .dmg (unsigned)
+    needs: verify-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      - name: Package dmg
+        run: cargo packager -p janitor-gui --release --formats dmg --out-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: janitor-gui/dist/*.dmg
+          if-no-files-found: error
+
+  # Windows installer — SKIP-GATED on the WINDOWS_SIGNING_ENABLED repo variable.
+  # While it is unset this whole job is skipped (the run stays green) so NO
+  # unsigned .exe/.msi is ever built or uploaded (ADR 0022 hard policy). #56 adds
+  # the Azure Trusted Signing step (OIDC-federated, no stored secret) immediately
+  # before the package step and flips the gate on.
+  windows:
+    name: Windows installer (signed)
+    needs: verify-version
+    runs-on: windows-latest
+    if: vars.WINDOWS_SIGNING_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      # TODO(#56): Azure Trusted Signing via OIDC federation goes HERE — sign the
+      # release binary before packaging, and configure cargo-packager's Windows
+      # signing so the produced NSIS installer is signed. Until #56 lands the gate
+      # stays closed and this job never runs.
+      - name: Package NSIS installer
+        run: cargo packager -p janitor-gui --release --formats nsis --out-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: janitor-gui/dist/*.exe
+          if-no-files-found: error
+
+  # Publish: download every built artifact and attach it to a DRAFT GitHub Release
+  # on the tag. Runs only on a real `v*` tag (not the dispatch dry-run). Uses
+  # always() so a *skipped* Windows job doesn't block it, but a *failed* build job
+  # does — and Linux + macOS must succeed.
+  release:
+    name: Draft GitHub Release
+    needs: [verify-version, linux-rpm, linux-portable, macos, windows]
+    if: >-
+      ${{ always()
+        && startsWith(github.ref, 'refs/tags/v')
+        && needs.verify-version.result == 'success'
+        && needs.linux-rpm.result == 'success'
+        && needs.linux-portable.result == 'success'
+        && needs.macos.result == 'success'
+        && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          # The gated Windows job is normally skipped, so the *.exe glob matches
+          # nothing — don't fail on that. Linux/macOS artifacts are guaranteed
+          # present by the upload steps' `if-no-files-found: error` (a missing one
+          # fails that build job, which blocks this release via the needs gate).
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/**/*.rpm
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
