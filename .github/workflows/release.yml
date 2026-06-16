@@ -119,8 +119,10 @@ jobs:
       - name: Package deb + AppImage
         # cargo-packager runs its own `before-packaging-command` (the release
         # build). --out-dir is resolved relative to the package manifest dir, so
-        # the bundles land in janitor-gui/dist/.
-        run: cargo packager -p janitor-gui --release --formats deb appimage --out-dir dist
+        # the bundles land in janitor-gui/dist/. Formats are COMMA-separated:
+        # cargo-packager has subcommands, so `--formats deb appimage` makes clap
+        # read `appimage` as a subcommand ("unrecognized subcommand").
+        run: cargo packager -p janitor-gui --release --formats deb,appimage --out-dir dist
       - uses: actions/upload-artifact@v4
         with:
           name: linux-portable
