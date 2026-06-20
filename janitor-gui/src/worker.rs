@@ -238,7 +238,15 @@ async fn build_family(config: &Config) -> AwsFamilyProvider {
     let clock = Arc::new(SystemClock);
     // `sso_start_url` holds the SSO start URL (AWS' term); passed as RegisterClient
     // `issuerUrl`. Must be the instance form (…/ssoins-…), not the portal …/start.
-    let authenticator = Arc::new(Authenticator::new(oidc, config.sso_start_url.clone()));
+    //
+    // The Sign-in browser is the pluggable component (ADR 0033): Config's optional
+    // `browser_command` selects the OS default browser or a private/incognito launch
+    // command that isolates the Identity Center portal cookie from the CLI.
+    let authenticator = Arc::new(Authenticator::with_opener(
+        oidc,
+        config.sso_start_url.clone(),
+        janitor_aws_auth::browser::select(config.browser_command.as_deref()),
+    ));
 
     // `AwsRoleClient` implements both `RoleCredentialClient` and `AccountCatalog`,
     // so the same Arc serves credential minting and account/role enumeration in the

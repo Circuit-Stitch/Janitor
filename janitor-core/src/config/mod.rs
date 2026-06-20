@@ -20,6 +20,14 @@ pub struct Config {
     /// back to `sso_region`. A plain field so a future settings surface can flip
     /// it (ADR 0011).
     pub secret_region: String,
+    /// Optional command Janitor runs to open the Sign-in browser, with `{url}`
+    /// substituted for the authorize URL (e.g. `firefox -private-window {url}`).
+    /// `None` → the OS default browser (today's behaviour). A private/incognito
+    /// command isolates the Identity Center portal cookie from other browser-based
+    /// AWS tools like the CLI (ADR 0033). Non-secret — a launch command, never a
+    /// Value — so it is safe on disk (THREAT-MODEL). Consumed by
+    /// `janitor_aws_auth::browser::select`.
+    pub browser_command: Option<String>,
     /// The last account/role/secret picked in the guided flow, offered as the
     /// default next run. A `Mapping` (its `environment` is `"live"` for guided
     /// picks). `None` until the first successful pick.
@@ -255,6 +263,9 @@ mod tests {
             sso_start_url: "https://acme.awsapps.com/start".into(),
             sso_region: "us-east-1".into(),
             secret_region: "us-west-2".into(),
+            // A non-default value so the save/load round-trip test also proves the
+            // optional command persists through TOML (None is simply omitted).
+            browser_command: Some("firefox -private-window {url}".into()),
             last_pick: Some(Mapping {
                 environment: "live".into(),
                 account_id: "333333333333".into(),

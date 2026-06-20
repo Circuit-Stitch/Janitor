@@ -7,10 +7,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::browser::{self, BrowserOpener};
 use crate::error::SignInError;
-use crate::loopback::{
-    bind_first_free, open_browser, query_param, redirect_uris, wait_for_redirect,
-};
+use crate::loopback::{bind_first_free, query_param, redirect_uris, wait_for_redirect};
 use crate::pkce;
 use crate::state;
 use crate::types::SsoToken;
@@ -18,23 +17,6 @@ use crate::wire::{OidcClient, Reauth, TokenExchange};
 
 /// How long to wait for the user to complete the browser Sign-in.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(180);
-
-/// Opens the system browser at the authorize URL. Behind a trait (ADR 0027) so
-/// `sign_in_once` can be driven end-to-end in tests with a fake that plays the
-/// browser's part (echoing the redirect back through the loopback) instead of
-/// launching a real browser. The default [`OsBrowser`] is the only impl a normal
-/// build ever uses.
-pub trait BrowserOpener: Send + Sync {
-    fn open(&self, url: &str) -> Result<(), SignInError>;
-}
-
-/// The real opener — shells out to the OS browser (`loopback::open_browser`).
-pub struct OsBrowser;
-impl BrowserOpener for OsBrowser {
-    fn open(&self, url: &str) -> Result<(), SignInError> {
-        open_browser(url)
-    }
-}
 
 /// Drives a full Identity Center browser Sign-in.
 pub struct Authenticator {
@@ -46,23 +28,21 @@ pub struct Authenticator {
     /// ADR 0011). Passed to `RegisterClient` as `issuerUrl`; the `/authorize`
     /// endpoint comes back in the registration (with a region fallback).
     issuer_url: String,
-    /// How the authorize URL reaches a browser. Defaults to [`OsBrowser`];
-    /// injectable only in tests (ADR 0027).
+    /// How the authorize URL reaches a browser — the pluggable Sign-in surface
+    /// (ADR 0033). Defaults to the OS default browser via [`browser::select`]; the
+    /// GUI injects the user's configured choice, tests inject a fake.
     opener: Arc<dyn BrowserOpener>,
 }
 
 impl Authenticator {
+    /// Build with the OS default browser (the shared-cookie-jar opener).
     pub fn new(oidc: Arc<dyn OidcClient>, issuer_url: String) -> Self {
-        Authenticator {
-            oidc,
-            issuer_url,
-            opener: Arc::new(OsBrowser),
-        }
+        Self::with_opener(oidc, issuer_url, browser::select(None))
     }
 
-    /// Build with an injected browser-opener (ADR 0027). Test-only: a normal
-    /// build always uses [`OsBrowser`] via [`Authenticator::new`].
-    #[cfg(any(test, feature = "test-support"))]
+    /// Build with an injected [`BrowserOpener`] (ADR 0027/0033) — the production
+    /// swap point (the GUI passes [`browser::select`]'s choice) and the test seam
+    /// (a fake browser).
     pub fn with_opener(
         oidc: Arc<dyn OidcClient>,
         issuer_url: String,

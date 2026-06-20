@@ -20,6 +20,7 @@
 
 pub mod authwalk;
 pub mod broker;
+pub mod browser;
 pub mod error;
 pub mod family;
 pub mod method;
