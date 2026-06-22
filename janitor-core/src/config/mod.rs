@@ -24,9 +24,11 @@ pub struct Config {
     /// substituted for the authorize URL (e.g. `firefox -private-window {url}`).
     /// `None` → the OS default browser (today's behaviour). A private/incognito
     /// command isolates the Identity Center portal cookie from other browser-based
-    /// AWS tools like the CLI (ADR 0033). Non-secret — a launch command, never a
+    /// AWS tools like the CLI (ADR 0033). The reserved value `"@native"` selects the
+    /// macOS ephemeral `ASWebAuthenticationSession` opener (no separate browser app;
+    /// degrades to the OS default off-macOS). Non-secret — a launch command, never a
     /// Value — so it is safe on disk (THREAT-MODEL). Consumed by
-    /// `janitor_aws_auth::browser::select`.
+    /// `janitor_aws_auth::browser::select` (sentinel: `browser::NATIVE_SENTINEL`).
     pub browser_command: Option<String>,
     /// The last account/role/secret picked in the guided flow, offered as the
     /// default next run. A `Mapping` (its `environment` is `"live"` for guided

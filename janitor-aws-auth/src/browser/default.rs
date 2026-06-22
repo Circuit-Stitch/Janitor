@@ -3,7 +3,7 @@
 //! Identity Center portal session is then shared with other browser-based AWS
 //! tools (the CLI). Untested shell: it launches a real browser.
 
-use crate::browser::BrowserOpener;
+use crate::browser::{BrowserOpener, SignInSurface};
 use crate::error::SignInError;
 use crate::loopback::open_browser;
 
@@ -12,9 +12,11 @@ use crate::loopback::open_browser;
 pub struct DefaultBrowser;
 
 impl BrowserOpener for DefaultBrowser {
-    fn open(&self, url: &str) -> Result<(), SignInError> {
+    fn open(&self, url: &str) -> Result<Box<dyn SignInSurface>, SignInError> {
         // Surface only (no URL — it carries the client_id + PKCE challenge).
         tracing::info!(target: "janitor::aws", surface = "os-default", "Opening Sign-in browser");
-        open_browser(url)
+        open_browser(url)?;
+        // Nothing to dismiss — the user closes the external tab.
+        Ok(Box::new(()))
     }
 }

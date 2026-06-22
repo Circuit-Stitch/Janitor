@@ -30,6 +30,18 @@ open = "5"
 async-trait = "0.1"
 tracing = "0.1"
 
+# macOS Sign-in browser via `ASWebAuthenticationSession` (ADR 0033): the native
+# ephemeral-session opener and its `aswebauth-spike` bin. Target-gated so non-macOS
+# builds never pull objc2. Pinned to the objc2 0.6 / framework 0.3 train already
+# resolved in Cargo.lock — no new major version introduced.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSError"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSWindow", "NSRunningApplication"] }
+objc2-authentication-services = { version = "0.3", features = ["ASWebAuthenticationSession", "block2"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }
 # Replay-transport shell coverage (ADR 0027): StaticReplayClient drives the real

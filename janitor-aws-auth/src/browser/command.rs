@@ -11,7 +11,7 @@
 
 use std::process::Command;
 
-use crate::browser::BrowserOpener;
+use crate::browser::{BrowserOpener, SignInSurface};
 use crate::error::SignInError;
 
 /// Opens Sign-in by spawning a configured command. See module docs.
@@ -26,15 +26,16 @@ impl CommandBrowser {
 }
 
 impl BrowserOpener for CommandBrowser {
-    fn open(&self, url: &str) -> Result<(), SignInError> {
+    fn open(&self, url: &str) -> Result<Box<dyn SignInSurface>, SignInError> {
         let (program, args) =
             build_browser_command(&self.command, url).ok_or(SignInError::BrowserLaunch)?;
         tracing::info!(target: "janitor::aws", surface = "command", %program, "Opening Sign-in browser");
         Command::new(program)
             .args(args)
             .spawn()
-            .map(|_child| ())
-            .map_err(|_| SignInError::BrowserLaunch)
+            .map_err(|_| SignInError::BrowserLaunch)?;
+        // Nothing to dismiss — the user closes the external window.
+        Ok(Box::new(()))
     }
 }
 

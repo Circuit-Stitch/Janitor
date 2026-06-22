@@ -75,9 +75,14 @@ impl Authenticator {
             urlencode(&csrf),
         );
 
-        // 3. Open the browser and wait for the redirect.
-        self.opener.open(&authorize_url)?;
-        let query = wait_for_redirect(listener, SIGN_IN_TIMEOUT).await?;
+        // 3. Open the Sign-in surface and wait for the redirect. Hold the surface
+        //    guard across the wait, then drop it to dismiss the surface the moment
+        //    the code arrives or the wait times out (cancel-on-code; a no-op for the
+        //    external-browser openers — the user closes those). ADR 0033.
+        let surface = self.opener.open(&authorize_url)?;
+        let query = wait_for_redirect(listener, SIGN_IN_TIMEOUT).await;
+        drop(surface);
+        let query = query?;
 
         // 4. Verify CSRF state BEFORE using the code.
         let returned_state = query_param(&query, "state").unwrap_or_default();
@@ -122,6 +127,7 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::SignInSurface;
     use crate::wire::fakes::FakeOidcClient;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -148,7 +154,7 @@ mod tests {
         force_state: Option<String>,
     }
     impl BrowserOpener for EchoOpener {
-        fn open(&self, url: &str) -> Result<(), SignInError> {
+        fn open(&self, url: &str) -> Result<Box<dyn SignInSurface>, SignInError> {
             let query = url
                 .split_once('?')
                 .map(|(_, q)| q.to_string())
@@ -183,7 +189,7 @@ mod tests {
                 let mut buf = Vec::new();
                 let _ = s.read_to_end(&mut buf).await;
             });
-            Ok(())
+            Ok(Box::new(()))
         }
     }
 

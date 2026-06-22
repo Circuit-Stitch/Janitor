@@ -1,7 +1,8 @@
 # Pluggable Sign-in browser component, and Identity Center portal-cookie isolation
 
-**Status:** accepted (implemented — presets backend + the component seam; macOS
-native opener and the Settings UI are deferred slices, see Consequences)
+**Status:** accepted (implemented — presets backend + the component seam + the macOS
+native opener [live-verified, with cancel-on-code window dismissal]; the Settings UI is
+the remaining deferred slice, see Consequences)
 
 **Related:** [ADR 0002](0002-identity-center-only-memory-only-auth.md) (Identity
 Center-only, memory-only auth — the browser Sign-in this swaps the *surface* of),
@@ -106,6 +107,45 @@ the component so a macOS-native opener slots in later.
    - marshalling the start onto Slint's main thread (`invoke_from_event_loop`) with the
      callback returned to the worker over a channel.
 
+   **Spike resolved (2026-06-20, `aswebauth-spike`).** A throwaway main-thread binary
+   (`janitor-aws-auth/src/bin/aswebauth-spike.rs`) opened a real ephemeral
+   `ASWebAuthenticationSession` against the loopback and observed: **(A)** the in-session
+   webview navigates to `http://127.0.0.1:<port>/oauth/callback` and **our tokio loopback
+   listener catches the `?code=`** — the authoritative success signal; **(B)** the
+   **completion handler does not fire** for an http callback (`callbackURLScheme` matches
+   only a *custom* scheme / https associated-domain — `http`/`https` are rejected, so we
+   pass `None`; the handler is the cancel/error path only). So unknown #1 resolves to
+   **keep the loopback + `cancel()` the session when the code arrives** (there is no http
+   callback to hand back). Hard requirements confirmed on-device: a live `NSApplication`
+   run loop, `start()` on the **main thread**, and a non-nil `NSWindow` presentation
+   anchor set **before** `start()` (else it throws "Cannot start … without providing
+   presentation context").
+
+   **Opener shipped (`browser/web_auth_session.rs`).** Selected by a reserved
+   `browser_command` value, `@native` (`browser::NATIVE_SENTINEL`) — kept inside the
+   existing `Option<String>` (no Config-enum/migration); on non-macOS the sentinel
+   degrades to the OS default so a synced Config never breaks. `open()` (called on the
+   worker thread) hops to the **main thread via the main GCD queue** (`dispatch2`) —
+   drained by the GUI's Cocoa run loop (Slint owns the `NSApplication`), so
+   `janitor-aws-auth` stays GUI-framework-free (ADR 0003) rather than depending on
+   `slint::invoke_from_event_loop`. **Cancel-on-code (the port grows a drop-guard).**
+   The http callback never fires the completion handler, so the session does not
+   self-dismiss; left alone its window lingers (live verification showed this is a real
+   annoyance, not a leak the user tolerates). So `BrowserOpener::open` now returns a
+   `Send` `SignInSurface` guard the authenticator holds across `wait_for_redirect` and
+   **drops the moment the code arrives**, hopping back to main to `cancel()` the session
+   (closing the window). The external-browser openers return a no-op `()` guard
+   (unchanged behaviour). The main-thread-only session crosses back to the worker inside
+   a `dispatch2::MainThreadBound`; `open()` creates it synchronously (a brief channel
+   round-trip), so a failure (bad URL / no run loop / `start()` false) returns
+   `BrowserLaunch` fast — symmetric with the other openers, not a silent loopback-timeout
+   degrade. Deps land target-gated on the objc2 0.6 / framework 0.3 train already in
+   `Cargo.lock` (+ `dispatch2` 0.3, also already resolved) — no new major version. The
+   opener is **untested shell** (ADR 0010 §5), `#[cfg(target_os = "macos")]`, so the
+   Linux coverage gate never sees it; **live-verified** 2026-06-20 in the real GUI
+   against a real org (the ephemeral window presented, sign-in completed via the
+   loopback, and after this slice the window dismisses on the callback).
+
 ## Consequences
 
 - **Shipped:** the `browser` component (port + `select`/`choose` + `DefaultBrowser` +
@@ -113,17 +153,23 @@ the component so a macOS-native opener slots in later.
   wired through `Authenticator::with_opener` in the GUI worker, and Diagnostic-Log
   surface logging. `Authenticator::new` keeps the OS default (the live-verify binaries
   and the live test are unchanged). Coverage holds; the workspace suite is green
-  (+ the new `browser` tests).
+  (+ the new `browser` tests). Then (this slice) the macOS native opener
+  (`web_auth_session.rs`) behind the `@native` sentinel, plus the `aswebauth-spike`
+  binary that proved it (Decision 4) — **live-verified**, with cancel-on-code window
+  dismissal (the `BrowserOpener::open` port gained a `Send` `SignInSurface` drop-guard;
+  the external-browser openers return a no-op `()` guard).
 - A user can isolate the portal cookie **today, with no new dependency**, by setting
   `browser_command` to a private/incognito launch (Chrome `--incognito`, Firefox
   `-private-window`, Edge `--inprivate`). Because Janitor already does a fresh Sign-in
   every launch (no token cache, ADR 0002), incognito costs no extra UX and leaves no
   cookie behind.
-- **Deferred slices:** (a) the macOS `ASWebAuthenticationSession` strategy + its spike
-  (the two unknowns above); (b) a Settings control — a presets dropdown (System
-  default / Chrome incognito / Firefox private / Custom) writing `browser_command`,
-  preferred over a raw text field for discoverability. Until then the field is set by
-  editing `config.toml`.
+- **Deferred slices:** (a) the macOS `ASWebAuthenticationSession` strategy is
+  **implemented + live-verified** (`web_auth_session.rs`, `@native` sentinel,
+  cancel-on-code window dismissal) — nothing left there for v1; (b) a Settings control —
+  a presets dropdown (System default / Chrome incognito / Firefox private / Edge
+  InPrivate / macOS native / Custom) writing `browser_command`, preferred over a raw text
+  field for discoverability. Until that lands the field is set by editing `config.toml`
+  (e.g. `browser_command = "@native"`).
 - **Not isolating below the browser.** The OS browser's cookie jar remains the host's;
   `DefaultBrowser` users still share the portal session with the CLI. That is an
   accepted residual (the host browser is outside Janitor's control, THREAT-MODEL),
