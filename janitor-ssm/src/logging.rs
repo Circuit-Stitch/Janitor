@@ -49,9 +49,9 @@ impl LoggingState {
 #[async_trait]
 pub trait LoggingPreference: Send + Sync {
     /// `GetDocument(SSM-SessionManagerRunShell)` in `region`, authorized by `cred`,
-    /// distilled to a [`LoggingState`]. A missing document (`ResourceNotFound`)
-    /// surfaces as `SessionError::NotFound` — the decision below reads that as "no
-    /// custom prefs ⇒ Session Manager default ⇒ no logging."
+    /// distilled to a [`LoggingState`]. A missing document (SSM returns the
+    /// `InvalidDocument` code, mapped to `SessionError::NotFound`) — the decision
+    /// below reads that as "no custom prefs ⇒ Session Manager default ⇒ no logging."
     async fn session_logging(
         &self,
         cred: &Credential,
@@ -86,8 +86,8 @@ pub fn parse_logging(document_content: &str) -> LoggingState {
 ///
 /// - logging on → name the destination(s);
 /// - logging off → no advisory;
-/// - no prefs document (`NotFound`) → no advisory (Session Manager defaults to no
-///   logging);
+/// - no prefs document (`NotFound`, incl. SSM's `InvalidDocument`) → no advisory
+///   (Session Manager defaults to no logging when the org never customized it);
 /// - any other failure (can't read the doc — e.g. denied) → an always-on
 ///   fallback advisory (we cannot rule logging out).
 ///

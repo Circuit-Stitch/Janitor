@@ -12,11 +12,15 @@
 //! Nothing here logs or returns a Value: a read's bytes go straight into a
 //! zeroizing [`RawSecret`]; failures mask through [`SessionError`] (THREAT-MODEL).
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use base64::Engine as _;
 use uuid::Uuid;
 
+use aws_sdk_resourcegroupstagging as tagging;
 use aws_sdk_ssm::config::{BehaviorVersion, Credentials, Region};
+use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 
 use janitor_aws_auth::aws_impl::map_aws_err;
 use janitor_aws_auth::error::SessionError;
@@ -62,6 +66,24 @@ fn build_client(cred: &Credential, region: &str) -> aws_sdk_ssm::Client {
         .credentials_provider(creds)
         .build();
     aws_sdk_ssm::Client::from_conf(conf)
+}
+
+/// Build a credential-scoped Resource Groups Tagging client for `region` (mirrors
+/// [`build_client`]). Used only to enrich the instance picker with EC2 `Name` tags.
+fn build_tagging_client(cred: &Credential, region: &str) -> tagging::Client {
+    let creds = Credentials::new(
+        cred.access_key_id(),
+        cred.secret_access_key(),
+        Some(cred.session_token().to_string()),
+        None,
+        "janitor",
+    );
+    let conf = tagging::config::Builder::new()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new(region.to_string()))
+        .credentials_provider(creds)
+        .build();
+    tagging::Client::from_conf(conf)
 }
 
 /// `DescribeInstanceInformation` (paginated) → SDK-free [`InstanceSummary`]s.
@@ -134,13 +156,29 @@ async fn start_session_with(
 /// `GetDocument(SSM-SessionManagerRunShell)` → the org's [`LoggingState`].
 /// Replay-tested; the body parse is [`parse_logging`].
 async fn get_logging_with(client: &aws_sdk_ssm::Client) -> Result<LoggingState, SessionError> {
-    let resp = client
+    match client
         .get_document()
         .name(SESSION_PREFS_DOCUMENT)
         .send()
         .await
-        .map_err(|e| map_aws_err("GetDocument", e))?;
-    Ok(parse_logging(resp.content().unwrap_or_default()))
+    {
+        Ok(resp) => Ok(parse_logging(resp.content().unwrap_or_default())),
+        // A *missing* prefs document is the common, benign case — an org that never
+        // customized Session Manager (SSM returns `InvalidDocument`; some paths return
+        // `ResourceNotFoundException`). It means "default ⇒ no logging", so route it to
+        // `NotFound` at debug — which the advisory reads as "no logging" — instead of
+        // through the WARN-logging error mapper, which would read as a failure.
+        Err(e)
+            if matches!(
+                e.as_service_error().and_then(|s| s.code()),
+                Some("InvalidDocument") | Some("ResourceNotFoundException")
+            ) =>
+        {
+            tracing::debug!(target: "janitor::ssm", "no Session Manager prefs document — logging defaults to off");
+            Err(SessionError::NotFound)
+        }
+        Err(e) => Err(map_aws_err("GetDocument", e)),
+    }
 }
 
 /// The data-channel coordinates from `StartSession`.
@@ -160,6 +198,84 @@ fn instance_summary(id: &str, name: Option<&str>, computer_name: Option<&str>) -
         id: id.to_string(),
         name: friendly.to_string(),
     }
+}
+
+/// Best-effort EC2 `Name` tags by instance id, via the Resource Groups Tagging API
+/// (`tag:GetResources`). SSM's `DescribeInstanceInformation` never returns EC2 tags,
+/// so without this the picker shows the host's `ComputerName`
+/// (`ip-….compute.internal`) rather than the console "Name". **Any failure returns an
+/// empty map** — the role may lack `tag:GetResources`, and names are a convenience
+/// that must never break Discovery (a Value is never involved either way).
+///
+/// ponytail: filters to all `ec2:instance`s carrying a `Name` tag, then the caller
+///           joins by id (GetResources can't filter to a specific id set). Fine for
+///           the handful an SSM picker shows; revisit if an account has thousands.
+async fn name_tags_with(client: &tagging::Client) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    let mut token: Option<String> = None;
+    loop {
+        let resp = match client
+            .get_resources()
+            .resource_type_filters("ec2:instance")
+            .tag_filters(tagging::types::TagFilter::builder().key("Name").build())
+            .set_pagination_token(token.clone())
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            // Best-effort: keep whatever we collected (often nothing). Surface the
+            // real (error-safe) AWS code at WARN via the shared mapper — exactly like
+            // every other SDK call (e.g. GetDocument) — so the Diagnostic Log shows
+            // whether this is still AccessDenied (permission not yet provisioned) or a
+            // different error, then add a human-readable INFO hint.
+            Err(e) => {
+                let _ = map_aws_err("GetResources", e);
+                tracing::info!(target: "janitor::ssm", "EC2 Name-tag lookup unavailable — grant tag:GetResources to show console names");
+                break;
+            }
+        };
+        for m in resp.resource_tag_mapping_list() {
+            let Some(id) = m.resource_arn().and_then(instance_id_from_arn) else {
+                continue;
+            };
+            if let Some(name) = m
+                .tags()
+                .iter()
+                .find(|t| t.key() == "Name")
+                .map(|t| t.value())
+            {
+                if !name.is_empty() {
+                    names.insert(id.to_string(), name.to_string());
+                }
+            }
+        }
+        match resp.pagination_token() {
+            Some(t) if !t.is_empty() => token = Some(t.to_string()),
+            _ => break,
+        }
+    }
+    names
+}
+
+/// Extract the instance id from an EC2 instance ARN
+/// (`arn:aws:ec2:<region>:<acct>:instance/i-0abc…`). Pure.
+fn instance_id_from_arn(arn: &str) -> Option<&str> {
+    let (prefix, id) = arn.rsplit_once('/')?;
+    (prefix.ends_with(":instance") && id.starts_with("i-")).then_some(id)
+}
+
+/// Overlay best-effort EC2 `Name` tags onto the SSM summaries: a present tag wins
+/// over the `ComputerName` fallback (it is what the AWS console shows). Pure.
+fn apply_name_tags(
+    mut items: Vec<InstanceSummary>,
+    names: &HashMap<String, String>,
+) -> Vec<InstanceSummary> {
+    for it in &mut items {
+        if let Some(name) = names.get(&it.id) {
+            it.name = name.clone();
+        }
+    }
+    items
 }
 
 /// The remote read command. A Session Manager session runs as the unprivileged
@@ -409,7 +525,11 @@ impl InstanceCatalog for AwsInstanceCatalog {
         cred: &Credential,
         region: &str,
     ) -> Result<Vec<InstanceSummary>, SessionError> {
-        describe_instances_with(&build_client(cred, region)).await
+        let items = describe_instances_with(&build_client(cred, region)).await?;
+        // Enrich with EC2 `Name` tags (best-effort — empty map on any failure).
+        let names = name_tags_with(&build_tagging_client(cred, region)).await;
+        tracing::info!(target: "janitor::ssm", matched = names.len(), instances = items.len(), "EC2 Name-tag enrichment");
+        Ok(apply_name_tags(items, &names))
     }
 }
 
@@ -538,6 +658,41 @@ mod tests {
             instance_summary("i-1", None, None).name,
             "i-1",
             "neither set falls back to the id"
+        );
+    }
+
+    #[test]
+    fn instance_id_from_arn_extracts_only_instance_arns() {
+        assert_eq!(
+            instance_id_from_arn("arn:aws:ec2:us-west-2:123456789012:instance/i-0abc"),
+            Some("i-0abc")
+        );
+        // Not an instance ARN (e.g. a volume) → None, so a stray tag can't mis-map.
+        assert_eq!(
+            instance_id_from_arn("arn:aws:ec2:us-west-2:123456789012:volume/vol-0abc"),
+            None
+        );
+        assert_eq!(instance_id_from_arn("not-an-arn"), None);
+    }
+
+    #[test]
+    fn apply_name_tags_overrides_computer_name_but_leaves_unmatched() {
+        let items = vec![
+            InstanceSummary {
+                id: "i-0abc".into(),
+                name: "ip-10-0-0-1.compute.internal".into(),
+            },
+            InstanceSummary {
+                id: "i-0def".into(),
+                name: "ip-10-0-0-2.compute.internal".into(),
+            },
+        ];
+        let names = HashMap::from([("i-0abc".to_string(), "deferno-prod".to_string())]);
+        let got = apply_name_tags(items, &names);
+        assert_eq!(got[0].name, "deferno-prod", "the Name tag wins");
+        assert_eq!(
+            got[1].name, "ip-10-0-0-2.compute.internal",
+            "no tag → unchanged"
         );
     }
 
@@ -762,6 +917,46 @@ mod tests {
         aws_sdk_ssm::Client::from_conf(conf)
     }
 
+    fn tagging_client_with_replay(events: Vec<ReplayEvent>) -> tagging::Client {
+        let creds = Credentials::new("ak", "sk", Some("st".into()), None, "test");
+        let conf = tagging::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(creds)
+            .http_client(StaticReplayClient::new(events))
+            .retry_config(aws_smithy_types::retry::RetryConfig::disabled())
+            .build();
+        tagging::Client::from_conf(conf)
+    }
+
+    #[tokio::test]
+    async fn name_tags_maps_instance_arns_to_their_name_tag() {
+        let body = r#"{"ResourceTagMappingList":[
+            {"ResourceARN":"arn:aws:ec2:us-west-2:111:instance/i-0abc","Tags":[{"Key":"Name","Value":"deferno-prod"},{"Key":"env","Value":"prod"}]},
+            {"ResourceARN":"arn:aws:ec2:us-west-2:111:instance/i-0def","Tags":[{"Key":"Name","Value":""}]}
+        ]}"#;
+        let names = name_tags_with(&tagging_client_with_replay(vec![ok_json(body)])).await;
+        assert_eq!(
+            names.get("i-0abc").map(String::as_str),
+            Some("deferno-prod")
+        );
+        assert!(
+            !names.contains_key("i-0def"),
+            "an empty Name tag is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn name_tags_is_empty_when_the_lookup_is_denied() {
+        // Best-effort: a missing `tag:GetResources` yields an empty map, never an error.
+        let names = name_tags_with(&tagging_client_with_replay(vec![err_json(
+            400,
+            "AccessDeniedException",
+        )]))
+        .await;
+        assert!(names.is_empty());
+    }
+
     #[tokio::test]
     async fn describe_instances_maps_the_list() {
         let body = r#"{"InstanceInformationList":[
@@ -854,12 +1049,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_document_absent_is_not_found() {
-        let err = get_logging_with(&client_with_replay(vec![err_json(
-            400,
-            "ResourceNotFoundException",
-        )]))
-        .await
-        .unwrap_err();
-        assert!(matches!(err, SessionError::NotFound));
+        // SSM returns `InvalidDocument` for a missing document; older/other paths use
+        // `ResourceNotFoundException`. Both mean "no prefs ⇒ no logging" → NotFound
+        // (routed at debug, not the WARN mapper, so the panel shows no failure).
+        for code in ["InvalidDocument", "ResourceNotFoundException"] {
+            let err = get_logging_with(&client_with_replay(vec![err_json(400, code)]))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, SessionError::NotFound), "{code} → NotFound");
+        }
     }
 }

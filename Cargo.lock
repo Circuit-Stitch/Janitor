@@ -625,6 +625,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-resourcegroupstagging"
+version = "1.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47eb23d5fd8529a9ece9a7439383d93316b7ca7c0e2eef5e2389ed9875a8ed54"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.1",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-secretsmanager"
 version = "1.106.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3480,6 +3504,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "aws-config",
+ "aws-sdk-resourcegroupstagging",
  "aws-sdk-ssm",
  "aws-smithy-http-client",
  "aws-smithy-runtime-api",

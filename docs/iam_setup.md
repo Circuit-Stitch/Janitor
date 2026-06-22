@@ -220,6 +220,7 @@ addition (the `AWS-StartInteractiveCommand` document, ADR 0029) is the second.
   "Version": "2012-10-17",
   "Statement": [
     { "Effect": "Allow", "Action": "ssm:DescribeInstanceInformation", "Resource": "*" },
+    { "Effect": "Allow", "Action": "tag:GetResources", "Resource": "*" },
     {
       "Effect": "Allow",
       "Action": "ssm:StartSession",
@@ -229,12 +230,18 @@ addition (the `AWS-StartInteractiveCommand` document, ADR 0029) is the second.
       ]
     },
     { "Effect": "Allow", "Action": ["ssm:TerminateSession", "ssm:ResumeSession"], "Resource": "arn:aws:ssm:*:*:session/*" },
-    { "Effect": "Allow", "Action": "ssm:GetDocument", "Resource": "arn:aws:ssm:*::document/SSM-SessionManagerRunShell" }
+    { "Effect": "Allow", "Action": "ssm:GetDocument", "Resource": "arn:aws:ssm:*:*:document/SSM-SessionManagerRunShell" }
   ]
 }
 ```
 
 - `ssm:DescribeInstanceInformation` — list the managed instances to pick from.
+- `tag:GetResources` *(optional convenience)* — read EC2 `Name` tags so the instance
+  picker shows the console **"Name"** (e.g. `deferno-prod (i-0abc…)`) instead of the
+  bare `ip-….compute.internal` host name. The lookup is **best-effort**: omit this and
+  Discovery still works — instances just fall back to their host name + id. The Resource
+  Groups Tagging API has no resource-level scoping, hence `"Resource": "*"` (it reads
+  only tags, never instance internals).
 - `ssm:StartSession` scoped to the target instance(s) **and** the
   `AWS-StartNonInteractiveCommand` document — open the data channel that streams the
   `cat`. Scope `arn:aws:ec2:*:*:instance/*` to specific instance IDs in production.
@@ -243,6 +250,11 @@ addition (the `AWS-StartInteractiveCommand` document, ADR 0029) is the second.
   preference** so Janitor can warn when a read would be archived to S3/CloudWatch (it
   cannot disable that; see [THREAT-MODEL.md](THREAT-MODEL.md)). If this is denied,
   Janitor falls back to an always-on warning rather than assuming logging is off.
+  The ARN uses a **wildcard account** (`arn:aws:ssm:*:*:document/…`): once an org
+  customizes Session Manager preferences, this document is **account-owned**
+  (`arn:aws:ssm:<region>:<account>:document/…`), so the empty-account form
+  (`arn:aws:ssm:*::document/…`, which matches only AWS-public docs like
+  `AWS-StartNonInteractiveCommand`) would *not* match it and `GetDocument` is denied.
 
 #### Read-write mode (the `.env` write path, ADR 0029)
 

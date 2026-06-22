@@ -43,6 +43,12 @@ base64 = "0.22"
 # The real DescribeInstanceInformation / StartSession / GetDocument SDK calls.
 aws-config = "1"
 aws-sdk-ssm = "1"
+# EC2 `Name` tags for the instance picker — SSM's DescribeInstanceInformation
+# never returns EC2 tags, so the picker would otherwise only show the host's
+# `ComputerName` (ip-….compute.internal), not the console "Name". The Resource
+# Groups Tagging API (tag:GetResources) is a fraction of aws-sdk-ec2's compile
+# cost for a one-tag lookup; the read is best-effort, so the dep is non-load-bearing.
+aws-sdk-resourcegroupstagging = "1"
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"
 # The Session Manager data channel is a WebSocket (wss StreamUrl). tokio drives
