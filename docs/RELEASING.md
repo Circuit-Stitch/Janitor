@@ -49,9 +49,27 @@ packaging change before tagging.
 
 **No unsigned Windows artifact is ever produced or published** (ADR 0022 hard
 policy). The Windows job is *skipped* unless the `WINDOWS_SIGNING_ENABLED` repo
-variable is `true`. Flipping it on — together with the Azure Trusted Signing
-(OIDC-federated) wiring — is tracked in **#56**; until then a release simply ships
-the Linux + macOS artifacts and stays green.
+variable is `true`; while skipped a release simply ships the Linux + macOS
+artifacts and stays green.
+
+Signing uses **Azure Trusted Signing** over **OIDC federation** (no stored
+secret — `azure/login` mints a token, `azure/trusted-signing-action` consumes it
+to sign the NSIS installer). To turn it on, set these repo **Variables**
+(Settings → Secrets and variables → Actions → Variables):
+
+| Variable | Value |
+| --- | --- |
+| `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` | the federated app registration's IDs |
+| `AZURE_SIGNING_ENDPOINT` | region endpoint, e.g. `https://eus.codesigning.azure.net/` |
+| `AZURE_SIGNING_ACCOUNT` | Trusted Signing account name |
+| `AZURE_SIGNING_PROFILE` | certificate profile name |
+| `WINDOWS_SIGNING_ENABLED` | `true` |
+
+Azure-side prerequisites (one-time): a Trusted Signing account + certificate
+profile; an Entra app registration with a **federated credential** for this repo
+(subject `repo:Circuit-Stitch/Janitor:ref:refs/tags/v*`); and the **Trusted
+Signing Certificate Profile Signer** role granted to that app on the signing
+account. Tracked in **#56**.
 
 ### macOS — unsigned for now (#57)
 
