@@ -163,18 +163,44 @@ jobs:
     needs: verify-version
     runs-on: windows-latest
     if: vars.WINDOWS_SIGNING_ENABLED == 'true'
+    # Run in the `release` environment so the OIDC subject is
+    # `repo:OWNER/REPO:environment:release` (trigger-independent) — one Azure
+    # federated credential then covers every release tag, and the same subject
+    # can be smoke-tested via workflow_dispatch (oidc-smoke.yml) without a build.
+    environment: release
+    # OIDC token for Azure federated login — no client secret is ever stored.
+    # Job-level perms override the workflow default; this job only reads source.
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
-      # TODO(#56): Azure Trusted Signing via OIDC federation goes HERE — sign the
-      # release binary before packaging, and configure cargo-packager's Windows
-      # signing so the produced NSIS installer is signed. Until #56 lands the gate
-      # stays closed and this job never runs.
       - name: Package NSIS installer
         run: cargo packager -p janitor-gui --release --formats nsis --out-dir dist
+      # Sign AFTER packaging: the NSIS *-setup.exe is what users download and what
+      # SmartScreen reputation attaches to. OIDC federation (no stored secret) —
+      # azure/login mints the token, the signing action consumes the CLI session.
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign installer (Azure Trusted Signing)
+        uses: azure/trusted-signing-action@v0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\janitor-gui\dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
       - uses: actions/upload-artifact@v4
         with:
           name: windows
