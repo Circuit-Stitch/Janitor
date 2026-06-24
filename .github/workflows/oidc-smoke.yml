@@ -7,7 +7,13 @@
 # Delete once Windows signing is confirmed stable.
 name: OIDC smoke
 
-on: workflow_dispatch
+# Push-triggered on the signing branch so it's verifiable WITHOUT being on the
+# default branch (workflow_dispatch only dispatches from default). Remove the
+# push trigger (keep workflow_dispatch) before merging to main.
+on:
+  push:
+    branches: [ci/windows-signing]
+  workflow_dispatch:
 
 permissions:
   id-token: write
