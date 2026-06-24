@@ -163,6 +163,11 @@ jobs:
     needs: verify-version
     runs-on: windows-latest
     if: vars.WINDOWS_SIGNING_ENABLED == 'true'
+    # Run in the `release` environment so the OIDC subject is
+    # `repo:OWNER/REPO:environment:release` (trigger-independent) — one Azure
+    # federated credential then covers every release tag, and the same subject
+    # can be smoke-tested via workflow_dispatch (oidc-smoke.yml) without a build.
+    environment: release
     # OIDC token for Azure federated login — no client secret is ever stored.
     # Job-level perms override the workflow default; this job only reads source.
     permissions:
