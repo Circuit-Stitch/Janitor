@@ -1,3 +1,9 @@
+// Release builds (the shipped installer) run as a GUI-subsystem app so Windows
+// doesn't pop a console window on launch from a shortcut/double-click. Debug
+// builds keep the console so a developer still sees early panics/output that
+// happen before the in-memory Diagnostic Log (logpane, ADR 0017) installs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 slint::include_modules!();
 mod errors;
 mod logpane;
