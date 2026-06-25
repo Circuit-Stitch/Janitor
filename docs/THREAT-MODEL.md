@@ -122,3 +122,17 @@ visibility** across Environments.
   a rename. v1 accepts this.
 - **GUI is a softer zone than core** (boundary 2 above): transient plaintext in
   widget/clipboard state is inherent to displaying a secret.
+- **Windows auto-update is a remote-code-install surface — but manual-only egress
+  (ADR 0034).** The Windows MSIX gains a network update channel: a "Check for
+  updates" button can fetch and install a new signed package. Two deliberate
+  bounds keep this in scope. (1) **No background network activity** — egress is
+  manual-only: the `.appinstaller` carries no automatic `UpdateSettings`, so the
+  sole update-related network access happens on an explicit user click; Janitor
+  still does zero background phone-home. (2) **Authenticode trust anchor** — the
+  payload is the maintainer's Trusted-Signing-signed `.msix`, CA-trusted and
+  **OS-verified before it installs**; there is **no second/minisign key** (hence
+  no new crown-jewel secret and no baked-in-pubkey rotation gap — rotation is the
+  CA-managed cert lifecycle). The residual risk is the App Installer URL itself: a
+  forged update would have to present a package validly signed by *our* cert, which
+  the OS rejects otherwise. The trust assumption is the signing key + Microsoft's
+  App Installer engine, the same anchor as the install (above).

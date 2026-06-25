@@ -10,10 +10,11 @@
 # (verify-version fails the run otherwise). To cut a release: bump
 # janitor-gui/Cargo.toml `version`, then `git tag v0.1.0 && git push origin v0.1.0`.
 #
-# Windows is **skip-gated** on the `WINDOWS_SIGNING_ENABLED` repo variable: while
-# it is unset the job is *skipped* (run stays green) and NO unsigned .exe/.msi is
-# ever produced — the hard policy from ADR 0022. The Azure Trusted Signing wiring
-# that flips the gate is tracked in #56. macOS is built **unsigned** for now
+# Windows ships an **MSIX** (auto-updating via App Installer, ADR 0034) — assembled
+# with `makeappx` and signed by Azure Trusted Signing, NOT cargo-packager NSIS. It
+# is **skip-gated** on the `WINDOWS_SIGNING_ENABLED` repo variable: while it is unset
+# the job is *skipped* (run stays green) and NO unsigned .msix is ever produced —
+# the hard policy from ADR 0022. macOS is built **unsigned** for now
 # (Gatekeeper will warn on first open); Developer ID + notarization is #57 — see
 # the ADR 0022 amendment.
 #
@@ -153,13 +154,15 @@ jobs:
           path: janitor-gui/dist/*.dmg
           if-no-files-found: error
 
-  # Windows installer — SKIP-GATED on the WINDOWS_SIGNING_ENABLED repo variable.
-  # While it is unset this whole job is skipped (the run stays green) so NO
-  # unsigned .exe/.msi is ever built or uploaded (ADR 0022 hard policy). #56 adds
-  # the Azure Trusted Signing step (OIDC-federated, no stored secret) immediately
-  # before the package step and flips the gate on.
+  # Windows MSIX — SKIP-GATED on the WINDOWS_SIGNING_ENABLED repo variable. While
+  # it is unset this whole job is skipped (the run stays green) so NO unsigned .msix
+  # is ever built or uploaded (ADR 0022 hard policy). The package is assembled with
+  # `makeappx` (Windows SDK) from janitor-gui/msix/AppxManifest.xml + the built exe
+  # + icons, then signed by Azure Trusted Signing (OIDC-federated, no stored
+  # secret). A companion .appinstaller (manual-update-only, NO background checks —
+  # ADR 0034) is uploaded alongside. cargo-packager is NOT used on Windows.
   windows:
-    name: Windows installer (signed)
+    name: Windows MSIX (signed)
     needs: verify-version
     runs-on: windows-latest
     if: vars.WINDOWS_SIGNING_ENABLED == 'true'
@@ -177,34 +180,61 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-packager
-        run: cargo install cargo-packager --locked
-      - name: Package NSIS installer
-        run: cargo packager -p janitor-gui --release --formats nsis --out-dir dist
-      # Sign AFTER packaging: the NSIS *-setup.exe is what users download and what
-      # SmartScreen reputation attaches to. OIDC federation (no stored secret) —
-      # azure/login mints the token, the signing action consumes the CLI session.
+      - name: Build release binary
+        run: cargo build --release -p janitor-gui
+      # Assemble the MSIX pack layout: the exe + named logos at the manifest's
+      # referenced paths + AppxManifest.xml at the layout root, plus the companion
+      # .appinstaller. @VERSION@ -> the 4-part MSIX version (crate X.Y.Z -> X.Y.Z.0);
+      # verify-version already guarantees the crate version equals the tag.
+      - name: Assemble MSIX layout
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path janitor-gui/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $ver4 = "$ver.0"
+          Write-Host "MSIX version: $ver4"
+          $layout = "janitor-gui/dist/msix"
+          New-Item -ItemType Directory -Force -Path "$layout/Images" | Out-Null
+          Copy-Item target/release/janitor-gui.exe "$layout/janitor-gui.exe"
+          Copy-Item janitor-gui/assets/icons/48.png  "$layout/Images/Square44x44Logo.png"
+          Copy-Item janitor-gui/assets/icons/256.png "$layout/Images/Square150x150Logo.png"
+          Copy-Item janitor-gui/assets/icons/48.png  "$layout/Images/StoreLogo.png"
+          (Get-Content janitor-gui/msix/AppxManifest.xml -Raw) -replace '@VERSION@', $ver4 | Set-Content -NoNewline "$layout/AppxManifest.xml"
+          (Get-Content janitor-gui/msix/Janitor.appinstaller -Raw) -replace '@VERSION@', $ver4 | Set-Content -NoNewline "janitor-gui/dist/Janitor.appinstaller"
+      - name: Pack MSIX (makeappx)
+        shell: pwsh
+        run: |
+          $makeappx = (Get-ChildItem "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          if (-not $makeappx) { throw "makeappx.exe not found in the Windows SDK" }
+          Write-Host "Using $makeappx"
+          & $makeappx pack /d janitor-gui/dist/msix /p janitor-gui/dist/Janitor.msix /o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Sign the .msix (the .appinstaller is a plaintext pointer — App Installer
+      # validates the referenced .msix's Authenticode signature, so it is not signed).
+      # Trusted Signing signs MSIX directly; the manifest Publisher must already equal
+      # the cert Subject (load-bearing, ADR 0034 Decision 4) or this step rejects it.
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Sign installer (Azure Trusted Signing)
+      - name: Sign MSIX (Azure Trusted Signing)
         uses: azure/trusted-signing-action@v0
         with:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
           files-folder: ${{ github.workspace }}\janitor-gui\dist
-          files-folder-filter: exe
+          files-folder-filter: msix
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: janitor-gui/dist/*.exe
+          path: |
+            janitor-gui/dist/*.msix
+            janitor-gui/dist/*.appinstaller
           if-no-files-found: error
 
   # Publish: download every built artifact and attach it to a DRAFT GitHub Release
@@ -234,14 +264,16 @@ jobs:
           draft: true
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          # The gated Windows job is normally skipped, so the *.exe glob matches
-          # nothing — don't fail on that. Linux/macOS artifacts are guaranteed
-          # present by the upload steps' `if-no-files-found: error` (a missing one
-          # fails that build job, which blocks this release via the needs gate).
+          # The gated Windows job is normally skipped, so the *.msix/*.appinstaller
+          # globs match nothing — don't fail on that. Linux/macOS artifacts are
+          # guaranteed present by the upload steps' `if-no-files-found: error` (a
+          # missing one fails that build job, which blocks this release via the
+          # needs gate).
           fail_on_unmatched_files: false
           files: |
             artifacts/**/*.rpm
             artifacts/**/*.deb
             artifacts/**/*.AppImage
             artifacts/**/*.dmg
-            artifacts/**/*.exe
+            artifacts/**/*.msix
+            artifacts/**/*.appinstaller

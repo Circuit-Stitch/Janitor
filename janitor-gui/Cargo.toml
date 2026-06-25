@@ -74,17 +74,11 @@ icons = [
 # Requires below (the reason rpm can't be built in the Debian world; ADR 0022).
 depends = ["libfontconfig1", "libxkbcommon0", "libxcb1", "libgl1"]
 
-# Windows installers (nsis/wix) are produced in CI only, and Azure Trusted Signing
-# is wired there — never here. No unsigned Windows artifact is ever published, so
-# the signing config lands with the (deferred) CI release workflow, not locally.
-# Install *behaviour* (not signing) does belong here, though:
-[package.metadata.packager.nsis]
-# Let the user pick at install time: per-user (→ %LOCALAPPDATA%, no admin) or
-# per-machine (→ Program Files, needs admin). cargo-packager's implicit default
-# is "currentUser", which is why 0.1.1 landed silently in AppData.
-# NOTE: the key is camelCase `installMode` (NOT kebab `install-mode`) — the kebab
-# form fails cargo-packager's config deserialize and breaks ALL formats.
-installMode = "both"
+# Windows is NOT packaged by cargo-packager anymore: ADR 0034 pivots the Windows
+# artifact from NSIS .exe to MSIX (auto-updating via App Installer, signed by Azure
+# Trusted Signing). The MSIX is assembled by `makeappx` in release.yml from
+# janitor-gui/msix/AppxManifest.xml — there is no [package.metadata.packager.nsis]
+# block here. Linux/macOS packaging below is unchanged (still cargo-packager).
 
 # ── Fedora rpm (cargo-generate-rpm) ──────────────────────────────────────────
 # Build from the workspace root after a release build:
