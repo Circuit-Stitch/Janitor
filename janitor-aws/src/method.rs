@@ -72,17 +72,33 @@ impl ResourceMethod for SecretsManagerMethod {
             .map_err(MethodError::Session)
     }
 
-    /// The Secrets Manager staged-put/CAS write (ADR 0001) is still unbuilt — the
-    /// shell never calls this in v1 (read-only). It returns a masked `Unsupported`
-    /// so the seam is total; B5 replaces this body with the real staged write.
+    /// The Secrets Manager staged-put/CAS write (ADR 0001 + Amendment 2026-06-25):
+    /// the flat-JSON merge + ADR 0001 steps 3–6 + conflict model B (see
+    /// [`write_secret`](crate::secret_write::write_secret)). The shell never calls
+    /// this through the port in v1 (read-only); it is reached only via the
+    /// `live-verify-sm-write` binary. A read/transport failure masks to
+    /// [`MethodError::Session`] (the shell *could* run the ladder, as for `fetch` —
+    /// but ADR 0032's stale-role recovery is load-only, not write); a non-flat blob
+    /// or invalid key masks to [`MethodError::Content`] (Unsupported, no recovery).
     async fn write(
         &self,
-        _cred: &Credential,
-        _mapping: &Mapping,
-        _edits: &[EnvEdit],
+        cred: &Credential,
+        mapping: &Mapping,
+        edits: &[EnvEdit],
     ) -> Result<WriteOutcome, MethodError> {
-        Err(MethodError::Content {
-            detail: "Secrets Manager writes are not yet supported".to_string(),
+        crate::secret_write::write_secret(
+            self.secrets.as_ref(),
+            cred,
+            &mapping.secret_id,
+            &mapping.region,
+            edits,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::secret_write::SecretWriteError::Session(s) => MethodError::Session(s),
+            other => MethodError::Content {
+                detail: other.detail(),
+            },
         })
     }
 
@@ -177,9 +193,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_is_unsupported_for_now() {
-        // v1 ships read-only; the seam is total but Secrets Manager has no write yet.
-        let err = method(Arc::new(FakeSecretsApi::new(vec![])))
+    async fn write_applies_a_flat_json_edit_through_the_engine() {
+        // The method now dispatches to the staged-put/CAS engine (ADR 0001 / #89);
+        // a flat-JSON edit commits. The full engine behaviour is pinned in
+        // `crate::secret_write` — this just proves the method is wired to it.
+        use crate::wire::fakes::read_json;
+        use crate::wire::CasOutcome;
+        let api = Arc::new(
+            FakeSecretsApi::new(vec![])
+                .reads(vec![read_json(r#"{"A":"1"}"#, "v1")])
+                .puts(vec![Ok("v2".into())])
+                .stages(vec![Ok(CasOutcome::Committed)]),
+        );
+        let outcome = method(api.clone())
+            .write(&cred(), &mapping(), &[EnvEdit::set("A", "2")])
+            .await
+            .unwrap();
+        assert_eq!(outcome, WriteOutcome::Applied);
+        assert_eq!(api.put_calls()[0].secret_string, r#"{"A":"2"}"#);
+    }
+
+    #[tokio::test]
+    async fn write_of_a_non_flat_secret_masks_to_unsupported_content() {
+        // A nested/binary blob can't be merged safely → Content (Unsupported), not a
+        // Session error, and no write is attempted.
+        use crate::wire::fakes::read_json;
+        let api =
+            Arc::new(FakeSecretsApi::new(vec![]).reads(vec![read_json(r#"{"A":{"b":1}}"#, "v1")]));
+        let err = method(api.clone())
             .write(&cred(), &mapping(), &[EnvEdit::set("A", "2")])
             .await
             .unwrap_err();
@@ -188,6 +229,7 @@ mod tests {
             janitor_core::provider::FetchFailReason::Unsupported
         );
         assert!(matches!(err, MethodError::Content { .. }));
+        assert!(api.put_calls().is_empty());
     }
 
     #[tokio::test]

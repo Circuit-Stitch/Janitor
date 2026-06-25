@@ -2,6 +2,36 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the Secrets Manager staged-put/CAS write engine landed (ADR 0001 +
+> Amendment 2026-06-25, #89) — built behind fakes + replay, shipped read-only.**
+> `SecretsManagerMethod::write` is no longer the masked `Unsupported` stub (ADR 0032
+> Decision 8's deferral is resolved): it dispatches to a new pure
+> `janitor-aws::secret_write::write_secret` engine that does the **flat-JSON merge**
+> (parse the current blob, replace/insert/remove the edited **top-level** keys via
+> `serde_json`, preserve every untouched key — incl. non-string scalars — verbatim;
+> nested/array/bare-string/`secret_binary` → masked `NotFlat`/`Unsupported`, never an
+> un-flatten guess) then the ADR 0001 staged-put → atomic-CAS → mandatory-cleanup
+> sequence under **conflict model B** (base = the write's *own* first read; a key
+> *we* edited changing across a re-read → stop with `Conflict`, never auto-merge;
+> only other keys changed → replay-on-fresh + bounded `MAX_ATTEMPTS` retry; a no-op
+> merge writes nothing). The `SecretsApi` seam gained `put_secret_value` (returns the
+> new `VersionId`, stages under a `janitor-pending-<uuid>` label so `AWSCURRENT` is
+> not moved), `update_secret_version_stage` (a `CasOutcome::{Committed,Mismatch}`
+> CAS), and a `VersionId` on the read; the three new SDK methods are **replay-tested**
+> (`StaticReplayClient`, ADR 0027) so the shell stays in the coverage number (aws
+> 94.8%, gate held). A standalone `SecretsManagerWriter` (broker + `SecretsApi`) backs
+> a human-gated `live-verify-sm-write` binary (guided sign-in → Discovery → edit →
+> masked outcome → masked re-read). The merged blob + Values are `Zeroizing` and reach
+> only the writer; `ClientRequestToken`/`VersionId` are non-secret opaque ids — no
+> Value or SDK text crosses a `Failure`/`Event`/log/`Debug` (THREAT-MODEL); v1 stays
+> read-only (engine reachable only via the binary). **Still pending:** the live run
+> itself (ADR 0001's AWSCURRENT/AWSPREVIOUS + label-reclamation + exact CAS-mismatch
+> error-code checks; the shell errs to the safe side until then), the version-quota
+> cadence guard (deferred — `MAX_ATTEMPTS` is the only quota defence for now), and the
+> GUI cell-edit + confirm-diff UI (out of scope, #80 follow-up). Design:
+> [`docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md`](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md)
+> (Amendment 2026-06-25).
+>
 > **Latest: the Discovery browse-region picker + cross-region Discovery landed
 > (ADR 0015, #12).** Discovery's browse region is now a **console-style picker
 > (never free text)** wired in **two surfaces over one sticky value**: Global
