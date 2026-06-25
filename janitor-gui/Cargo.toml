@@ -77,6 +77,12 @@ depends = ["libfontconfig1", "libxkbcommon0", "libxcb1", "libgl1"]
 # Windows installers (nsis/wix) are produced in CI only, and Azure Trusted Signing
 # is wired there — never here. No unsigned Windows artifact is ever published, so
 # the signing config lands with the (deferred) CI release workflow, not locally.
+# Install *behaviour* (not signing) does belong here, though:
+[package.metadata.packager.nsis]
+# Let the user pick at install time: per-user (→ %LOCALAPPDATA%, no admin) or
+# per-machine (→ Program Files, needs admin). cargo-packager's implicit default
+# is "currentUser", which is why 0.1.1 landed silently in AppData.
+install-mode = "both"
 
 # ── Fedora rpm (cargo-generate-rpm) ──────────────────────────────────────────
 # Build from the workspace root after a release build:
