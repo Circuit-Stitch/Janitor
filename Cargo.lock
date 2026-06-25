@@ -3422,12 +3422,17 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-secretsmanager",
+ "aws-smithy-http-client",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
+ "http 1.4.1",
  "janitor-aws-auth",
  "janitor-core",
+ "serde_json",
  "tokio",
  "tracing",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

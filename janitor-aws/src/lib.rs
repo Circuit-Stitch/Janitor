@@ -27,10 +27,16 @@
 pub mod discovery;
 pub mod method;
 pub mod presenter;
+pub mod secret_write;
 pub mod secrets;
 pub mod wire;
 
 pub use method::SecretsManagerMethod;
+pub use secret_write::{SecretWriteError, SecretsManagerWriter};
+
+// The provider-agnostic write-seam types (ADR 0032), re-exported for the
+// `live-verify-sm-write` binary (mirrors `janitor-ssm`).
+pub use janitor_aws_auth::write::{EnvEdit, EnvWriteError, WriteOutcome};
 
 // Untested shell (real I/O); compiled but not coverage-gated.
 pub mod aws_impl;

@@ -28,13 +28,14 @@ impl SecretsClient {
         cred: &Credential,
         mapping: &Mapping,
     ) -> Result<SecretShape, SessionError> {
-        let mut raw = self
+        let mut read = self
             .api
             .get_secret_value(cred, &mapping.secret_id, &mapping.region)
             .await?;
+        // The read path ignores the VersionId (only the write CAS needs it).
         // `RawSecret` is zeroize-on-drop (ADR 0024), so its fields can't be moved
         // out by value; `take` them, leaving the emptied buffer to wipe on drop.
-        match (raw.secret_string.take(), raw.secret_binary.take()) {
+        match (read.raw.secret_string.take(), read.raw.secret_binary.take()) {
             (Some(s), _) => Ok(SecretShape::from_secret_string(&s)),
             (None, Some(b)) => Ok(SecretShape::from_secret_binary(b)),
             (None, None) => Err(SessionError::NotFound),
