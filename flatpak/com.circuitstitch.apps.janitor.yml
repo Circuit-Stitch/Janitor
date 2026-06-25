@@ -1,0 +1,60 @@
+# Flathub manifest for Janitor (ADR 0034).
+#
+# Offline build: Flathub has no network during build, so all 769 crates are
+# vendored via cargo-sources.json (regenerate with ./gen-cargo-sources.sh after
+# any Cargo.lock change). The freedesktop rust-stable SDK extension supplies the
+# `stable` toolchain that rust-toolchain.toml asks for.
+#
+# Local iteration: swap the `git` source below for `{ type: dir, path: .. }` to
+# build the working tree, then:
+#   flatpak-builder --user --install --force-clean build-dir flatpak/com.circuitstitch.apps.janitor.yml
+id: com.circuitstitch.apps.janitor
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: janitor-gui
+
+finish-args:
+  # AWS API calls, the SSM wss data channel, and the OAuth loopback redirect
+  # catcher (shared host netns, so the host browser reaches 127.0.0.1:5369x).
+  - --share=network
+  # Slint GUI.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Browser sign-in goes through the OpenURI portal (open::that → xdg-open shim),
+  # which is automatic — no host filesystem and no extra talk-name needed.
+  # No --filesystem: config lives in the per-app dir; nothing secret on disk.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    # Vendored crates + the generated cargo config live under $CARGO_HOME; the
+    # generator writes cargo/config + cargo/vendor relative to the module build
+    # dir (/run/build/<module-name>), so this path must match the module name.
+    CARGO_HOME: /run/build/janitor/cargo
+
+modules:
+  - name: janitor
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release -p janitor-gui
+      - install -Dm755 target/release/janitor-gui /app/bin/janitor-gui
+      - install -Dm644 janitor-gui/assets/com.circuitstitch.apps.janitor.desktop
+        /app/share/applications/com.circuitstitch.apps.janitor.desktop
+      - install -Dm644 janitor-gui/assets/com.circuitstitch.apps.janitor.metainfo.xml
+        /app/share/metainfo/com.circuitstitch.apps.janitor.metainfo.xml
+      - install -Dm644 janitor-gui/assets/icon.svg
+        /app/share/icons/hicolor/scalable/apps/com.circuitstitch.apps.janitor.svg
+      - for s in 16 32 48 64 128 256 512; do install -Dm644 janitor-gui/assets/icons/$s.png
+        /app/share/icons/hicolor/${s}x${s}/apps/com.circuitstitch.apps.janitor.png; done
+    sources:
+      - type: git
+        url: https://github.com/Circuit-Stitch/Janitor.git
+        tag: v0.1.1
+        # Pin the matching commit at submission (Flathub requires git sources be pinned):
+        # commit: <40-char sha for tag v0.1.1>
+      - cargo-sources.json
