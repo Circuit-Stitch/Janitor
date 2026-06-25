@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# Packaging output (cargo-packager + the MSIX pack layout, ADR 0022 / 0034)
+dist/
+
 # Serena local agent tooling (per-developer, not project source)
 /.serena/
 

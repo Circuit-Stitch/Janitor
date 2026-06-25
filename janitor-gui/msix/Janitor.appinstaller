@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  App Installer file (ADR 0034). The Windows release job substitutes @VERSION@
+  (4-part: crate X.Y.Z -> X.Y.Z.0) and uploads this alongside the signed .msix.
+
+  Hosted at the stable …/releases/latest/download/Janitor.appinstaller URL, so the
+  draft -> human-review -> publish flow IS the release gate: a draft release is not
+  "latest", so it never advertises an update.
+
+  DELIBERATELY NO <UpdateSettings>: manual-only, zero background egress (ADR 0034
+  Decisions 3 + 6). App Installer never auto/background-checks. The sole trigger is
+  the in-app "Check for updates" button, which reads this file only on user click.
+
+  `Publisher` must match the AppxManifest.xml / Trusted Signing cert Subject.
+-->
+<AppInstaller
+    xmlns="http://schemas.microsoft.com/appx/appinstaller/2018"
+    Version="@VERSION@"
+    Uri="https://github.com/Circuit-Stitch/Janitor/releases/latest/download/Janitor.appinstaller">
+  <MainPackage
+      Name="com.circuitstitch.apps.janitor"
+      Publisher="CN=Circuit Stitch, O=Circuit Stitch, L=West Sacramento, S=California, C=US"
+      Version="@VERSION@"
+      ProcessorArchitecture="x64"
+      Uri="https://github.com/Circuit-Stitch/Janitor/releases/latest/download/Janitor.msix" />
+</AppInstaller>

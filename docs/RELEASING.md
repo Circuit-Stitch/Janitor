@@ -16,7 +16,7 @@ A pushed `vX.Y.Z` tag builds, on native per-OS runners, and attaches to a
 | Debian / Ubuntu | `.deb` | `cargo-packager` | Built on `ubuntu-22.04` (old-glibc floor) |
 | Linux portable | `.AppImage` | `cargo-packager` | Distro-independent |
 | macOS (Apple Silicon) | `.dmg` | `cargo-packager` | **Unsigned** — Gatekeeper warns (see below) |
-| Windows | `.exe` (NSIS) | `cargo-packager` | **Skip-gated** on signing (see below) |
+| Windows | `.msix` + `.appinstaller` | `makeappx` + Trusted Signing | Auto-updating (ADR 0034); **skip-gated** on signing (see below) |
 
 The Release is left as a **draft** — nothing is published until a human reviews
 the artifacts and clicks publish.
@@ -45,7 +45,35 @@ packaging change before tagging.
 
 ## Platform signing status
 
-### Windows — signed-only, gated (#56)
+### Windows — MSIX, auto-updating, signed-only, gated (ADR 0034)
+
+Windows ships an **MSIX** that auto-updates via Windows' built-in **App
+Installer** engine (ADR 0034, superseding the NSIS `.exe` of ADR 0022). The
+release job assembles the package with `makeappx` from
+[`janitor-gui/msix/AppxManifest.xml`](../janitor-gui/msix/AppxManifest.xml) + the
+built `janitor-gui.exe` + the committed icons, signs the `.msix` with Trusted
+Signing, and uploads it alongside a companion
+[`Janitor.appinstaller`](../janitor-gui/msix/Janitor.appinstaller).
+
+**Update model — manual only, zero background egress.** The `.appinstaller`
+carries **no `UpdateSettings`**, so App Installer never background-checks. The
+**sole** update trigger is the in-app **"Check for updates"** button (a follow-up
+PR), which reads the `.appinstaller` URL only on click. The button reaches the
+linked URL via `…/releases/latest/download/Janitor.appinstaller` — so a **draft**
+release (not "latest") never advertises an update: the draft → review → publish
+flow is the release gate.
+
+> ⚠️ **Bootstrap gap — 0.1.3 NSIS users are NOT auto-updated.** Auto-update only
+> begins **once a user is on an MSIX build**. Moving from the shipped NSIS `0.1.3`
+> to the first MSIX build (e.g. `0.1.4`) is a **one-time manual reinstall of a
+> different package type**: download `Janitor.appinstaller` and **open it** — App
+> Installer installs the `.msix` **and** records the update URL, so future "Check
+> for updates" works. Installing the bare `.msix` directly does **not** wire up
+> updates (no recorded App Installer URI), so call out *open the `.appinstaller`*
+> specifically in the first MSIX release's notes. Also: under MSIX,
+> `%APPDATA%\Janitor` writes are virtualized into the package store, so the
+> existing NSIS install's `config.toml` (start URL, last pick) does **not** carry
+> over — a one-time re-enter (no secret implication; Config holds locations only).
 
 **No unsigned Windows artifact is ever produced or published** (ADR 0022 hard
 policy). The Windows job is *skipped* unless the `WINDOWS_SIGNING_ENABLED` repo
@@ -54,8 +82,11 @@ artifacts and stays green.
 
 Signing uses **Azure Trusted Signing** over **OIDC federation** (no stored
 secret — `azure/login` mints a token, `azure/trusted-signing-action` consumes it
-to sign the NSIS installer). To turn it on, set these repo **Variables**
-(Settings → Secrets and variables → Actions → Variables):
+to sign the `.msix` directly). **Load-bearing:** the `AppxManifest.xml`
+`Publisher` (and the `.appinstaller` `Publisher`) **must exactly equal the Subject
+(`CN=…`) of the Trusted Signing certificate profile** or signing rejects the
+package. To turn signing on, set these repo **Variables** (Settings → Secrets and
+variables → Actions → Variables):
 
 | Variable | Value |
 | --- | --- |
