@@ -15,7 +15,9 @@ janitor-aws = { path = "../janitor-aws" }
 janitor-aws-auth = { path = "../janitor-aws-auth" }
 janitor-ssm = { path = "../janitor-ssm" }
 janitor-mock = { path = "../janitor-mock" }
-slint = "1"
+# renderer-software kept explicit: it's the launch fallback (see main.rs), so it
+# must survive a future default-features trim. femtovg stays via the defaults.
+slint = { version = "1", features = ["renderer-software"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # OS clipboard for copy-Entry-name (#40, ADR 0005). Only Entry names (metadata)
 # are ever placed on the clipboard — never Values.

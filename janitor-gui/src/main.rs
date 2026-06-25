@@ -1001,6 +1001,16 @@ fn main() -> Result<(), slint::PlatformError> {
     // the worker spawns so its first events are captured.
     let log = logpane::install();
 
+    // ponytail: default to Slint's software renderer unless the user picked a
+    // backend. The GPU (femtovg) path needs OpenGL 2.0, which RDP sessions and
+    // many VMs/headless drivers don't expose — there `MainWindow::new()` fails
+    // ("Could not locate glCreateShader symbol") and the app dies before any
+    // window shows. This masked-matrix table UI gains nothing from GPU, so
+    // software-by-default is the right trade. Escape hatch: SLINT_BACKEND=winit-femtovg.
+    if env::var_os("SLINT_BACKEND").is_none() {
+        env::set_var("SLINT_BACKEND", "winit-software");
+    }
+
     let ui = MainWindow::new()?;
 
     // The composition root's one mock-vs-real decision (ADR 0019): pick the
