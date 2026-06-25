@@ -82,7 +82,9 @@ depends = ["libfontconfig1", "libxkbcommon0", "libxcb1", "libgl1"]
 # Let the user pick at install time: per-user (→ %LOCALAPPDATA%, no admin) or
 # per-machine (→ Program Files, needs admin). cargo-packager's implicit default
 # is "currentUser", which is why 0.1.1 landed silently in AppData.
-install-mode = "both"
+# NOTE: the key is camelCase `installMode` (NOT kebab `install-mode`) — the kebab
+# form fails cargo-packager's config deserialize and breaks ALL formats.
+installMode = "both"
 
 # ── Fedora rpm (cargo-generate-rpm) ──────────────────────────────────────────
 # Build from the workspace root after a release build:
