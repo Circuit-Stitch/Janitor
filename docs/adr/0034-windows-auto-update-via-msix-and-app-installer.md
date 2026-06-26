@@ -108,8 +108,18 @@ ADR 0022 still governs them; this ADR touches **only** the Windows path.
    - **Check:** `Windows.ApplicationModel.Package.Current.CheckUpdateAvailabilityAsync()` →
      `PackageUpdateAvailabilityResult.Availability` (`Available` / `Required` / `NoUpdates` /
      `Error`). Consults the linked `.appinstaller` URL **only when called**.
-   - **Install (on user confirm):** `PackageManager.AddPackageByAppInstallerFileAsync` — it
-     auto-uses the app's linked App Installer URL, so no URL is hard-coded.
+   - **Install (on user confirm):** `PackageManager.AddPackageByAppInstallerFileAsync`.
+     **Correction (slice-2 implementation, 2026-06-25):** the API **requires the
+     `.appinstaller` URI passed explicitly** — it is *not* inferred from the running
+     package (verified against Microsoft's own [non-Store update sample](https://learn.microsoft.com/en-us/windows/msix/non-store-developer-updates),
+     which passes `new Uri(".../App.appinstaller")`). Janitor hardcodes the stable
+     `…/releases/latest/download/Janitor.appinstaller` URL (the same one the
+     `.appinstaller` self-references). The install is queued with
+     `AddPackageByAppInstallerOptions::None` — it applies on the next app close, so the
+     user is **not** force-killed mid-session (a `RegisterApplicationRestart` + force-
+     restart one-click variant was deliberately skipped for v1). The WinRT op is
+     `.await`ed on the worker runtime (the `windows` 0.62 crate removed the blocking
+     `.get()`; `windows-future` makes the `IAsyncOperation` awaitable).
    - **No `packageManagement` capability:** that restricted capability is only for
      *cross-publisher* updates; an app updating **itself** (same publisher) does not declare
      it ([update from code](https://learn.microsoft.com/en-us/windows/msix/non-store-developer-updates),

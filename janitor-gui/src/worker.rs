@@ -25,6 +25,8 @@ use janitor_ssm::{
     AwsInstanceCatalog, AwsLoggingPreference, SsmDotenvMethod, SsmFileReader, SsmFileWriter,
 };
 
+use crate::update::{UpdateCheck, UpdateInstall};
+
 /// UI → worker.
 pub enum Command {
     SignIn,
@@ -78,6 +80,15 @@ pub enum Command {
         mapping: Mapping,
         edits: Vec<EnvEdit>,
     },
+    /// Manually check for a Windows MSIX update (ADR 0034, slice 2). The **sole**
+    /// update trigger — runs only on an explicit "Check for updates" click, so the
+    /// network is touched only here (zero background egress). An OS action, not a
+    /// `Provider` call (like `SetReadWrite`); reaches the App Installer engine, never
+    /// AWS. A no-op (Unsupported) off Windows / in an unpackaged build.
+    CheckForUpdates,
+    /// Install the available update (sent after a `CheckForUpdates` reported one).
+    /// Queues the staged package to apply on next app close (no forced shutdown).
+    InstallUpdate,
     Shutdown,
 }
 
@@ -169,6 +180,12 @@ pub enum Event {
     WriteRefused {
         environment: String,
     },
+    /// The result of a manual update check (ADR 0034, slice 2). Carries the masked
+    /// outcome (Available / UpToDate / Unsupported / Failed) — never a Value. The UI
+    /// renders it via `update::describe_check` (status line + Install-button gate).
+    UpdateChecked(UpdateCheck),
+    /// The result of an update install attempt. Masked outcome only.
+    UpdateInstalled(UpdateInstall),
 }
 
 /// Which [`Provider`] the GUI runs against. The composition root (`main`) picks
@@ -466,6 +483,19 @@ async fn run_loop(
                     let outcome = provider.write(&mapping, &edits).await;
                     on_event(write_event(outcome, environment));
                 }
+            }
+            // OS update actions (ADR 0034) — not Provider calls. The WinRT op is
+            // awaited on this (worker) runtime, off the UI thread. Network egress
+            // happens only here, only because the user clicked. Off Windows /
+            // unpackaged this resolves to a masked Unsupported without touching the
+            // network. `UpdateCheck`/`UpdateInstall` carry no Value (THREAT-MODEL).
+            Command::CheckForUpdates => {
+                tracing::info!(target: "janitor::gui", "Checking for updates");
+                on_event(Event::UpdateChecked(crate::update::check().await));
+            }
+            Command::InstallUpdate => {
+                tracing::info!(target: "janitor::gui", "Installing update");
+                on_event(Event::UpdateInstalled(crate::update::install().await));
             }
         }
         // After any command that touched the Provider, surface any advisories it
