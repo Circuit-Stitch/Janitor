@@ -343,6 +343,12 @@ jobs:
         && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
+      # Check out FIRST (before downloading artifacts) so checkout's clean step
+      # doesn't wipe the downloaded artifacts/ dir. Only needed for the
+      # release-notes template (.github/release-body.md).
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -353,6 +359,9 @@ jobs:
           draft: true
           name: ${{ needs.setup.outputs.tag }}
           tag_name: ${{ needs.setup.outputs.tag }}
+          # Per-platform install instructions (Windows: open the .appinstaller).
+          # Maintainer edits the highlights in the draft before publishing.
+          body_path: .github/release-body.md
           # One-click dispatch: the tag doesn't exist yet, so create it at the bump
           # commit when published. Ignored on a real tag push (tag already exists).
           target_commitish: ${{ needs.setup.outputs.ref }}
