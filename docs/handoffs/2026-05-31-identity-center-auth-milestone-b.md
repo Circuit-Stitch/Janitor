@@ -99,7 +99,7 @@ below are *deferred by decision*, not half-done.
   line renders as a red `NativeCommandError` in PS 5.1 — **not** a failure; judge
   by exit code / `test result: ok`.
 - **Remote:** `git@github.com:Circuit-Stitch/Janitor.git` (SSH). `gh` authed as
-  `Kyle-Falconer`. Branch tracks `origin/main`. 32 commits ahead.
+  the maintainer's account. Branch tracks `origin/main`. 32 commits ahead.
 - **Live-verify is human-gated** (browser + stdin) — run it in a real terminal
   via the `! cargo run …` prefix, not the agent's Bash tool.
 - **Config** (locations only, never values):

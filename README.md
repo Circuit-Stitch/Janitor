@@ -7,14 +7,17 @@
 [![mock coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=mock&label=mock%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 [![ssm coverage](https://img.shields.io/codecov/c/github/Circuit-Stitch/Janitor?flag=ssm&label=ssm%20coverage)](https://codecov.io/gh/Circuit-Stitch/Janitor)
 
-> An ephemeral desktop client onto **AWS Secrets Manager**. It stores no secrets
-> and no credentials of its own — it borrows them on demand and forgets them.
-> The name is the thesis: the janitor holds the most keys, yet keeps none.
+> An ephemeral desktop client onto your AWS secrets — **Secrets Manager** Sets
+> and remote **`.env`** files reached over **SSM**. It stores no secrets and no
+> credentials of its own — it borrows them on demand and forgets them. The name
+> is the thesis: the janitor holds the most keys, yet keeps none.
 
-**License:** [GPL-3.0-only](LICENSE) · **Status:** core + GUI + guided Identity
-Center sign-in + the GUI↔AWS bridge landed — the matrix reads real AWS (mock
-behind `JANITOR_MOCK=1`); no write path yet
-([details below](#status)) · **CI:** lint · test · coverage
+**License:** [GPL-3.0-only](LICENSE) · **Status:** v0.1.4 released (Linux ·
+macOS · Windows MSIX with auto-update). The masked drift matrix reads real AWS —
+Secrets Manager Sets and remote `.env` files over SSM (offline mock behind
+`JANITOR_MOCK=1`). Both write engines are built and tested but the app ships
+**read-only by default**, with the write paths reachable only via human-gated
+live-verify binaries ([details below](#status)) · **CI:** lint · test · coverage
 
 ---
 
@@ -49,7 +52,7 @@ a naive overwrite. The drift matrix is the other half: see the holes — the
 
 ## What drift looks like
 
-*How the matrix is designed to read — it isn't built yet (see [Status](#status)).*
+*This is how the matrix reads in the running GUI (see [Status](#status)).*
 
 Janitor compares Values **masked**: it shows presence, Value *length*, and
 equality grouping (by hash) without revealing plaintext. Each Entry lands in
@@ -78,89 +81,81 @@ length is a deliberate, accepted side-channel — see the
 
 ## Status
 
-The security-critical core, a GUI tracer-bullet, and a headless Identity Center
-auth slice all exist and are tested. The GUI still runs on mock data, and no
-write path or live-wired data flow exists yet.
+The GUI is live: it signs in to IAM Identity Center in a browser, runs guided
+Discovery, and renders the masked drift matrix from real AWS — across two
+Providers (Secrets Manager Sets and remote `.env` files over SSM) and across
+regions. Both write engines are built and tested behind fakes + replay, but the
+shipped app stays **read-only**; the write paths are reachable only via
+human-gated `live-verify-*-write` binaries while live verification finishes.
 
 | Area | State |
 | --- | --- |
-| Secret-shape model — parse a Secret Set into comparable Entries; lossless flatten / unflatten to dotted-path Names | ✅ Implemented & tested |
+| Secret-shape model — comparable Entries + lossless flatten / unflatten | ✅ Implemented & tested — [ADR 0008](docs/adr/0008-secret-shape-flattening-scheme.md) |
 | Zeroizing secret types — `Value` kept out of `Debug` / `Display` / logs | ✅ Implemented & tested |
 | `Config` load / save — atomic TOML write, locations only | ✅ Implemented & tested |
-| Comparison matrix (Aligned / Drift / Gap) + masked read model | ✅ Implemented & tested — [ADR 0009](docs/adr/0009-comparison-engine-result-model.md) |
-| `janitor-gui` (Slint matrix view) — masked cells, per-cell reveal, settings | ✅ Tracer-bullet on a mock `SecretSource` — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) |
-| Identity Center Sign-in + per-Environment Credentials + Secrets Manager I/O | ✅ Headless slice in `janitor-aws` (logic tested vs. fakes; browser/SDK shell untested by design) — [ADR 0002](docs/adr/0002-identity-center-only-memory-only-auth.md) / [ADR 0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md). Live verification (Milestone B) pending |
-| Guided sign-in — browser → log in → auto-discovered account / role / secret, org + last pick remembered | ✅ `live-verify` binary in `janitor-aws` (`ListAccounts`/`Roles`/`Secrets` + tested `select::resolve`; stdin/SDK shell untested) — [ADR 0011](docs/adr/0011-guided-sign-in-and-discovery.md). Live verification (Milestone B) pending |
-| `janitor-aws` ↔ GUI wiring (real data in the matrix) | ✅ Worker-threaded bridge + lazy sign-in; secrets stay in the worker; reveal round-trips; `JANITOR_MOCK=1` runs offline — [ADR 0012](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md) (live browser path human-gated) |
-| Non-stomping write engine | 📋 Designed — [ADR 0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md), not built |
+| Comparison matrix (Aligned / Drift / Gap) + masked read model | ✅ Implemented & tested — [ADR 0009](docs/adr/0009-comparison-engine-result-model.md) / [0014](docs/adr/0014-drift-matrix-model-n-column-and-comparison-columns.md) |
+| `janitor-gui` — masked matrix, per-cell reveal, guided Discovery wizard, Manage window, region picker, in-app diagnostic log | ✅ Live on real AWS (`JANITOR_MOCK=1` for offline mock) — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) / [0013](docs/adr/0013-guided-discovery-in-gui-step-machine-and-manage-window.md) / [0015](docs/adr/0015-region-picker-and-cross-region-discovery.md) / [0017](docs/adr/0017-in-app-diagnostic-log-panel-and-zero-terminal-output.md) |
+| Identity Center sign-in + per-Environment Credentials + GUI↔AWS worker bridge | ✅ Implemented & tested (logic vs. fakes; browser/SDK shell untested by design) — [ADR 0002](docs/adr/0002-identity-center-only-memory-only-auth.md) / [0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md) / [0012](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md) |
+| Guided sign-in + Discovery — auto-discovered account / role / secret, remembered picks | ✅ Implemented & tested — [ADR 0011](docs/adr/0011-guided-sign-in-and-discovery.md) / [0026](docs/adr/0026-shared-discovery-orchestrator-in-core.md) |
+| **Secrets Manager Provider** (read) | ✅ Live in the matrix |
+| **Remote `.env` over SSM Provider** (read) — pure-Rust MGS data channel, no `session-manager-plugin` | ✅ Live-verified 2026-06-07 — [ADR 0025](docs/adr/0025-remote-dotenv-over-ssm-provider.md) |
+| Non-stomping Secrets Manager write — staged-put + atomic CAS | ⚙️ Built & tested behind fakes/replay; read-only, reachable via `live-verify-sm-write` — [ADR 0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md) |
+| Remote `.env` over SSM write — non-stomping, hash-guarded | ⚙️ Built & tested; read-only, reachable via `live-verify-ssm-write` — [ADR 0029](docs/adr/0029-remote-dotenv-write-via-interactive-pty-data-channel-stream.md) |
+| Read-write lock — writes unreachable until deliberately unlocked | ✅ Worker-enforced invariant — [ADR 0032](docs/adr/0032-wire-write-seam-to-provider-port-and-read-write-lock.md) |
+| Packaging + releases — Linux deb/rpm/AppImage, macOS dmg, Windows MSIX auto-update | ✅ v0.1.4 — [ADR 0007](docs/adr/0007-ci-and-distribution.md) / [0022](docs/adr/0022-packaging-cargo-packager-and-windows-signing.md) / [0034](docs/adr/0034-windows-auto-update-via-msix-and-app-installer.md) |
 
-The workspace is four crates — `janitor-core` (offline, ≥80% coverage gate),
-`janitor-gui` (Slint), `janitor-aws` (async AWS adapter, ≥80% gate on its
-library surface), and `janitor-mock` (the offline Provider — canned demo data,
-≥80% gate; ADR 0019). `cargo test --workspace` runs them all; the ≥80% coverage
-gates cover `core`, `aws`, and `mock`, where correctness is proven (ADR 0010 §5,
-ADR 0016).
+The workspace is six crates: `janitor-core` (offline bedrock — model, compare,
+`Config`, the `Provider` port, the Discovery orchestrator), `janitor-gui`
+(Slint), `janitor-aws-auth` (shared Identity Center auth base; ADR 0024),
+`janitor-aws` (Secrets Manager Provider), `janitor-ssm` (remote `.env` over SSM
+Provider; ADR 0025), and `janitor-mock` (offline canned-data Provider; ADR
+0019). `cargo test --workspace` runs them all; ≥80% coverage gates cover the
+non-GUI crates, where correctness is proven (ADR 0010 §5, ADR 0016) — the
+browser / SDK / socket shells stay untested by design.
+
+## Install
+
+Prebuilt bundles ship on the
+[Releases page](https://github.com/Circuit-Stitch/Janitor/releases):
+
+- **Linux** — `.deb`, `.rpm`, or `.AppImage`
+- **macOS** — `.dmg` (Apple Silicon)
+- **Windows** — `.msix`, installed via App Installer with auto-update
+  ([ADR 0034](docs/adr/0034-windows-auto-update-via-msix-and-app-installer.md))
+
+The app ships **read-only**: it reads and compares secrets but makes no mutating
+AWS calls. You bring your own IAM Identity Center org — see
+[docs/iam_setup.md](docs/iam_setup.md).
 
 ## Build & test
 
-Standard Cargo across a four-crate workspace (`janitor-core`, `janitor-gui`,
-`janitor-aws`, `janitor-mock`).
-
-### Linux system dependencies
-
-`janitor-gui` uses [Slint](https://slint.dev), whose Linux backend links against
-a few system libraries (`fontconfig`, `freetype`, `libxkbcommon`) via
-`pkg-config`. Without their development packages the build fails in
-`yeslogic-fontconfig-sys` with *"Package fontconfig was not found in the
-pkg-config search path."* Install them before building:
-
-```bash
-# Fedora / RHEL
-sudo dnf install -y fontconfig-devel freetype-devel libxkbcommon-devel
-
-# Debian / Ubuntu
-sudo apt install -y libfontconfig-dev libfreetype-dev libxkbcommon-dev
-```
-
-If a later `*-sys` crate still fails, you may also need the Wayland / X11 / GL
-dev packages — on Fedora: `wayland-devel libxkbcommon-x11-devel
-mesa-libGL-devel mesa-libEGL-devel`. macOS and Windows need no extra packages.
-
-```bash
-cargo build                          # build the workspace
-cargo test --workspace               # all crates (core + gui + janitor-aws fakes)
-cargo test -p janitor-core <name>    # a single core test (substring match)
-cargo clippy --all-targets           # lint
-cargo fmt                            # format
-
-# Coverage (≥80% gate on janitor-core). Needs the cargo-llvm-cov subcommand:
-#   cargo install cargo-llvm-cov
-cargo llvm-cov -p janitor-core
-
-cargo run -p janitor-gui             # real AWS via the worker bridge (browser sign-in; needs a configured org)
-JANITOR_MOCK=1 cargo run -p janitor-gui          # offline mock (bash); PowerShell: $env:JANITOR_MOCK=1; cargo run -p janitor-gui
-
-# janitor-aws human-gated binaries (need a browser + a real Identity Center org):
-# First run? docs/iam_setup.md sets up the Identity Center org + permission set.
-cargo run -p janitor-aws --bin loopback-spike   # browser↔loopback shell, no AWS
-cargo run -p janitor-aws --bin live-verify      # guided sign-in: log in, then pick (ADR 0011)
-```
+Standard Cargo across the six-crate workspace. Linux needs a few Slint system
+dependencies first; full commands (build, test, coverage, the GUI, and the
+human-gated live-verify binaries) live in
+**[docs/building.md](docs/building.md)**.
 
 ## Architecture
 
-Two crates, split along a trust boundary
-([ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md)):
+Crates split along a trust boundary
+([ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md)). The
+security-critical logic lives in `core` and the Provider crates behind a
+`Provider` port ([ADR 0019](docs/adr/0019-provider-port-in-core-and-janitor-mock-crate.md));
+the GUI is a thin, softer-trust view:
 
-- **`janitor-core`** *(trusted)* — all the security-critical logic, with **no
-  GUI dependencies**: the secret-shape model, zeroizing in-memory types, Config,
-  and — in future slices — Identity Center auth, Secrets Manager I/O, the
-  comparison engine, and the non-stomping write engine. AWS access will sit
-  behind a client **trait** so the network stays mockable and the coverage gate
-  stays reachable. This is where correctness is proven.
-- **`janitor-gui`** *(softer-trust, not yet built)* — a thin
-  [Slint](https://slint.dev) view: the masked comparison matrix, momentary
-  per-cell reveal, confirm-diff dialogs, and browser launch for Sign-in. No
-  auth / AWS / compare / write logic lives here.
+- **`janitor-core`** *(trusted)* — no GUI deps: the secret-shape model,
+  zeroizing in-memory types, `Config`, the comparison engine, the write-seam
+  types, the provider-agnostic Discovery orchestrator
+  ([ADR 0026](docs/adr/0026-shared-discovery-orchestrator-in-core.md)), and the
+  `Provider` port every backend implements. This is where correctness is proven.
+- **`janitor-aws-auth` / `janitor-aws` / `janitor-ssm` / `janitor-mock`**
+  *(trusted)* — the Providers: a shared Identity Center auth base, the Secrets
+  Manager backend, the remote-`.env`-over-SSM backend, and the offline mock.
+  Network / SDK / socket I/O sits behind seams so the logic stays mockable and
+  the coverage gates stay reachable.
+- **`janitor-gui`** *(softer-trust)* — a thin [Slint](https://slint.dev) view:
+  the masked comparison matrix, momentary per-cell reveal, the Discovery wizard,
+  the Manage window, and an in-app diagnostic log. No auth / AWS / compare /
+  write logic lives here.
 
 ## Non-negotiable invariants
 
@@ -190,21 +185,10 @@ This README is only the front door — the depth lives here:
   against, the explicit non-goals, and the trust boundaries.
 - **[docs/iam_setup.md](docs/iam_setup.md)** — set up an IAM Identity Center org
   and permission set to run the live `live-verify` harness (Milestone B).
-- **[docs/iam_setup.md](docs/iam_setup.md)** — set up an IAM Identity Center org
-  and permission set to run the live `live-verify` harness (Milestone B).
-- **Architecture Decision Records** in [`docs/adr/`](docs/adr/):
-  - [0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md) — Non-stomping writes via staged `PutSecretValue` + atomic stage CAS
-  - [0002](docs/adr/0002-identity-center-only-memory-only-auth.md) — Identity-Center-only, memory-only authentication
-  - [0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) — Core/GUI split, Slint for the view, and the secret-display stance
-  - [0004](docs/adr/0004-read-only-v1-scope-and-secret-shapes.md) — Read-only v1 scope, and how non-flat secret shapes are handled
-  - [0005](docs/adr/0005-clipboard-and-read-model.md) — Clipboard handling and the matrix read model
-  - [0006](docs/adr/0006-version-history-and-restore.md) — Version history and restore as a first-class feature
-  - [0007](docs/adr/0007-ci-and-distribution.md) — CI and distribution: cargo-packager bundles, signed on macOS and Windows
-  - [0008](docs/adr/0008-secret-shape-flattening-scheme.md) — Secret-shape flattening: leaf-type-preserving dotted paths with escaped dots
-  - [0009](docs/adr/0009-comparison-engine-result-model.md) — Comparison engine result model (Aligned / Drift / Gap)
-  - [0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md) — `janitor-aws` adapter crate and the Identity Center auth object model
-  - [0011](docs/adr/0011-guided-sign-in-and-discovery.md) — Guided sign-in: issuer-scoped registration, post-sign-in discovery, remembered picks
-  - [0012](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md) — GUI↔AWS bridge: worker thread, a tested `Session`, and lazy sign-in
+- **[docs/building.md](docs/building.md)** — build, test, coverage, and the
+  human-gated live-verify binaries.
+- **[Architecture Decision Records](docs/adr/)** — every hard-to-reverse choice,
+  indexed in [`docs/adr/README.md`](docs/adr/README.md).
 - **[CLAUDE.md](CLAUDE.md)** — working agreements and invariants for
   contributors (and AI assistants).
 
