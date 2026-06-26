@@ -16,6 +16,12 @@
 /// The masked outcome of a manual update check. No secret material — just which
 /// branch the App Installer engine reported. `Send` so it rides the worker
 /// `Event` across the thread boundary.
+//
+// `Available`/`UpToDate`/`Failed` are constructed only in the `#[cfg(windows)]`
+// App Installer path; off Windows the stub only ever yields `Unsupported`. Since
+// this is a `bin` crate (no external consumers), suppress the platform-conditional,
+// intentional dead-code lint off Windows — it stays enforced on the Windows build.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCheck {
     /// A newer (or required) version is available — offer to install.
@@ -31,6 +37,10 @@ pub enum UpdateCheck {
 }
 
 /// The masked outcome of kicking off an install.
+//
+// `Started`/`Failed` are constructed only on Windows (see `UpdateCheck` above for
+// why the off-Windows dead-code lint is suppressed).
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateInstall {
     /// Queued: App Installer staged the new package; it applies the next time the
@@ -47,6 +57,10 @@ pub enum UpdateInstall {
 /// (corrected from ADR 0034 Decision 6's original wording). The stable
 /// `…/releases/latest/download/…` form always resolves to the latest *published*
 /// (non-draft) release, so a draft never advertises an update.
+//
+// Referenced by the `#[cfg(windows)]` install path (and tests); not used in the
+// non-Windows stub build, so suppress the off-Windows dead-code lint there.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const APPINSTALLER_URL: &str =
     "https://github.com/Circuit-Stitch/Janitor/releases/latest/download/Janitor.appinstaller";
 
