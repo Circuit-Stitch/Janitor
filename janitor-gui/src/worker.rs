@@ -1159,4 +1159,35 @@ mod tests {
             "a persistent CAS conflict surfaces as WriteConflict"
         );
     }
+
+    // ---- the manual update rail (ADR 0034) ---------------------------------
+
+    #[tokio::test]
+    async fn check_for_updates_reports_unsupported_through_the_worker_rail() {
+        // The whole update rail end to end: CheckForUpdates → update::check().await
+        // → UpdateChecked. A `cargo test` binary has NO MSIX package identity, so on
+        // Windows `Package::Current()` fails fast — no network — and degrades to
+        // Unsupported; off Windows the stub returns Unsupported directly. Either way:
+        // a calm, non-panicking Unsupported, proving the rail (and the await) is
+        // wired without touching the network. (InstallUpdate is deliberately NOT
+        // exercised here — on Windows it would reach the real
+        // PackageManager::AddPackageByAppInstallerFileAsync and hit the network.)
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Command::CheckForUpdates).unwrap();
+        tx.send(Command::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut provider = janitor_mock::MockProvider::new();
+        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [Event::UpdateChecked(UpdateCheck::Unsupported)]
+            ),
+            "an unpackaged build reports Unsupported through the worker rail — not a panic, not a real network check"
+        );
+    }
 }

@@ -61,9 +61,11 @@ carries **no `UpdateSettings`**, so App Installer never background-checks. The
 **Settings**), which reads the `.appinstaller` URL only on click. The button
 reaches the linked URL via `…/releases/latest/download/Janitor.appinstaller` — so
 a **draft** release (not "latest") never advertises an update: the draft → review
-→ publish flow is the release gate. An available update installs on confirm and
-applies the **next time the user closes Janitor** (no forced shutdown). On a
-non-MSIX build (e.g. dev `cargo run`) the button reports "unavailable in this build".
+→ publish flow is the release gate. An available update installs on confirm; it is
+**intended** to apply the next time the user closes Janitor (no forced shutdown) —
+**to be confirmed in live verification** (the `None` install option may instead
+require a forced shutdown to replace the running package; ADR 0034 checklist (f)).
+On a non-MSIX build (e.g. dev `cargo run`) the button reports "unavailable in this build".
 
 > ⚠️ **Bootstrap gap — 0.1.3 NSIS users are NOT auto-updated.** Auto-update only
 > begins **once a user is on an MSIX build**. Moving from the shipped NSIS `0.1.3`

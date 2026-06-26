@@ -193,10 +193,12 @@ mod win {
     async fn try_install() -> windows::core::Result<()> {
         let pm = PackageManager::new()?;
         let uri = Uri::CreateUri(&HSTRING::from(APPINSTALLER_URL))?;
-        // No target volume → the default volume. `None` (no force-shutdown): the
-        // staged update applies on next app close, so the user is not killed mid-
-        // session (ADR 0034 slice 2 — gentle queue).
+        // No target volume → the default volume.
         let volume: Option<&PackageVolume> = None;
+        // `None` (no force-shutdown): the *intent* is the staged update applies on
+        // next app close rather than force-killing the session. UNVERIFIED — `None`
+        // may instead require `ForceApplicationShutdown` to replace the in-use
+        // package (live-verification item, ADR 0034 Consequences (f)).
         pm.AddPackageByAppInstallerFileAsync(&uri, AddPackageByAppInstallerOptions::None, volume)?
             .await?;
         Ok(())
