@@ -12,6 +12,7 @@ mod reveal;
 mod rows;
 mod scrollbar;
 mod sidebar;
+mod update;
 #[cfg(test)]
 mod view_tests;
 mod worker;
@@ -535,6 +536,23 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
                 target: "janitor::gui",
                 "{environment}: write refused — turn on read-write mode in Settings first"
             );
+        }
+        // Windows MSIX update outcomes (ADR 0034, slice 2). The masked status line
+        // is non-secret (a version-agnostic phrase); render it in Settings, gate the
+        // Install button, and mirror it to the Diagnostic Log (ADR 0017).
+        Event::UpdateChecked(check) => {
+            let view = update::describe_check(&check);
+            ui.set_update_available(view.available);
+            ui.set_update_status(view.status.clone().into());
+            tracing::info!(target: "janitor::gui", "Update check — {}", view.status);
+        }
+        Event::UpdateInstalled(install) => {
+            let msg = update::describe_install(&install);
+            // The install is kicked off; hide the Install button regardless of
+            // outcome (a fresh Check re-offers it if it failed).
+            ui.set_update_available(false);
+            ui.set_update_status(msg.clone().into());
+            tracing::info!(target: "janitor::gui", "Update install — {msg}");
         }
     }
 }
@@ -1388,6 +1406,18 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let state = state.clone();
         ui.on_set_read_write(move |on| dispatch(&state, Command::SetReadWrite(on)));
+    }
+    // Windows MSIX self-update (ADR 0034, slice 2): the manual "Check for updates"
+    // button → the worker runs the App Installer check off the UI thread; the
+    // Install button (visible only when an update is available) → kick off the
+    // install. Both are no-ops (Unsupported) off Windows / in an unpackaged build.
+    {
+        let state = state.clone();
+        ui.on_check_for_updates(move || dispatch(&state, Command::CheckForUpdates));
+    }
+    {
+        let state = state.clone();
+        ui.on_install_update(move || dispatch(&state, Command::InstallUpdate));
     }
 
     // Diagnostic Log (ADR 0017): the level dropdown sets the max verbosity shown;

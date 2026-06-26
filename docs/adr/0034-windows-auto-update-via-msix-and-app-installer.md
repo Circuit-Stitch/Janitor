@@ -108,8 +108,22 @@ ADR 0022 still governs them; this ADR touches **only** the Windows path.
    - **Check:** `Windows.ApplicationModel.Package.Current.CheckUpdateAvailabilityAsync()` →
      `PackageUpdateAvailabilityResult.Availability` (`Available` / `Required` / `NoUpdates` /
      `Error`). Consults the linked `.appinstaller` URL **only when called**.
-   - **Install (on user confirm):** `PackageManager.AddPackageByAppInstallerFileAsync` — it
-     auto-uses the app's linked App Installer URL, so no URL is hard-coded.
+   - **Install (on user confirm):** `PackageManager.AddPackageByAppInstallerFileAsync`.
+     **Correction (slice-2 implementation, 2026-06-25):** the API **requires the
+     `.appinstaller` URI passed explicitly** — it is *not* inferred from the running
+     package (verified against Microsoft's own [non-Store update sample](https://learn.microsoft.com/en-us/windows/msix/non-store-developer-updates),
+     which passes `new Uri(".../App.appinstaller")`). Janitor hardcodes the stable
+     `…/releases/latest/download/Janitor.appinstaller` URL (the same one the
+     `.appinstaller` self-references). The install is requested with
+     `AddPackageByAppInstallerOptions::None` (no force-shutdown flag) — the **intent**
+     being that the staged update applies on the next app close rather than force-killing
+     the running session. **Unverified:** whether `None` defers on the App-Installer path
+     or instead requires `ForceApplicationShutdown` to replace the in-use package is a
+     live-verification item (Consequences (f)); the MS sample used `ForceApplicationShutdown`.
+     A `RegisterApplicationRestart` + force-restart one-click variant was skipped for v1.
+     The WinRT op is
+     `.await`ed on the worker runtime (the `windows` 0.62 crate removed the blocking
+     `.get()`; `windows-future` makes the `IAsyncOperation` awaitable).
    - **No `packageManagement` capability:** that restricted capability is only for
      *cross-publisher* updates; an app updating **itself** (same publisher) does not declare
      it ([update from code](https://learn.microsoft.com/en-us/windows/msix/non-store-developer-updates),
@@ -158,7 +172,12 @@ ADR 0022 still governs them; this ADR touches **only** the Windows path.
   triggers an **in-place update**; (c) **config virtualization** behaves; (d) the CA-trust
   chain installs with **no sideload-trust prompt**; (e) the manual check/install path
   (Decision 6 — `CheckUpdateAvailabilityAsync` + `AddPackageByAppInstallerFileAsync`) works
-  from a packaged build, and that **no background check fires** with `UpdateSettings` omitted.
+  from a packaged build, and that **no background check fires** with `UpdateSettings` omitted;
+  (f) **whether `AddPackageByAppInstallerOptions::None` defers** the install to the next app
+  close (the slice-2 intent) **or instead errors / requires `ForceApplicationShutdown`** to
+  replace the in-use running package — the MS sample used `ForceApplicationShutdown`, so this
+  is unconfirmed; if `None` errors, the install button's outcome will be `Failed` until the
+  flag is changed.
 
 - **Distribution follow-ons (out of scope here).** A **winget** manifest can later point at
   the MSIX (Microsoft-native CLI channel, `winget upgrade`); the **Microsoft Store** remains

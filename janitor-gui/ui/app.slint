@@ -144,6 +144,14 @@ export component MainWindow inherits Window {
     callback set-sort(int);
     callback set-grouped(bool);
     callback set-read-write(bool);
+    // Windows MSIX self-update (ADR 0034, slice 2): the manual "Check for updates"
+    // surface in Settings. `update-status` is the masked human line ("" hides it);
+    // `update-available` reveals the Install button. The check hits the network
+    // only on click — zero background egress.
+    in-out property <string> update-status: "";
+    in-out property <bool> update-available: false;
+    callback check-for-updates();
+    callback install-update();
     // Persist a resized ENTRY column width (#42) — fired on drag release, routed to
     // Config::set_entry_column_width (view-state, never a Value).
     callback commit-entry-width(length);
@@ -1293,6 +1301,33 @@ export component MainWindow inherits Window {
                             selected => { root.set-sort(self.current-index); }
                             accessible-label: "settings-sort";
                         }
+                    }
+
+                    // Windows auto-update (ADR 0034, slice 2): the SOLE, manual-only
+                    // update trigger — the check reaches the network only on click
+                    // (zero background egress). The Install button appears only when an
+                    // update is available; the update applies on next app close. On a
+                    // non-MSIX / dev build the check reports "unavailable in this build".
+                    Text { text: "Updates"; color: #c8ccd4; font-size: 12px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "Check for updates";
+                            clicked => { root.check-for-updates(); }
+                            accessible-label: "settings-check-updates";
+                        }
+                        if root.update-available : Button {
+                            text: "Install update";
+                            clicked => { root.install-update(); }
+                            accessible-label: "settings-install-update";
+                        }
+                    }
+                    if root.update-status != "" : Text {
+                        text: root.update-status;
+                        color: #6b7280;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        accessible-label: "settings-update-status";
                     }
 
                     // Read-write mode unlock (ADR 0004 / ADR 0032): off by default —

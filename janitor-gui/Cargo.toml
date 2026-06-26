@@ -36,6 +36,9 @@ slint-build = "1"
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["ApplicationModel", "Foundation", "Management_Deployment", "Win32_System_WinRT"] }
+
 [dev-dependencies]
 # Internal Slint crate (no semver guarantee) — pinned to match slint 1.16.1.
 # Provides the headless testing backend + ElementHandle query API (ADR 0021).
