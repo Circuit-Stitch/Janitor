@@ -1,14 +1,20 @@
-# Tag-triggered desktop release (ADR 0022, #55). Pushing a `v*` tag builds the
-# installable packages on native per-OS runners and attaches them to a **draft**
-# GitHub Release for human review. Unlike a JVM app, a Rust/Slint binary is
-# native per-platform, so this is a per-OS matrix (no single-runner cross-build);
-# the packaging tools are the Rust-native ones ADR 0022 chose:
+# Desktop release (ADR 0022, #55). Builds the installable packages on native
+# per-OS runners and attaches them to a **draft** GitHub Release for human review.
+# Unlike a JVM app, a Rust/Slint binary is native per-platform, so this is a
+# per-OS matrix (no single-runner cross-build); the packaging tools are the
+# Rust-native ones ADR 0022 chose:
 #   * cargo-generate-rpm — Fedora-native .rpm (the priority install target).
 #   * cargo-packager      — .deb + .AppImage (Linux) and .dmg (macOS).
 #
-# Tag scheme: `vX.Y.Z`, where `X.Y.Z` MUST equal janitor-gui's crate version
-# (verify-version fails the run otherwise). To cut a release: bump
-# janitor-gui/Cargo.toml `version`, then `git tag v0.1.0 && git push origin v0.1.0`.
+# Two ways to cut a release (both end at a DRAFT you review + Publish):
+#   * One-click (preferred): Actions → Release → "Run workflow" → type the
+#     version (e.g. 0.1.4). The `setup` job bumps janitor-gui/Cargo.toml, commits
+#     it to main, and the SAME run builds + drafts the release off that commit.
+#   * Manual: bump janitor-gui/Cargo.toml yourself, then
+#     `git tag v0.1.0 && git push origin v0.1.0`.
+# `vX.Y.Z` MUST equal janitor-gui's crate version (verify-version fails a tag push
+# otherwise; the one-click path keeps them equal by construction). A DRAFT defers
+# git-tag creation until you Publish, so a failed build never leaves a dangling tag.
 #
 # Windows ships an **MSIX** (auto-updating via App Installer, ADR 0034) — assembled
 # with `makeappx` and signed by Azure Trusted Signing, NOT cargo-packager NSIS. It
@@ -18,17 +24,23 @@
 # (Gatekeeper will warn on first open); Developer ID + notarization is #57 — see
 # the ADR 0022 amendment.
 #
-# `workflow_dispatch` is a **dry-run**: it builds + uploads the artifacts but does
-# NOT publish a Release (the `release` job only runs on a real `v*` tag).
+# `workflow_dispatch` with an EMPTY version is a **dry-run**: it builds + uploads
+# the artifacts but drafts no Release (handy for validating a packaging change).
 name: Release
 
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version X.Y.Z (no leading v). Leave EMPTY for a dry-run build with no Release."
+        required: false
+        type: string
 
-# The release job creates a draft Release; the built-in GITHUB_TOKEN is read-only
-# by default, so grant contents:write here. Build jobs only read.
+# The setup + release jobs write to the repo (push the bump commit; create the
+# draft Release); the built-in GITHUB_TOKEN is read-only by default, so grant
+# contents:write here. Build jobs override this to read-only per job.
 permissions:
   contents: write
 
@@ -41,10 +53,76 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # One-click front end. On a `workflow_dispatch` with a version it bumps
+  # janitor-gui/Cargo.toml to that exact version, commits it to main, and hands
+  # the resulting SHA to every downstream job so they build the bumped tree (NOT
+  # pre-dispatch main). It deliberately does NOT create a git tag — the draft
+  # Release creates it at Publish time (target_commitish), so a failed build
+  # leaves no dangling tag and the run is safely re-runnable. Outputs:
+  #   ref         — the git ref/SHA every other job checks out
+  #   tag         — the release name / tag_name (vX.Y.Z); empty on a dry-run
+  #   do_release  — "true" when a draft Release should be produced
+  #
+  # NOTE: the bump commit is pushed with GITHUB_TOKEN, which by design does NOT
+  # trigger another workflow run (no ci.yml on the bump, no recursive release) —
+  # the whole release happens in this single run. A version-string bump landing on
+  # main un-CI'd is acceptable.
+  setup:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      do_release: ${{ steps.resolve.outputs.do_release }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: resolve
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${VERSION}" ]; then
+            echo "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              || { echo "::error::version must be X.Y.Z with no leading 'v' (got '${VERSION}')"; exit 1; }
+            # Idempotent bump: only commit when the version actually changes, so a
+            # re-run after a flaky build just rebuilds the same SHA instead of
+            # failing on "nothing to commit".
+            sed -i -E "0,/^version[[:space:]]*=.*/s//version = \"${VERSION}\"/" janitor-gui/Cargo.toml
+            if git diff --quiet -- janitor-gui/Cargo.toml; then
+              echo "janitor-gui already at ${VERSION} — no bump commit"
+            else
+              git config user.name  "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add janitor-gui/Cargo.toml
+              git commit -m "ci(release): bump janitor-gui to ${VERSION}"
+              git push origin "HEAD:${{ github.ref_name }}"
+            fi
+            {
+              echo "ref=$(git rev-parse HEAD)"
+              echo "tag=v${VERSION}"
+              echo "do_release=true"
+            } >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Dry-run: build main as-is, no bump, no Release.
+            {
+              echo "ref=${{ github.ref }}"
+              echo "tag="
+              echo "do_release=false"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # Real `v*` tag push: build + draft for that existing tag.
+            {
+              echo "ref=${{ github.ref }}"
+              echo "tag=${{ github.ref_name }}"
+              echo "do_release=true"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
   # Guard the single version source of truth: a pushed `vX.Y.Z` tag must equal
   # janitor-gui's crate version, so a forgotten version bump can't publish a
-  # Release whose name disagrees with the binary. Skipped logic is a no-op on
-  # workflow_dispatch (no tag to check) — the build jobs still run for a dry-run.
+  # Release whose name disagrees with the binary. A no-op on workflow_dispatch
+  # (no tag to check) — the one-click path bumps Cargo.toml to the typed version,
+  # so it agrees by construction.
   verify-version:
     name: Verify tag matches crate version
     runs-on: ubuntu-latest
@@ -67,7 +145,7 @@ jobs:
   # (the bare image has none); the container runs as root, so no sudo.
   linux-rpm:
     name: Linux .rpm (Fedora)
-    needs: verify-version
+    needs: [verify-version, setup]
     runs-on: ubuntu-latest
     container: fedora:latest
     steps:
@@ -78,6 +156,8 @@ jobs:
             rust cargo \
             fontconfig-devel libxkbcommon-devel libxcb-devel mesa-libGL-devel
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
       - name: Build release binary
         run: cargo build --release -p janitor-gui
       - name: Install cargo-generate-rpm
@@ -96,7 +176,7 @@ jobs:
   # downloads appimagetool at package time, so the job needs network (default).
   linux-portable:
     name: Linux .deb + .AppImage
-    needs: verify-version
+    needs: [verify-version, setup]
     runs-on: ubuntu-22.04
     # GitHub runners have no FUSE, so appimagetool must self-extract instead of
     # mounting its own AppImage — the standard CI workaround.
@@ -104,6 +184,8 @@ jobs:
       APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Slint Linux system dependencies
         run: |
@@ -138,10 +220,12 @@ jobs:
   # Intel/universal build is a follow-up.
   macos:
     name: macOS .dmg (unsigned)
-    needs: verify-version
+    needs: [verify-version, setup]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-packager
@@ -163,7 +247,7 @@ jobs:
   # ADR 0034) is uploaded alongside. cargo-packager is NOT used on Windows.
   windows:
     name: Windows MSIX (signed)
-    needs: verify-version
+    needs: [verify-version, setup]
     runs-on: windows-latest
     if: vars.WINDOWS_SIGNING_ENABLED == 'true'
     # Run in the `release` environment so the OIDC subject is
@@ -178,6 +262,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build release binary
@@ -237,16 +323,19 @@ jobs:
             janitor-gui/dist/*.appinstaller
           if-no-files-found: error
 
-  # Publish: download every built artifact and attach it to a DRAFT GitHub Release
-  # on the tag. Runs only on a real `v*` tag (not the dispatch dry-run). Uses
-  # always() so a *skipped* Windows job doesn't block it, but a *failed* build job
-  # does — and Linux + macOS must succeed.
+  # Publish: download every built artifact and attach it to a DRAFT GitHub Release.
+  # Runs when `setup` says do_release (a real `v*` tag, or a one-click dispatch with
+  # a version) — NOT on an empty-version dry-run. always() so a *skipped* Windows
+  # job doesn't block it, but a *failed* build job does — Linux + macOS must succeed.
+  # For a one-click dispatch the tag does not exist yet: a DRAFT defers git-tag
+  # creation, and target_commitish points it at the bump commit, so the tag is
+  # created at the SHA only when you click Publish.
   release:
     name: Draft GitHub Release
-    needs: [verify-version, linux-rpm, linux-portable, macos, windows]
+    needs: [setup, verify-version, linux-rpm, linux-portable, macos, windows]
     if: >-
       ${{ always()
-        && startsWith(github.ref, 'refs/tags/v')
+        && needs.setup.outputs.do_release == 'true'
         && needs.verify-version.result == 'success'
         && needs.linux-rpm.result == 'success'
         && needs.linux-portable.result == 'success'
@@ -262,8 +351,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
+          name: ${{ needs.setup.outputs.tag }}
+          tag_name: ${{ needs.setup.outputs.tag }}
+          # One-click dispatch: the tag doesn't exist yet, so create it at the bump
+          # commit when published. Ignored on a real tag push (tag already exists).
+          target_commitish: ${{ needs.setup.outputs.ref }}
           # The gated Windows job is normally skipped, so the *.msix/*.appinstaller
           # globs match nothing — don't fail on that. Linux/macOS artifacts are
           # guaranteed present by the upload steps' `if-no-files-found: error` (a

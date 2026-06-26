@@ -23,25 +23,40 @@ the artifacts and clicks publish.
 
 ## Cutting a release
 
-The tag version is the single source of truth and **must equal janitor-gui's
-crate version** — the `verify-version` job fails the run otherwise.
+The version is the single source of truth and **must equal janitor-gui's crate
+version**. Both paths below keep them equal; either ends at a **draft** you
+review and publish.
 
-1. Bump `version` in [`janitor-gui/Cargo.toml`](../janitor-gui/Cargo.toml) (e.g.
-   to `0.2.0`) and merge it to `main`.
-2. Tag and push the matching `v`-prefixed tag:
+### One-click (preferred)
+
+1. **Actions → Release → "Run workflow"**, type the version (e.g. `0.2.0`, no
+   leading `v`), Run. The `setup` job bumps
+   [`janitor-gui/Cargo.toml`](../janitor-gui/Cargo.toml) to that version, commits
+   it to `main`, and the same run builds every artifact and drafts the Release.
+2. Smoke-test the artifacts, edit the release notes, and **publish** the draft.
+   Publishing creates the `v0.2.0` git tag (at the bump commit) — a failed build
+   never leaves a dangling tag.
+
+> The bump commit is pushed with `GITHUB_TOKEN`, which by design does **not**
+> trigger another workflow, so the whole release is this one run (the version-bump
+> commit lands on `main` un-CI'd — acceptable for a one-line version change).
+
+### Manual (tag push)
+
+1. Bump `version` in `janitor-gui/Cargo.toml` and merge it to `main`.
+2. Tag and push the matching `v`-prefixed tag (`verify-version` fails the run if
+   the tag and crate version disagree):
    ```bash
    git tag v0.2.0
    git push origin v0.2.0
    ```
-3. Watch the run in the Actions tab. On success a **draft Release** named `v0.2.0`
-   appears with the `.rpm` / `.deb` / `.AppImage` / `.dmg` attached.
-4. Smoke-test the artifacts, edit the release notes, and **publish** the draft.
+3. Smoke-test the resulting draft, edit the notes, and **publish**.
 
 ### Dry run (no Release)
 
-Trigger the workflow manually (`workflow_dispatch`, "Run workflow") to build and
-upload all artifacts **without** publishing a Release — useful for validating a
-packaging change before tagging.
+Run the workflow (`workflow_dispatch`) with the version field **left empty** to
+build + upload all artifacts **without** any bump, tag, or Release — useful for
+validating a packaging change before cutting a release.
 
 ## Platform signing status
 
