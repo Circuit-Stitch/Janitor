@@ -36,6 +36,17 @@ reversible choice — a future re-skin rewrites only `janitor-gui`.
 
 - **egui** — best built-in data grid, fastest to build; rejected for v1 in favor
   of Slint's polish (the choice is cheap to reverse given the core/GUI split).
+- **gpui** (Zed's framework, [gpui.rs](https://www.gpui.rs/)) — re-evaluated
+  2026-07-07. All-Rust (no `.slint` DSL), GPU-accelerated, Apache-2.0/MIT.
+  **Rejected, keep Slint.** (1) Still pre-1.0 with frequent breaking changes and
+  no stable crates.io release — an unstable upstream we don't control, poor fit
+  for a security tool cutting real releases. (2) Upstream officially targets
+  macOS + Linux only; Windows (a release target here) lives in third-party forks.
+  (3) The switch touches none of our invariants — they all live in `core`
+  (ADR 0003) — so a rewrite of the deliberately-thin view buys only a nicer API
+  for the layer we keep dumb. The **one** point in gpui's favour is its permissive
+  license vs Slint's GPL: revisit only if closed-source/proprietary distribution
+  becomes a goal, or if gpui reaches 1.0 with first-party Windows.
 - **A custom "no-string" reveal/edit widget** (render legible glyphs that never
   materialize as a `String`) — **rejected as architecture / security theater.**
   To be human-legible a Value's glyphs are already in the framebuffer, GPU atlas,
