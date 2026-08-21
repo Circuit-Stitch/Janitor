@@ -3478,6 +3478,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
  "zeroize",
 ]
 
@@ -3497,7 +3499,6 @@ dependencies = [
  "slint-build",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "windows 0.62.2",
  "winresource",
 ]

@@ -1,19 +1,17 @@
-//! Pure assembly of the sidebar's Application rows, kept out of `main.rs`'s
-//! `MainWindow`-coupled glue so the genuinely non-obvious rule — the drift badge
-//! shows **only** for the selected, loaded Application — is unit-testable (ADR
-//! 0003; matches the `pane.rs` / `rows.rs` seams). `main.rs::app_models` maps the
-//! returned `Vec<SidebarApp>` onto Slint `AppItem`s with no logic of its own.
+//! Pure assembly of the sidebar's Application rows. The non-obvious rule is the
+//! drift badge: it shows **only** for the selected, loaded Application. Keeping the
+//! assembly in core makes that rule unit-testable, and a shell maps the returned
+//! `Vec<SidebarApp>` onto its own row widgets with no logic of its own (ADR 0003).
 //!
-//! Why suppress the badge elsewhere: the drift count is derived from the currently
-//! loaded `MatrixView`, which only describes the selected Application. Showing a
-//! count on the others would require fetching every Application's secrets — a
-//! sign-in / `GetSecretValue` storm against real AWS — so a non-selected (or
-//! not-yet-loaded) row deliberately shows no badge rather than a stale or
-//! storm-fetched one.
+//! The badge is suppressed elsewhere because the drift count comes from the loaded
+//! `MatrixView`, which describes the selected Application alone. Counting the others
+//! would mean fetching every Application's secrets — a sign-in and `GetSecretValue`
+//! storm against real AWS. A non-selected or not-yet-loaded row shows no badge
+//! rather than a stale or storm-fetched one.
 
-use janitor_core::compare::EntryState;
-use janitor_core::config::Config;
-use janitor_core::view::MatrixView;
+use crate::compare::EntryState;
+use crate::config::Config;
+use crate::view::MatrixView;
 
 /// One rendered sidebar row: the Application name, its `"N envs"` subtitle, the
 /// drift badge text (`""` when suppressed — see module docs), and whether it is the
@@ -76,9 +74,9 @@ fn drift_badge(is_selected: bool, status: &str, view: &MatrixView) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use janitor_core::compare::RowKey;
-    use janitor_core::config::{Application, Mapping};
-    use janitor_core::view::MatrixRow;
+    use crate::compare::RowKey;
+    use crate::config::{Application, Mapping};
+    use crate::view::MatrixRow;
 
     fn app(name: &str, envs: usize) -> Application {
         Application {
@@ -90,7 +88,7 @@ mod tests {
                     region: "us-east-1".into(),
                     secret_id: "arn".into(),
                     permission_set: "ps".into(),
-                    method: janitor_core::config::Method::SecretsManager,
+                    method: crate::config::Method::SecretsManager,
                 })
                 .collect(),
         }

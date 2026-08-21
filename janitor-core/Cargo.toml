@@ -17,6 +17,11 @@ serde_json = "1"
 toml = "0.8"
 thiserror = "2"
 directories = "5"
+# The Diagnostic Log (ADR 0017) is core's own `tracing` layer plus its ring
+# buffer, so core owns both halves of the tracing dependency: the emit side that
+# every crate already uses, and the subscriber that collects it.
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

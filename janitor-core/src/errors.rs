@@ -1,10 +1,10 @@
-//! The error banner string, kept in a pure seam so its error-safety — it surfaces
-//! only the `environment` + the already-scrubbed `detail`, never a Value /
-//! Credential / token — is unit-testable (ADR 0003 / ADR 0017; THREAT-MODEL). The
-//! `MainWindow`-coupled `apply_event` glue calls this and pushes the result; it has
-//! no formatting logic of its own.
+//! The error banner string. It surfaces the `environment` and the already-scrubbed
+//! `detail`, and nothing else — never a Value, a Credential, or a token
+//! (ADR 0003 / ADR 0017; THREAT-MODEL). Keeping it in a pure seam makes that
+//! error-safety unit-testable. A shell calls this and pushes the result into its
+//! banner, with no formatting logic of its own.
 
-use janitor_core::provider::AppError;
+use crate::provider::AppError;
 
 /// `"<env>: <real AWS detail>; …"` — one `environment: detail` clause per failed
 /// Environment, joined by `; `. ADR 0017: the banner shows the real, error-safe
@@ -22,7 +22,7 @@ pub fn banner(err: &AppError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use janitor_core::provider::{Failure, FetchFailReason};
+    use crate::provider::{Failure, FetchFailReason};
 
     fn failure(environment: &str, detail: &str) -> Failure {
         Failure {

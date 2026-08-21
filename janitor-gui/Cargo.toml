@@ -28,8 +28,9 @@ arboard = "3"
 # The SsmDotenv arm's B4-placeholder SSM-tail seams (untested worker shell,
 # ADR 0010 §5 / ADR 0025 §3) implement async traits.
 async-trait = "0.1"
+# The worker emits to the Diagnostic Log; the subscriber that collects it moved to
+# `janitor-core` with `logpane` (#96), so the shell needs the emit side only.
 tracing = "0.1"
-tracing-subscriber = "0.3"
 
 [build-dependencies]
 slint-build = "1"

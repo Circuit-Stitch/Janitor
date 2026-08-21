@@ -1,6 +1,6 @@
 //! The Diagnostic Log (ADR 0017): Janitor's ONLY diagnostic surface. A bounded,
 //! in-memory ring buffer fed by a single `tracing` layer — no stderr/fmt layer,
-//! no file, no stdout. The GUI drains it into a panel; nothing ever reaches a
+//! no file, no stdout. A shell drains it into a panel; nothing ever reaches a
 //! cross-process channel a sibling could scrape.
 //!
 //! Capture is restricted to `janitor*` targets so the AWS-SDK/hyper event
@@ -21,7 +21,7 @@ const MAX_LINES: usize = 1000;
 
 /// The panel's verbosity filter: **lower = more severe**. The dropdown's value is
 /// a *maximum* — `INFO` shows everything, `ERROR` shows only errors. Carried as a
-/// 1-based int across the Slint boundary (the dropdown supplies it).
+/// 1-based int across the shell boundary (the dropdown supplies it).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FilterLevel(u8);
 

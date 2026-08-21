@@ -1,6 +1,6 @@
-//! What the main pane should render, decided in pure Rust so the GUI's
-//! empty/blank choices are testable without driving Slint (matches the
-//! `worker.rs` test seam; ADR 0003 keeps logic out of the `.slint` view).
+//! What the main pane should render. Deciding it in core keeps the empty and
+//! blank-state choices testable without driving a GUI, and gives every shell the
+//! same answer (ADR 0003 keeps this logic out of the view).
 
 /// The content the main pane shows, derived from the auth/load `status` string
 /// and whether any Applications exist.
@@ -34,8 +34,8 @@ pub fn main_pane(status: &str, has_apps: bool) -> MainPane {
 }
 
 impl MainPane {
-    /// The stable string the `.slint` view switches on. Kept in lockstep with
-    /// the `if root.pane == …` arms in `app.slint`.
+    /// The stable string a shell switches its pane on. The Slint view keeps its
+    /// `if root.pane == …` arms in lockstep with these tokens.
     pub fn as_token(self) -> &'static str {
         match self {
             MainPane::SignIn => "signin",
@@ -47,11 +47,10 @@ impl MainPane {
         }
     }
 
-    /// The top-bar pane title (issue #47). Extracted from the `app.slint` `?:`
-    /// ladder that duplicated the pane tokens a second time — Rust is now the one
-    /// place that maps a pane to its title; the view binds the pushed `pane-title`
-    /// property. SignIn and Error share "Not signed in" (the top bar shows the
-    /// banner separately, and Error routes the user back to Sign-in).
+    /// The top-bar pane title (issue #47). Rust is the one place that maps a pane
+    /// to its title; a shell binds the pushed title. SignIn and Error share "Not
+    /// signed in" — the top bar shows the banner separately, and Error routes the
+    /// user back to Sign-in.
     pub fn title(self) -> &'static str {
         match self {
             MainPane::Matrix => "Drift matrix",
@@ -62,12 +61,12 @@ impl MainPane {
         }
     }
 
-    /// The centered body copy for a non-matrix / non-empty pane (issue #47),
-    /// extracted from the second `app.slint` `?:` ladder. Only rendered for the
-    /// SignIn / Signing / Loading / Error panes (the matrix and empty-apps panes
-    /// have their own content), so those two route through the error catch-all and
-    /// their value is never displayed. On an error the `status_message` carries the
-    /// real, error-safe reason (ADR 0017) — shown when present, else a retry hint.
+    /// The centered body copy for a non-matrix / non-empty pane (issue #47). Only
+    /// the SignIn / Signing / Loading / Error panes render it; the matrix and
+    /// empty-apps panes have their own content, so they route through the error
+    /// catch-all and their value is never displayed. On an error the
+    /// `status_message` carries the real, error-safe reason (ADR 0017) — shown when
+    /// present, else a retry hint.
     pub fn body_copy(self, status_message: &str) -> String {
         match self {
             MainPane::SignIn => "Sign in to load this Application's secrets.".to_string(),
@@ -90,7 +89,7 @@ mod tests {
 
     #[test]
     fn pane_tokens_match_the_slint_arms() {
-        // app.slint reads `root.pane` against these exact tokens.
+        // The Slint shell's app.slint reads `root.pane` against these exact tokens.
         assert_eq!(MainPane::EmptyApps.as_token(), "empty-apps");
         assert_eq!(MainPane::Matrix.as_token(), "matrix");
         assert_eq!(MainPane::SignIn.as_token(), "signin");
@@ -130,7 +129,7 @@ mod tests {
 
     #[test]
     fn title_matches_the_extracted_slint_ladder() {
-        // The exact strings the app.slint `?:` ladder produced (issue #47); Rust is
+        // The exact strings the Slint shell's `?:` ladder produced (issue #47); Rust is
         // now their single source. SignIn and Error fold into "Not signed in".
         assert_eq!(MainPane::Matrix.title(), "Drift matrix");
         assert_eq!(MainPane::EmptyApps.title(), "No Applications");

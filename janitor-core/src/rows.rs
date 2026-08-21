@@ -1,11 +1,11 @@
-//! Pure assembly of the matrix's rendered item list — prefix-cluster group
-//! headers + data rows with per-group zebra parity, the type-badge label, and
-//! the muted-prefix / bold-leaf name split. Kept out of the `.slint` view so it
-//! stays testable (ADR 0003; matches the `pane.rs` / `worker.rs` seams). Wires
-//! core's `cluster_rows` into the table (issue #20).
+//! Pure assembly of the matrix's rendered item list: prefix-cluster group headers,
+//! data rows with per-group zebra parity, the type-badge label, and the
+//! muted-prefix / bold-leaf name split. This wires `cluster_rows` into the rendered
+//! table (issue #20). It stays out of the view so it stays testable, and so every
+//! shell renders the same list (ADR 0003).
 
-use janitor_core::cluster::{cluster_relative_name, cluster_rows};
-use janitor_core::secret::LeafKind;
+use crate::cluster::{cluster_relative_name, cluster_rows};
+use crate::secret::LeafKind;
 
 /// One line of the rendered table: a prefix-cluster header, or a data row that
 /// points back at its `MatrixView` row index (the reveal coordinate space).

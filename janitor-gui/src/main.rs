@@ -5,17 +5,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 slint::include_modules!();
-mod errors;
-mod logpane;
-mod pane;
-mod reveal;
-mod rows;
 mod scrollbar;
-mod sidebar;
 mod update;
 #[cfg(test)]
 mod view_tests;
 mod worker;
+
+// The presentation seams moved to `janitor-core` (#96): both shells drive them, so
+// they are no longer bin-local. Imported under their old names, so every call site
+// below still reads `rows::…`, `reveal::…`, and so on.
+use janitor_core::{errors, logpane, pane, reveal, rows, sidebar};
 
 use std::cell::{Cell, RefCell};
 use std::env;

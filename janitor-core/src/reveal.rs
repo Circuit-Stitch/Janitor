@@ -1,18 +1,16 @@
-//! The per-cell reveal gate, decided in pure Rust so the security-critical rule —
-//! a momentary reveal un-masks *exactly one* targeted cell, never a whole row or
-//! column — is exhaustively testable without driving Slint (ADR 0003; matches the
-//! `pane.rs` / `rows.rs` seams). The `.slint` cell's local `is-revealed` binding
-//! calls the `MainWindow` pure callback `is-cell-revealed`, whose handler is set in
-//! Rust to this function (`ui.on_is_cell_revealed(reveal::is_revealed)` in `main.rs`
-//! and the view-test fixture), so the un-mask-exactly-one rule lives in tested Rust
-//! rather than an inline `.slint` predicate.
+//! The per-cell reveal gate. One rule lives here: a momentary reveal un-masks
+//! exactly one targeted cell, never a whole row or column. Deciding it in core
+//! keeps it testable without driving a GUI (ADR 0003), and gives every shell the
+//! same predicate.
 //!
-//! Reveal is press-and-hold momentary (ADR 0003 / THREAT-MODEL): a press writes the
-//! single revealed coordinate (`revealed-row`, `revealed-col`) and release zeroes it
-//! back to the `-1` sentinel. This predicate is the sole thing that turns masked
-//! dots into plaintext, so widening it — e.g. matching on the row alone — would
-//! un-mask an entire row of secret Values. That must never happen; the tests below
-//! pin it.
+//! Reveal is press-and-hold momentary (ADR 0003 / THREAT-MODEL). A press writes the
+//! single revealed coordinate. Release zeroes it back to the `-1` sentinel. A shell
+//! binds each cell's masked-or-plaintext choice to this function; the Slint view
+//! does it through the `is-cell-revealed` callback on `MainWindow`.
+//!
+//! This predicate is the only thing that turns masked dots into plaintext. Widening
+//! it — matching on the row alone, say — would un-mask a whole row of secret Values.
+//! The tests below pin that shut.
 
 /// Whether the cell at (`row`, `col`) is the one currently revealed.
 ///
