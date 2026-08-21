@@ -19,8 +19,11 @@ janitor-mock = { path = "../janitor-mock" }
 # must survive a future default-features trim. femtovg stays via the defaults.
 slint = { version = "1", features = ["renderer-software"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
-# OS clipboard for copy-Entry-name (#40, ADR 0005). Only Entry names (metadata)
-# are ever placed on the clipboard — never Values.
+# OS clipboard for copy-Entry-name (#40) and copy-Value (ADR 0005). Both a
+# metadata Entry name and a revealed Value reach the clipboard: `Command::CopyValue`
+# round-trips plaintext that `apply_event` hands to `set_clipboard`. ADR 0005
+# allows this; the copy is logged as "NAME[env] copied to clipboard", never as the
+# Value. #59 tracks the missing auto-clear timeout.
 arboard = "3"
 # The SsmDotenv arm's B4-placeholder SSM-tail seams (untested worker shell,
 # ADR 0010 §5 / ADR 0025 §3) implement async traits.
