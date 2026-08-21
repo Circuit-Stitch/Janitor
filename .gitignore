@@ -12,3 +12,8 @@ dist/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Icon model output (docs/icon): Blender's backup saves and the rendered PNGs,
+# both rebuilt by key_ring.py. The model itself, key_ring.blend, stays tracked.
+*.blend1
+/docs/icon/renders/
