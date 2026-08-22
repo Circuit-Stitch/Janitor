@@ -33,6 +33,7 @@ use janitor_ssm::{
 };
 
 /// UI → worker.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Command {
     SignIn,
     LoadApp(Application),
@@ -89,6 +90,7 @@ pub enum Command {
 }
 
 /// Worker → UI. Rendered by `apply_event` on the UI thread.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Event {
     SignInStarted,
     SignedIn,
@@ -189,6 +191,7 @@ pub enum Event {
 /// session-global `--ssm` toggle is retired. A future non-AWS Provider adds one
 /// arm here and in [`build_provider`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum ProviderKind {
     Aws,
     Mock,

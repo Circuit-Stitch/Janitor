@@ -1,0 +1,13 @@
+[package]
+name = "uniffi-bindgen-swift"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Swift binding generator for janitor-app's UniFFI boundary (ADR 0035)."
+publish = false
+
+[dependencies]
+# Pinned exactly, and it must match the `uniffi` version `janitor-app` compiles its
+# scaffolding with. A generator newer or older than the scaffolding it reads emits
+# bindings that link and then misbehave at runtime.
+uniffi = { version = "=0.32.0", features = ["cli"] }

@@ -290,3 +290,57 @@ no equivalent, because the Mac App Store updates the app.
 
 Consequence: ADR 0036's repository table gains a sixth crate in `Janitor`, and
 `Janitor-slint` takes `janitor-app` by Cargo path alongside `janitor-core`.
+
+## Amendment 2026-08-21 — the boundary as built (#95)
+
+The Amendment above put the boundary in `janitor-app`. Building it settled four
+things the decision left open.
+
+**UniFFI is a Cargo feature, not a dependency.** `janitor-app` declares
+`uniffi = ["dep:uniffi"]`, and `setup_scaffolding!()` plus the `ffi` module are
+both behind it. A Slint build compiles none of it, which is what "UniFFI stays
+optional there" has to mean in practice.
+
+**The `janitor-core` types cross as `#[uniffi::remote]` mirrors.** The protocol
+carries fifteen types that belong to `janitor-core` — `Config`, `Application`,
+`Mapping`, `MatrixView`, `RowKey`, `AppError`, and the rest. The alternative was
+to derive UniFFI on them in core, which would push `uniffi` and `uniffi_macros`
+into all four adapter crates and both shells, and would put a foreign-bindings
+concern inside the crate ADR 0003 keeps narrow. A mirror is a redeclaration of
+the type's shape in `ffi.rs`, and the generated code destructures the real type,
+so a field renamed, retyped, or added in core fails to compile at the boundary.
+The cost is that the mirrors must be kept in step; the compiler is what enforces
+it.
+
+**`usize` is not one of UniFFI's primitives.** The protocol uses it for matrix
+coordinates, choice indexes, and byte lengths. It crosses as `u64` through a
+custom type, so the Rust signatures keep saying `usize` and Swift sees
+`typealias Usize = UInt64`.
+
+**The plaintext crossing is `janitor_core::secret::Plaintext`.** ADR 0035 asked
+for one custom type with one `lower` closure. That needs a named type in the
+protocol, and there were two bare ones: `Event::Revealed`/`Event::CopyValue`
+carried a `String`, and `EnvEdit::Set` carried a `Zeroizing<String>`. Both are now
+`Plaintext`, a zeroizing newtype in core whose only readers are `expose` and
+`expose_owned`. So one symbol covers both directions: a revealed Value out, an
+edit's new Value in. `Provider::reveal` returns it too, which closes the gap where
+a revealed Value travelled the port as an unzeroed `String`.
+
+**Verified against the real Swift toolchain.** `scripts/generate-swift-bindings.sh`
+builds the staticlib, generates the Swift, and compiles it as module `JanitorKit`
+under Swift 6, `nonisolated` default actor isolation, and library evolution. The
+emitted `.swiftinterface` verifies, which is the check that would catch a module
+and a public type sharing a name. The script fails if any exported function is
+`async`. Swift gets `Command` with ten cases, `Event` with twenty-one, an
+`EventSink` protocol, a `Worker` class with `start` and `send`, and `isRevealed`.
+
+**The generator is its own package, outside the workspace.** `uniffi_bindgen`
+pulls a template engine and a CLI parser, and a workspace-wide `--all-features`
+lint or test run would compile all of it. `tools/uniffi-bindgen-swift` pins
+`uniffi` exactly, and the script fails if that pin and `janitor-app`'s resolved
+version disagree — a generator that does not match the scaffolding it reads emits
+bindings that link and then misbehave.
+
+Still open for #97: `Config` crosses as a record, but nothing exports
+`Config::load` or `Config::save`. The tracer bullet is what needs them, and it is
+what will show whether `ConfigError` should cross as a thrown error.

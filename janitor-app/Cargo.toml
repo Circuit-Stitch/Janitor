@@ -16,6 +16,7 @@ janitor-ssm = { path = "../janitor-ssm" }
 janitor-mock = { path = "../janitor-mock" }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
+uniffi = { version = "0.32", default-features = false, optional = true }
 
 [dev-dependencies]
 # The worker's offline suite drives fake Providers that implement an async trait,
@@ -24,3 +25,7 @@ tracing = "0.1"
 async-trait = "0.1"
 janitor-ssm = { path = "../janitor-ssm", features = ["test-support"] }
 janitor-aws-auth = { path = "../janitor-aws-auth", features = ["test-support"] }
+
+[features]
+# The UniFFI boundary (ADR 0035). Optional, so a Slint build compiles none of it.
+uniffi = ["dep:uniffi"]

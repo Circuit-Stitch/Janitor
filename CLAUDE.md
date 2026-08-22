@@ -2,6 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the UniFFI boundary landed in `janitor-app` (#95, ADR 0035 Amendment
+> 2026-08-21).** Swift drives the worker protocol directly: `Command` (10 in) and
+> `Event` (21 out) are exported, plus an `EventSink` foreign trait, a `Worker`
+> object (`start` + `send`), and `is_revealed` — so the un-mask-exactly-one rule
+> stays tested Rust instead of being reimplemented in Swift. **Zero `async fn`
+> crosses** (Swift gets a fire-and-forget call plus a stream, which also dodges the
+> `@MainActor` inheritance under Xcode 26). **UniFFI is a Cargo feature**
+> (`janitor-app/uniffi`), so a Slint build compiles none of it, and **`janitor-core`
+> gains no UniFFI dependency**: the fifteen core types the protocol carries cross as
+> `#[uniffi::remote]` mirrors declared in `janitor-app::ffi`. The generated code
+> destructures the real type, so a field renamed/retyped/added in core fails to
+> compile at the boundary. `usize` is not a UniFFI primitive — it crosses as `u64`
+> behind a custom type (`typealias Usize = UInt64` in Swift). **The single plaintext
+> crossing is the new `janitor_core::secret::Plaintext`** — a zeroizing newtype whose
+> only readers are `expose`/`expose_owned`. It replaced the bare `String` in
+> `Event::Revealed`/`CopyValue` **and** the `Zeroizing<String>` in `EnvEdit::Set`, and
+> `Provider::reveal` returns it now too: one greppable symbol covering both
+> directions, closing the gap where a revealed Value travelled the port unzeroed.
+> Verified against the real toolchain by `scripts/generate-swift-bindings.sh` — it
+> builds the staticlib, generates the Swift, and compiles it as module `JanitorKit`
+> under Swift 6 + `nonisolated` default actor isolation + library evolution, with the
+> emitted `.swiftinterface` **verified** (the module-vs-type name check ADR 0035 asks
+> for) and a guard that fails on any exported `async`. The generator is its own
+> package outside the workspace (`tools/uniffi-bindgen-swift`, `uniffi` pinned
+> `=0.32.0`) so a workspace `--all-features` never compiles `uniffi_bindgen`; the
+> script fails if that pin and `janitor-app`'s resolved version disagree. Core
+> coverage rose (95.78% → 95.93%); tests 555 → 572. CI's workspace test now runs
+> `--all-features`, so the boundary's round-trip tests are in the gate. **Still
+> pending:** `Config::load`/`save` do not cross yet — #97 needs them, and will settle
+> whether `ConfigError` should cross as a thrown error. **Next:** #105/#104 (depot
+> tenant + xcframework publish, built from `janitor-app`), then #106 (the
+> `Janitor-slint` split), then #97 (the SwiftUI tracer bullet). Design:
+> [`docs/adr/0035-swiftui-macos-shell-over-uniffi.md`](docs/adr/0035-swiftui-macos-shell-over-uniffi.md)
+> (Amendment 2026-08-21 — *the boundary as built*).
+>
 > **Latest: the shells are being split apart (#96, ADR 0035 Amendment 2026-08-21).**
 > The first two slices of the macOS epic (#94) landed, both behavior-preserving.
 > **The six shared presentation seams moved to `janitor-core`** — `errors`,
@@ -31,9 +66,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > background egress — unchanged. `janitor-gui` now depends on `janitor-core` +
 > `janitor-app` + `janitor-mock` only, and names **no** adapter crate — which is
 > what #106 needs to lift it into `Janitor-slint`. Test totals are conserved
-> exactly (235 → core 171 + app 16 + gui 48). **Next:** #95 (the UniFFI boundary in
-> `janitor-app`), then #105/#104 (depot tenant + xcframework publish), then #106
-> (the `Janitor-slint` split). Design:
+> exactly (235 → core 171 + app 16 + gui 48). **#95 followed it** — see the block
+> above. Design:
 > [`docs/adr/0035-swiftui-macos-shell-over-uniffi.md`](docs/adr/0035-swiftui-macos-shell-over-uniffi.md)
 > (Amendment 2026-08-21) and
 > [`docs/adr/0036-three-repos-core-slint-shell-macos-shell.md`](docs/adr/0036-three-repos-core-slint-shell-macos-shell.md).
@@ -282,8 +316,9 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
   presentation seams (`errors`, `logpane`, `pane`, `reveal`, `rows`, `sidebar`).
   **Target ≥80% test coverage** — this is where correctness is proven.
 - **`janitor-app`** — the worker thread, the `Command`/`Event` protocol every
-  shell speaks, and the AWS composition root. It sits above the adapter crates
-  because it names them all, which `janitor-core` cannot do (ADR 0035, Amendment
+  shell speaks, the AWS composition root, and the UniFFI boundary (`ffi`, behind
+  the optional `uniffi` feature). It sits above the adapter crates because it
+  names them all, which `janitor-core` cannot do (ADR 0035, Amendment
   2026-08-21). No coverage gate: it is the I/O loop and the composition root.
 - **`janitor-gui`** — thin Slint (GPL) view: the comparison matrix (sortable,
   filterable by Entry name incl. prefix clusters), masked cells with momentary
@@ -298,6 +333,7 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
 ```bash
 cargo build                       # build the workspace
 cargo test --workspace            # all crates (core + app + gui + janitor-aws fakes)
+cargo test --workspace --all-features   # + janitor-app's UniFFI boundary tests (what CI runs)
 cargo test -p janitor-core <name> # a single core test (substring match)
 cargo test -- --nocapture         # show test stdout/stderr
 cargo clippy --all-targets        # lint
@@ -307,6 +343,10 @@ cargo llvm-cov -p janitor-aws --ignore-filename-regex 'src/bin/'  # aws lib cove
 cargo run -p janitor-gui          # real AWS via the worker bridge (browser sign-in; needs a configured org)
 $env:JANITOR_MOCK=1; cargo run -p janitor-gui   # offline mock — Windows PowerShell
 JANITOR_MOCK=1 cargo run -p janitor-gui         # offline mock — bash
+
+# Swift bindings for the UniFFI boundary (ADR 0035 / #95). On macOS it also
+# compiles the generated Swift as module JanitorKit and verifies the interface.
+./scripts/generate-swift-bindings.sh
 
 # janitor-aws human-gated binaries (ADR 0010 Milestone B — need a browser):
 # Identity Center org + permission-set setup for these: docs/iam_setup.md

@@ -18,3 +18,11 @@
 //! `janitor-core`.
 
 pub mod worker;
+
+// The UniFFI boundary (ADR 0035). Optional, so a Slint build compiles none of it.
+// `setup_scaffolding!` has to sit at the crate root: the code it generates for the
+// `ffi` module names `crate::UniFfiTag`.
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!("janitor");
+#[cfg(feature = "uniffi")]
+pub mod ffi;

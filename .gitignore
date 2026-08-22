@@ -1,5 +1,8 @@
 # Rust
 /target/
+# The Swift binding generator is its own package outside the workspace (ADR 0035),
+# so it builds into a target dir of its own.
+/tools/uniffi-bindgen-swift/target/
 **/*.rs.bk
 *.pdb
 
