@@ -115,9 +115,13 @@ pub fn apply_edits(raw: &str, edits: &[EnvEdit]) -> Result<Zeroizing<String>, En
 
     for edit in edits {
         match edit {
-            EnvEdit::Set { key, value } => {
-                set_key(&mut lines, key, value, dominant_nl, had_trailing_newline)
-            }
+            EnvEdit::Set { key, value } => set_key(
+                &mut lines,
+                key,
+                value.expose(),
+                dominant_nl,
+                had_trailing_newline,
+            ),
             EnvEdit::Remove { key } => {
                 lines.retain(|l| owned_key(&l.content).as_deref() != Some(key))
             }

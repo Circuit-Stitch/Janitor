@@ -14,6 +14,7 @@ use async_trait::async_trait;
 
 use crate::compare::RowKey;
 use crate::config::{Application, Mapping, Method};
+use crate::secret::Plaintext;
 use crate::view::MatrixView;
 use crate::write::{EnvEdit, WriteOutcome};
 
@@ -178,9 +179,10 @@ pub trait Provider: Send {
     async fn load(&mut self, app: &Application) -> Result<Loaded, AppError>;
 
     /// Momentary reveal of one cell's plaintext from the last load, as an owned
-    /// `String` (the one explicit, on-demand plaintext crossing — ADR 0003).
-    /// `None` if the cell is gone/absent/unrevealable.
-    fn reveal(&self, key: &RowKey, col: usize) -> Option<String>;
+    /// [`Plaintext`] — the one explicit, on-demand plaintext crossing (ADR 0003),
+    /// in the one type an exposed Value travels in (ADR 0035). `None` if the cell
+    /// is gone/absent/unrevealable.
+    fn reveal(&self, key: &RowKey, col: usize) -> Option<Plaintext>;
 
     /// Begin a guided [`Step`] walk for one new Environment (ADR 0013), backed by
     /// the chosen [`Method`] (ADR 0031). The method is picked *outside* the walk
@@ -321,7 +323,7 @@ mod tests {
         async fn load(&mut self, _app: &Application) -> Result<Loaded, AppError> {
             Err(AppError::needs_sign_in())
         }
-        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<String> {
+        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<Plaintext> {
             None
         }
         async fn begin_discovery(

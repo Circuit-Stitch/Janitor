@@ -31,6 +31,17 @@ impl EntryName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Rebuild a name from its rendered form — the inverse of [`EntryName::as_str`].
+    ///
+    /// A `RowKey` makes a round trip when a shell hands one back to ask for a
+    /// reveal, and across the UniFFI boundary the rendered name is what actually
+    /// crosses (ADR 0035). Anything `as_str` produced comes back identical.
+    /// Anything else is normalized through the escaping rules rather than
+    /// rejected, so a name always has one spelling.
+    pub fn from_rendered(rendered: &str) -> Self {
+        Self::from_path(&split_escaped(rendered))
+    }
 }
 
 impl std::fmt::Display for EntryName {
@@ -108,6 +119,38 @@ mod tests {
     #[test]
     fn escapes_literal_backslash() {
         assert_eq!(EntryName::from_path(&p(&["a\\b"])).as_str(), "a\\\\b");
+    }
+
+    #[test]
+    fn rendered_name_round_trips() {
+        // What `as_str` renders, `from_rendered` reads back — the property the
+        // UniFFI custom type for `EntryName` relies on (ADR 0035).
+        for path in [
+            p(&["A"]),
+            p(&["db", "url"]),
+            p(&["a.b"]),
+            p(&["a", "b"]),
+            p(&["a\\b"]),
+            p(&["weird\\.key", "x"]),
+            p(&[""]),
+        ] {
+            let name = EntryName::from_path(&path);
+            assert_eq!(
+                EntryName::from_rendered(name.as_str()),
+                name,
+                "round-trip failed for {path:?} -> {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_rendered_normalizes_a_name_our_escaper_never_writes() {
+        // A trailing lone backslash is not something `from_path` emits. It is
+        // read as a literal backslash and re-rendered escaped, so every name has
+        // exactly one spelling.
+        let normalized = EntryName::from_rendered("a\\");
+        assert_eq!(normalized.segments(), p(&["a\\"]));
+        assert_eq!(normalized.as_str(), "a\\\\");
     }
 
     #[test]

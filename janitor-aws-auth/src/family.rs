@@ -25,7 +25,7 @@ use janitor_core::discovery::{Orchestrator, Steps};
 use janitor_core::provider::{
     AppError, Failure, FetchFailReason, Loaded, Provider, SignInFailed, Step,
 };
-use janitor_core::secret::SecretShape;
+use janitor_core::secret::{Plaintext, SecretShape};
 use janitor_core::select::{plan_selection, SelectionPlan};
 use janitor_core::view::{project, reveal_value};
 use janitor_core::write::{EnvEdit, WriteOutcome};
@@ -507,11 +507,11 @@ impl Provider for AwsFamilyProvider {
     }
 
     /// Momentary reveal of one cell's plaintext from the cached Sets, returned as an
-    /// owned `String` so plaintext crosses to the UI thread only here and only on
-    /// explicit request (ADR 0003). Method-agnostic — the cache is just
+    /// owned [`Plaintext`] so plaintext crosses to the UI thread only here and only
+    /// on explicit request (ADR 0003). Method-agnostic — the cache is just
     /// `(env, SecretShape)`. `None` if the cell is gone/absent/binary.
-    fn reveal(&self, key: &RowKey, col: usize) -> Option<String> {
-        reveal_value(&self.cached, key, col).map(|v| v.expose().to_string())
+    fn reveal(&self, key: &RowKey, col: usize) -> Option<Plaintext> {
+        reveal_value(&self.cached, key, col).map(|v| Plaintext::new(v.expose()))
     }
 
     /// Begin a guided walk for one new Environment using `method` (ADR 0031): ensure
@@ -920,7 +920,10 @@ mod tests {
         let b = loaded.view.rows.iter().find(|r| r.name == "B").unwrap();
         assert_eq!(b.state, EntryState::Gap);
         let key = RowKey::Entry(EntryName::from_path(&["A".to_string()]));
-        assert_eq!(p.reveal(&key, 0), Some("1".to_string()));
+        assert_eq!(
+            p.reveal(&key, 0).map(|v| v.expose_owned()),
+            Some("1".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1277,7 +1280,7 @@ mod tests {
         // Reveal works on either column regardless of the backing method.
         let key = RowKey::Entry(EntryName::from_path(&["A".to_string()]));
         assert_eq!(
-            p.reveal(&key, 1),
+            p.reveal(&key, 1).map(|v| v.expose_owned()),
             Some("1".to_string()),
             "reveal the SSM cell"
         );

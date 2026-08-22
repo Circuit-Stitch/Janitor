@@ -25,6 +25,7 @@ use janitor_aws_auth::AwsFamilyProvider;
 use janitor_core::compare::RowKey;
 use janitor_core::config::{Application, Config, Mapping, Method};
 use janitor_core::provider::{AppError, Failure, Provider, Step, What};
+use janitor_core::secret::Plaintext;
 use janitor_core::view::MatrixView;
 use janitor_core::write::{EnvEdit, WriteOutcome};
 use janitor_ssm::{
@@ -103,10 +104,14 @@ pub enum Event {
         app_name: String,
     },
     AppFailed(AppError),
+    /// A cell's plaintext, for a momentary un-mask. `text` is the one exposed
+    /// Value that crosses this protocol, in the one type it travels in
+    /// (ADR 0035) — the shell copies it out to paint it and holds it no longer
+    /// than the press (ADR 0003 / THREAT-MODEL).
     Revealed {
         row: usize,
         col: usize,
-        text: String,
+        text: Plaintext,
     },
     RevealUnavailable,
     /// A Value fetched for the clipboard. The UI thread sets the OS clipboard and
@@ -114,7 +119,7 @@ pub enum Event {
     CopyValue {
         row: usize,
         col: usize,
-        text: String,
+        text: Plaintext,
     },
     CopyUnavailable,
     /// A guided walk reached `Done`: this Mapping is ready to append to the
@@ -564,7 +569,7 @@ mod tests {
         run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
 
         let revealed = events.lock().unwrap().iter().find_map(|e| match e {
-            Event::Revealed { text, row, col } => Some((text.clone(), *row, *col)),
+            Event::Revealed { text, row, col } => Some((text.expose_owned(), *row, *col)),
             _ => None,
         });
         assert_eq!(
@@ -598,7 +603,7 @@ mod tests {
         run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
 
         let copied = events.lock().unwrap().iter().find_map(|e| match e {
-            Event::CopyValue { text, row, col } => Some((text.clone(), *row, *col)),
+            Event::CopyValue { text, row, col } => Some((text.expose_owned(), *row, *col)),
             _ => None,
         });
         assert_eq!(
@@ -711,7 +716,7 @@ mod tests {
         ) -> Result<janitor_core::provider::Loaded, AppError> {
             unreachable!("this fake only drives discovery")
         }
-        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<String> {
+        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<Plaintext> {
             None
         }
         async fn begin_discovery(
@@ -1008,7 +1013,7 @@ mod tests {
         ) -> Result<janitor_core::provider::Loaded, AppError> {
             unreachable!("this fake only drives writes")
         }
-        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<String> {
+        fn reveal(&self, _key: &RowKey, _col: usize) -> Option<Plaintext> {
             None
         }
         async fn begin_discovery(

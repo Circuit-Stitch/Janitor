@@ -15,10 +15,12 @@
 //! Pure data only — no I/O. The textual `apply_edits`/`encode_value` engine that
 //! consumes an [`EnvEdit`] stays in `janitor-ssm` (it is `.env`-specific); this
 //! module holds only the edit unit, its validation error, the CAS outcome, and the
-//! masked [`summarize_edits`] confirm helper. A `Set`'s Value is secret and held
-//! zeroizing; nothing here logs, `Debug`-prints, or summarizes it (THREAT-MODEL).
+//! masked [`summarize_edits`] confirm helper. A `Set`'s Value is secret and held in
+//! a [`Plaintext`](crate::secret::Plaintext) — the one type an exposed Value travels
+//! in, shared with the reveal path so the UniFFI boundary declares one custom type
+//! (ADR 0035). Nothing here logs, `Debug`-prints, or summarizes it (THREAT-MODEL).
 
-use zeroize::Zeroizing;
+use crate::secret::Plaintext;
 
 /// The compare-and-swap result of one remote write (ADR 0001). The CAS hash is the
 /// file as read; the write commits only if it still matches.
@@ -39,10 +41,7 @@ pub enum EnvEdit {
     /// Set `key` to `value`: rewrite the right-hand side of the **last** physical
     /// line owning `key` (duplicate keys are last-wins, mirroring the parser); if
     /// no line owns `key`, append a new `key=value` line.
-    Set {
-        key: String,
-        value: Zeroizing<String>,
-    },
+    Set { key: String, value: Plaintext },
     /// Remove **every** physical line owning `key` (leaving an earlier duplicate
     /// would keep the key present under last-wins). A no-op if no line owns `key`.
     Remove { key: String },
@@ -54,7 +53,7 @@ impl EnvEdit {
     pub fn set(key: impl Into<String>, value: impl Into<String>) -> Self {
         EnvEdit::Set {
             key: key.into(),
-            value: Zeroizing::new(value.into()),
+            value: Plaintext::new(value.into()),
         }
     }
 

@@ -124,7 +124,7 @@ fn merge(current: &Map<String, JsonValue>, edits: &[EnvEdit]) -> Map<String, Jso
                 // The plaintext briefly lives in a (non-zeroizing) serde value here;
                 // it is serialized into a Zeroizing buffer immediately below and the
                 // serde tree drops at end of `write_secret`'s scope.
-                out.insert(key.clone(), JsonValue::String(value.as_str().to_owned()));
+                out.insert(key.clone(), JsonValue::String(value.expose_owned()));
             }
             EnvEdit::Remove { key } => {
                 out.remove(key);

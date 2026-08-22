@@ -3,10 +3,12 @@
 
 mod flatten;
 mod name;
+mod plaintext;
 mod shape;
 mod value;
 
 pub use flatten::{flatten, unflatten, ShapeError};
 pub use name::EntryName;
+pub use plaintext::Plaintext;
 pub use shape::{SecretBytes, SecretShape};
 pub use value::{LeafKind, Value};

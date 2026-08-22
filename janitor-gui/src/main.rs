@@ -452,7 +452,9 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
             // the Value (THREAT-MODEL / ADR 0017).
             ui.set_revealed_row(row as i32);
             ui.set_revealed_col(col as i32);
-            ui.set_revealed_text(text.into());
+            // The one deliberate copy-out of an exposed Value in this shell: the
+            // characters have to reach a Slint property to be painted (ADR 0003).
+            ui.set_revealed_text(text.expose().into());
             tracing::info!(target: "janitor::gui", "{name}[{env}] revealed");
         }
         Event::RevealUnavailable => { /* leave masked */ }
@@ -471,7 +473,7 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
                 let env = st.view.environments.get(col).cloned().unwrap_or_default();
                 (name, env)
             };
-            if set_clipboard(&text) {
+            if set_clipboard(text.expose()) {
                 tracing::info!(target: "janitor::gui", "{name}[{env}] copied to clipboard");
             }
         }

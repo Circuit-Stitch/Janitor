@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use janitor_core::compare::{Comparison, RowKey};
 use janitor_core::config::{Application, Mapping, Method};
 use janitor_core::provider::{AppError, Failure, Loaded, Provider, SignInFailed, Step, What};
-use janitor_core::secret::SecretShape;
+use janitor_core::secret::{Plaintext, SecretShape};
 use janitor_core::view::{project, reveal_value};
 use janitor_core::write::{EnvEdit, WriteOutcome};
 
@@ -62,8 +62,8 @@ impl Provider for MockProvider {
         })
     }
 
-    fn reveal(&self, key: &RowKey, col: usize) -> Option<String> {
-        reveal_value(&self.cached, key, col).map(|v| v.expose().to_string())
+    fn reveal(&self, key: &RowKey, col: usize) -> Option<Plaintext> {
+        reveal_value(&self.cached, key, col).map(|v| Plaintext::new(v.expose()))
     }
 
     async fn begin_discovery(
@@ -179,7 +179,7 @@ mod tests {
 
         p.load(&payments).await.unwrap();
         assert_eq!(
-            p.reveal(&stripe, 0).as_deref(),
+            p.reveal(&stripe, 0).map(|v| v.expose_owned()).as_deref(),
             Some("sk_live_prod_b80a0011"),
             "present cell reveals its plaintext from the cached Set"
         );
