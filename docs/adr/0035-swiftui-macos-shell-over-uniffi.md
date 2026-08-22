@@ -59,6 +59,10 @@ removes it structurally.
 public API expressed for a foreign caller, not view logic, so it sits inside
 ADR 0003's line rather than across it.
 
+> **Amended 2026-08-21 by the Amendment below.** The boundary and the worker moved
+> to a new `janitor-app` crate instead, because a Cargo cycle makes this
+> impossible. Everything else in this section stands.
+
 Core absorbs today's bin-local `worker.rs` wholesale — `Command`, `Event`,
 `run_loop`, `build_provider`, `build_family`, `discovery_event`, `write_event`,
 `surface_advisories` — plus the shared seams `reveal.rs`, `rows.rs`,
@@ -228,3 +232,61 @@ binary.
   buys out of the second known issue as well.
 - **No repository here has run a macOS App Store upload before.** The sibling
   pattern is proven for iOS only. The first armed run is the experiment.
+
+## Amendment 2026-08-21 — the boundary lives in `janitor-app`, not `janitor-core`
+
+The decision above put the worker and the FFI boundary in `janitor-core`. Cargo
+rejects that. `worker.rs` names `janitor-aws`, `janitor-aws-auth`, and
+`janitor-ssm`, and all three depend on `janitor-core`, so moving the worker into
+core makes the package graph cyclic. Verified against the real workspace:
+
+```
+error: cyclic package dependency: package `janitor-aws` depends on itself
+```
+
+The composition root is what forces it. `build_family` is the only place both
+AWS-family method tails are named together, so it has to sit above every adapter
+crate. Nothing above them exists today except the shell.
+
+**A new `janitor-app` crate holds the worker and the composition root.** It
+depends on `janitor-core` and on all four adapter crates. `Command`, `Event`,
+`run_loop`, `discovery_event`, `write_event`, `surface_advisories`,
+`ProviderKind`, `spawn`, `build_provider`, and `build_family` live there. The
+UniFFI boundary goes there too, and `JanitorKit.xcframework` is built from
+`janitor-app` rather than from `janitor-core`.
+
+**The six presentation seams still go to `janitor-core`.** `errors`, `logpane`,
+`pane`, `reveal`, `rows`, and `sidebar` name no adapter crate, so they cross no
+cycle. They landed in core as originally decided, and core's coverage rose to
+95.8%.
+
+**This is not the rejected `janitor-ffi`.** That option was rejected because an
+Apple-only crate holding the worker would force `Janitor-slint` to depend on it
+and drag UniFFI along by requirement. `janitor-app` is not Apple-only. It is the
+application layer both shells drive, and the Slint shell depends on it because
+that is where the worker it already used now lives. UniFFI stays optional there,
+so a Slint build need not compile it.
+
+**Core keeps its name and its meaning.** It is still the security-critical
+domain, still free of AWS, and still gated at ≥80% lines over pure logic. The
+alternative — renaming core to `janitor-model` and rebuilding `janitor-core` on
+top — was rejected: it rewrites 108 references across 27 files in four crates,
+relocates about 4,200 lines, and leaves the surviving core gate measuring the
+untested worker shell.
+
+**`janitor-app` carries no coverage gate.** It holds the worker's I/O loop and
+the composition root, both untested by design. It sat inside the ungated
+`janitor-gui` until now, and it measures 80.2%, which is too thin a margin to
+gate on.
+
+**The update events leave the shared protocol.** `Command::CheckForUpdates`,
+`Command::InstallUpdate`, `Event::UpdateChecked`, and `Event::UpdateInstalled`
+carried Windows MSIX types from `janitor-gui` (ADR 0034), and UniFFI cannot
+export a type from a shell crate. Only the Slint shell ships an MSIX, so the rail
+is shell-local: `janitor-gui` owns its own thread, its own current-thread runtime,
+and its own two-command loop. The ADR 0034 guarantees are unchanged — manual-only,
+off the UI thread, no network egress until the user clicks. The macOS shell needs
+no equivalent, because the Mac App Store updates the app.
+
+Consequence: ADR 0036's repository table gains a sixth crate in `Janitor`, and
+`Janitor-slint` takes `janitor-app` by Cargo path alongside `janitor-core`.

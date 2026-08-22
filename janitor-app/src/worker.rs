@@ -1,9 +1,15 @@
-//! The GUI's async bridge (ADR 0019): a worker thread owns a Tokio current-thread
-//! runtime and drives a `&mut dyn Provider` (built by [`build_provider`] from the
-//! chosen [`ProviderKind`]) — one async path for AWS and the offline mock alike.
-//! The UI sends `Command`s; the worker runs the async Provider calls and posts
-//! `Event`s back onto the Slint event loop. This is untested I/O shell
-//! (ADR 0010 §5); all real logic lives in the `Provider` impls.
+//! The shell-agnostic async bridge (ADR 0019). A worker thread owns a Tokio
+//! current-thread runtime and drives a `&mut dyn Provider`, built by
+//! [`build_provider`] from the chosen [`ProviderKind`] — one async path for AWS and
+//! the offline mock alike. A shell sends `Command`s; the worker runs the async
+//! Provider calls and posts `Event`s back through the callback the shell supplies.
+//! This is untested I/O shell (ADR 0010 §5); all real logic lives in the `Provider`
+//! impls.
+//!
+//! `Command` and `Event` are the protocol both shells speak, and the boundary the
+//! UniFFI layer will export (ADR 0035). Everything here is therefore free of any
+//! one toolkit: no widget type crosses it, and no variant describes a platform only
+//! one shell has.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender};
@@ -24,8 +30,6 @@ use janitor_core::write::{EnvEdit, WriteOutcome};
 use janitor_ssm::{
     AwsInstanceCatalog, AwsLoggingPreference, SsmDotenvMethod, SsmFileReader, SsmFileWriter,
 };
-
-use crate::update::{UpdateCheck, UpdateInstall};
 
 /// UI → worker.
 pub enum Command {
@@ -80,15 +84,6 @@ pub enum Command {
         mapping: Mapping,
         edits: Vec<EnvEdit>,
     },
-    /// Manually check for a Windows MSIX update (ADR 0034, slice 2). The **sole**
-    /// update trigger — runs only on an explicit "Check for updates" click, so the
-    /// network is touched only here (zero background egress). An OS action, not a
-    /// `Provider` call (like `SetReadWrite`); reaches the App Installer engine, never
-    /// AWS. A no-op (Unsupported) off Windows / in an unpackaged build.
-    CheckForUpdates,
-    /// Install the available update (sent after a `CheckForUpdates` reported one).
-    /// Queues the staged package to apply on next app close (no forced shutdown).
-    InstallUpdate,
     Shutdown,
 }
 
@@ -180,12 +175,6 @@ pub enum Event {
     WriteRefused {
         environment: String,
     },
-    /// The result of a manual update check (ADR 0034, slice 2). Carries the masked
-    /// outcome (Available / UpToDate / Unsupported / Failed) — never a Value. The UI
-    /// renders it via `update::describe_check` (status line + Install-button gate).
-    UpdateChecked(UpdateCheck),
-    /// The result of an update install attempt. Masked outcome only.
-    UpdateInstalled(UpdateInstall),
 }
 
 /// Which [`Provider`] the GUI runs against. The composition root (`main`) picks
@@ -355,7 +344,7 @@ fn write_event(result: Result<WriteOutcome, Failure>, environment: String) -> Ev
 /// (`Event::Warning`). A no-op for Providers that produce none (AWS/mock).
 async fn surface_advisories<F: Fn(Event)>(provider: &mut dyn Provider, on_event: &F) {
     for w in provider.take_advisories().await {
-        tracing::warn!(target: "janitor::gui", "{w}");
+        tracing::warn!(target: "janitor::app", "{w}");
         on_event(Event::Warning(w));
     }
 }
@@ -374,28 +363,28 @@ async fn run_loop(
         match cmd {
             Command::Shutdown => break,
             Command::SignIn => {
-                tracing::info!(target: "janitor::gui", "Sign-in requested");
+                tracing::info!(target: "janitor::app", "Sign-in requested");
                 on_event(Event::SignInStarted);
                 match provider.sign_in().await {
                     Ok(()) => {
-                        tracing::info!(target: "janitor::gui", "Signed in");
+                        tracing::info!(target: "janitor::app", "Signed in");
                         on_event(Event::SignedIn);
                     }
                     Err(e) => {
                         // SignInError Display is error-safe (static phrases /
                         // scrubbed Sdk label) — never secret material.
-                        tracing::warn!(target: "janitor::gui", "Sign-in failed — {e}");
+                        tracing::warn!(target: "janitor::app", "Sign-in failed — {e}");
                         on_event(Event::SignInFailed(e.to_string()));
                     }
                 }
             }
             Command::LoadApp(app) => {
-                tracing::info!(target: "janitor::gui", app = %app.name, "Loading Application");
+                tracing::info!(target: "janitor::app", app = %app.name, "Loading Application");
                 on_event(Event::AppLoading);
                 match provider.load(&app).await {
                     Ok(loaded) => {
                         tracing::info!(
-                            target: "janitor::gui",
+                            target: "janitor::app",
                             app = %app.name,
                             entries = loaded.view.rows.len(),
                             corrected = loaded.corrected.len(),
@@ -410,7 +399,7 @@ async fn run_loop(
                     Err(e) => {
                         for f in &e.failures {
                             tracing::warn!(
-                                target: "janitor::gui",
+                                target: "janitor::app",
                                 app = %app.name,
                                 env = %f.environment,
                                 "Load failed — {}",
@@ -456,7 +445,7 @@ async fn run_loop(
             Command::SetReadWrite(on) => {
                 read_write = on;
                 tracing::info!(
-                    target: "janitor::gui",
+                    target: "janitor::app",
                     "Read-write mode {}",
                     if on { "unlocked" } else { "locked" }
                 );
@@ -474,7 +463,7 @@ async fn run_loop(
                     // Log only the env + edit COUNT (a count, not content) and the
                     // masked outcome — never the edit Values (THREAT-MODEL).
                     tracing::info!(
-                        target: "janitor::gui",
+                        target: "janitor::app",
                         env = %mapping.environment,
                         count = edits.len(),
                         "Applying edits"
@@ -483,19 +472,6 @@ async fn run_loop(
                     let outcome = provider.write(&mapping, &edits).await;
                     on_event(write_event(outcome, environment));
                 }
-            }
-            // OS update actions (ADR 0034) — not Provider calls. The WinRT op is
-            // awaited on this (worker) runtime, off the UI thread. Network egress
-            // happens only here, only because the user clicked. Off Windows /
-            // unpackaged this resolves to a masked Unsupported without touching the
-            // network. `UpdateCheck`/`UpdateInstall` carry no Value (THREAT-MODEL).
-            Command::CheckForUpdates => {
-                tracing::info!(target: "janitor::gui", "Checking for updates");
-                on_event(Event::UpdateChecked(crate::update::check().await));
-            }
-            Command::InstallUpdate => {
-                tracing::info!(target: "janitor::gui", "Installing update");
-                on_event(Event::UpdateInstalled(crate::update::install().await));
             }
         }
         // After any command that touched the Provider, surface any advisories it
@@ -1157,37 +1133,6 @@ mod tests {
                 |e| matches!(e, Event::WriteConflict { environment } if environment == "prod")
             ),
             "a persistent CAS conflict surfaces as WriteConflict"
-        );
-    }
-
-    // ---- the manual update rail (ADR 0034) ---------------------------------
-
-    #[tokio::test]
-    async fn check_for_updates_reports_unsupported_through_the_worker_rail() {
-        // The whole update rail end to end: CheckForUpdates → update::check().await
-        // → UpdateChecked. A `cargo test` binary has NO MSIX package identity, so on
-        // Windows `Package::Current()` fails fast — no network — and degrades to
-        // Unsupported; off Windows the stub returns Unsupported directly. Either way:
-        // a calm, non-panicking Unsupported, proving the rail (and the await) is
-        // wired without touching the network. (InstallUpdate is deliberately NOT
-        // exercised here — on Windows it would reach the real
-        // PackageManager::AddPackageByAppInstallerFileAsync and hit the network.)
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(Command::CheckForUpdates).unwrap();
-        tx.send(Command::Shutdown).unwrap();
-
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let sink = events.clone();
-        let mut provider = janitor_mock::MockProvider::new();
-        run_loop(rx, &mut provider, &move |ev| sink.lock().unwrap().push(ev)).await;
-
-        let events = events.lock().unwrap();
-        assert!(
-            matches!(
-                events.as_slice(),
-                [Event::UpdateChecked(UpdateCheck::Unsupported)]
-            ),
-            "an unpackaged build reports Unsupported through the worker rail — not a panic, not a real network check"
         );
     }
 }

@@ -104,13 +104,14 @@ human-gated `live-verify-*-write` binaries while live verification finishes.
 | Read-write lock — writes unreachable until deliberately unlocked | ✅ Worker-enforced invariant — [ADR 0032](docs/adr/0032-wire-write-seam-to-provider-port-and-read-write-lock.md) |
 | Packaging + releases — Linux deb/rpm/AppImage, macOS dmg, Windows MSIX auto-update | ✅ v0.1.4 — [ADR 0007](docs/adr/0007-ci-and-distribution.md) / [0022](docs/adr/0022-packaging-cargo-packager-and-windows-signing.md) / [0034](docs/adr/0034-windows-auto-update-via-msix-and-app-installer.md) |
 
-The workspace is six crates: `janitor-core` (offline bedrock — model, compare,
-`Config`, the `Provider` port, the Discovery orchestrator), `janitor-gui`
-(Slint), `janitor-aws-auth` (shared Identity Center auth base; ADR 0024),
-`janitor-aws` (Secrets Manager Provider), `janitor-ssm` (remote `.env` over SSM
-Provider; ADR 0025), and `janitor-mock` (offline canned-data Provider; ADR
-0019). `cargo test --workspace` runs them all; ≥80% coverage gates cover the
-non-GUI crates, where correctness is proven (ADR 0010 §5, ADR 0016) — the
+The workspace is seven crates: `janitor-core` (offline bedrock — model,
+compare, `Config`, the `Provider` port, the Discovery orchestrator, the shared
+presentation seams), `janitor-app` (the worker and the AWS composition root;
+ADR 0035), `janitor-gui` (Slint), `janitor-aws-auth` (shared Identity Center auth
+base; ADR 0024), `janitor-aws` (Secrets Manager Provider), `janitor-ssm` (remote
+`.env` over SSM Provider; ADR 0025), and `janitor-mock` (offline canned-data
+Provider; ADR 0019). `cargo test --workspace` runs them all; ≥80% coverage gates
+cover the crates where correctness is proven (ADR 0010 §5, ADR 0016) — the
 browser / SDK / socket shells stay untested by design.
 
 ## Install
@@ -129,7 +130,7 @@ AWS calls. You bring your own IAM Identity Center org — see
 
 ## Build & test
 
-Standard Cargo across the six-crate workspace. Linux needs a few Slint system
+Standard Cargo across the seven-crate workspace. Linux needs a few Slint system
 dependencies first; full commands (build, test, coverage, the GUI, and the
 human-gated live-verify binaries) live in
 **[docs/building.md](docs/building.md)**.
@@ -145,8 +146,14 @@ the GUI is a thin, softer-trust view:
 - **`janitor-core`** *(trusted)* — no GUI deps: the secret-shape model,
   zeroizing in-memory types, `Config`, the comparison engine, the write-seam
   types, the provider-agnostic Discovery orchestrator
-  ([ADR 0026](docs/adr/0026-shared-discovery-orchestrator-in-core.md)), and the
-  `Provider` port every backend implements. This is where correctness is proven.
+  ([ADR 0026](docs/adr/0026-shared-discovery-orchestrator-in-core.md)), the
+  `Provider` port every backend implements, and the presentation seams that
+  decide what a shell renders. This is where correctness is proven.
+- **`janitor-app`** *(trusted)* — the worker thread that drives a `Provider`, the
+  `Command` / `Event` protocol every shell speaks, and the composition root that
+  builds the real AWS Provider. It sits above the adapter crates because it names
+  them all, which `janitor-core` cannot do
+  ([ADR 0035](docs/adr/0035-swiftui-macos-shell-over-uniffi.md)).
 - **`janitor-aws-auth` / `janitor-aws` / `janitor-ssm` / `janitor-mock`**
   *(trusted)* — the Providers: a shared Identity Center auth base, the Secrets
   Manager backend, the remote-`.env`-over-SSM backend, and the offline mock.
@@ -155,7 +162,7 @@ the GUI is a thin, softer-trust view:
 - **`janitor-gui`** *(softer-trust)* — a thin [Slint](https://slint.dev) view:
   the masked comparison matrix, momentary per-cell reveal, the Discovery wizard,
   the Manage window, and an in-app diagnostic log. No auth / AWS / compare /
-  write logic lives here.
+  write logic lives here. It names no adapter crate; it drives `janitor-app`.
 
 ## Non-negotiable invariants
 

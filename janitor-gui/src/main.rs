@@ -9,11 +9,12 @@ mod scrollbar;
 mod update;
 #[cfg(test)]
 mod view_tests;
-mod worker;
 
-// The presentation seams moved to `janitor-core` (#96): both shells drive them, so
-// they are no longer bin-local. Imported under their old names, so every call site
-// below still reads `rows::…`, `reveal::…`, and so on.
+// The worker and the presentation seams moved out of this binary (#96). Both shells
+// drive them, so `janitor-app` holds the worker and the AWS composition root, and
+// `janitor-core` holds the seams. Imported under their old names, so every call site
+// below still reads `worker::…`, `rows::…`, `reveal::…`, and so on.
+use janitor_app::worker;
 use janitor_core::{errors, logpane, pane, reveal, rows, sidebar};
 
 use std::cell::{Cell, RefCell};
@@ -314,6 +315,10 @@ struct AppState {
     /// Commands to the worker thread, which drives the chosen `Provider` and
     /// posts `Event`s back via `upgrade_in_event_loop` (ADR 0019 — one async path).
     tx: Sender<Command>,
+    /// Commands to the update thread (ADR 0034, slice 2). A separate rail from the
+    /// worker: only the Slint shell ships an MSIX, so updates are not part of the
+    /// protocol both shells speak.
+    update_tx: Sender<update::UpdateCommand>,
     /// Which Provider the worker runs. The GUI is Provider-agnostic except here:
     /// the offline `Mock` Provider is ephemeral, so Config is never persisted for
     /// it (`maybe_save`) — a real-org write must not be stomped by demo data.
@@ -358,6 +363,11 @@ impl AppState {
 /// `upgrade_in_event_loop`.
 fn dispatch(state: &Rc<RefCell<AppState>>, cmd: Command) {
     let _ = state.borrow().tx.send(cmd);
+}
+
+/// Send one command down the shell-local update rail (ADR 0034, slice 2).
+fn dispatch_update(state: &Rc<RefCell<AppState>>, cmd: update::UpdateCommand) {
+    let _ = state.borrow().update_tx.send(cmd);
 }
 
 /// Apply one Event to the UI + state. Called on the UI thread via
@@ -536,16 +546,25 @@ fn apply_event(ui: &MainWindow, state: &Rc<RefCell<AppState>>, ev: Event) {
                 "{environment}: write refused — turn on read-write mode in Settings first"
             );
         }
-        // Windows MSIX update outcomes (ADR 0034, slice 2). The masked status line
-        // is non-secret (a version-agnostic phrase); render it in Settings, gate the
-        // Install button, and mirror it to the Diagnostic Log (ADR 0017).
-        Event::UpdateChecked(check) => {
+    }
+}
+
+/// Apply one update outcome to the UI. Called on the UI thread via
+/// `upgrade_in_event_loop` for the update thread's replies (ADR 0034, slice 2).
+///
+/// The masked status line is non-secret — a version-agnostic phrase. Render it in
+/// Settings, gate the Install button, and mirror it to the Diagnostic Log
+/// (ADR 0017). This rail is shell-local: only the Slint shell ships an MSIX, so it
+/// is not part of the worker protocol both shells speak.
+fn apply_update_event(ui: &MainWindow, ev: update::UpdateEvent) {
+    match ev {
+        update::UpdateEvent::Checked(check) => {
             let view = update::describe_check(&check);
             ui.set_update_available(view.available);
             ui.set_update_status(view.status.clone().into());
             tracing::info!(target: "janitor::gui", "Update check — {}", view.status);
         }
-        Event::UpdateInstalled(install) => {
+        update::UpdateEvent::Installed(install) => {
             let msg = update::describe_install(&install);
             // The install is kicked off; hide the Install button regardless of
             // outcome (a fresh Check re-offers it if it failed).
@@ -1069,8 +1088,18 @@ fn main() -> Result<(), slint::PlatformError> {
         })
     };
 
+    // The update rail (ADR 0034, slice 2): its own thread and runtime, so the WinRT
+    // call is awaited off the UI thread. Manual-only, so it sits idle until a click.
+    let update_tx = {
+        let ui_weak = ui.as_weak();
+        update::spawn(move |ev| {
+            let _ = ui_weak.upgrade_in_event_loop(move |ui| apply_update_event(&ui, ev));
+        })
+    };
+
     let state = Rc::new(RefCell::new(AppState {
         tx,
+        update_tx,
         kind,
         config,
         selected: 0,
@@ -1407,16 +1436,16 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_set_read_write(move |on| dispatch(&state, Command::SetReadWrite(on)));
     }
     // Windows MSIX self-update (ADR 0034, slice 2): the manual "Check for updates"
-    // button → the worker runs the App Installer check off the UI thread; the
+    // button → the update thread runs the App Installer check off the UI thread; the
     // Install button (visible only when an update is available) → kick off the
     // install. Both are no-ops (Unsupported) off Windows / in an unpackaged build.
     {
         let state = state.clone();
-        ui.on_check_for_updates(move || dispatch(&state, Command::CheckForUpdates));
+        ui.on_check_for_updates(move || dispatch_update(&state, update::UpdateCommand::Check));
     }
     {
         let state = state.clone();
-        ui.on_install_update(move || dispatch(&state, Command::InstallUpdate));
+        ui.on_install_update(move || dispatch_update(&state, update::UpdateCommand::Install));
     }
 
     // Diagnostic Log (ADR 0017): the level dropdown sets the max verbosity shown;
@@ -1496,10 +1525,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let run_result = ui.run();
 
-    // App closing: stop the worker loop (harmless if it already exited). This is
-    // the one site that *constructs* `Command::Shutdown` — the variant
-    // `worker::run_loop` already handles.
+    // App closing: stop both loops (harmless if either already exited). This is the
+    // one site that *constructs* either `Shutdown` — the variants
+    // `worker::run_loop` and `update::run_loop` already handle.
     let _ = state.borrow().tx.send(Command::Shutdown);
+    let _ = state
+        .borrow()
+        .update_tx
+        .send(update::UpdateCommand::Shutdown);
     run_result
 }
 

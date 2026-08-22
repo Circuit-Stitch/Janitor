@@ -1,0 +1,26 @@
+[package]
+name = "janitor-app"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Janitor's shell-agnostic application layer: the worker and the AWS composition root."
+
+[dependencies]
+janitor-core = { path = "../janitor-core" }
+# The composition root names every AWS-family adapter, so this crate sits above
+# them all. That is why it exists: `janitor-core` cannot name them, because they
+# depend on it (ADR 0035, Amendment 2026-08-21).
+janitor-aws = { path = "../janitor-aws" }
+janitor-aws-auth = { path = "../janitor-aws-auth" }
+janitor-ssm = { path = "../janitor-ssm" }
+janitor-mock = { path = "../janitor-mock" }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The worker's offline suite drives fake Providers that implement an async trait,
+# and the end-to-end SSM test builds the real method over each crate's
+# `test-support` doubles, which never ship in a normal build (ADR 0024).
+async-trait = "0.1"
+janitor-ssm = { path = "../janitor-ssm", features = ["test-support"] }
+janitor-aws-auth = { path = "../janitor-aws-auth", features = ["test-support"] }

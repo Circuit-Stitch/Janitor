@@ -1,7 +1,8 @@
 # Build & test
 
-Standard Cargo across a six-crate workspace (`janitor-core`, `janitor-gui`,
-`janitor-aws-auth`, `janitor-aws`, `janitor-ssm`, `janitor-mock`).
+Standard Cargo across a seven-crate workspace (`janitor-core`, `janitor-app`,
+`janitor-gui`, `janitor-aws-auth`, `janitor-aws`, `janitor-ssm`,
+`janitor-mock`).
 
 ## Linux system dependencies
 
@@ -32,7 +33,8 @@ cargo test -p janitor-core <name>    # a single core test (substring match)
 cargo clippy --all-targets           # lint
 cargo fmt                            # format
 
-# Coverage (≥80% gate per non-GUI crate). Needs the cargo-llvm-cov subcommand:
+# Coverage (≥80% gate; janitor-gui and janitor-app are exempt — see ADR 0016 and
+# ADR 0035's 2026-08-21 amendment). Needs the cargo-llvm-cov subcommand:
 #   cargo install cargo-llvm-cov
 cargo llvm-cov -p janitor-core
 cargo llvm-cov -p janitor-aws --ignore-filename-regex 'src/bin/'   # lib only (ADR 0016)

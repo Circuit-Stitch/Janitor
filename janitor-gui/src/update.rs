@@ -13,6 +13,8 @@
 //! none, so `Package::Current()` fails — we map that to [`UpdateCheck::Unsupported`]
 //! and surface a calm "unavailable in this build", never a panic.
 
+use std::sync::mpsc::{Receiver, Sender};
+
 /// The masked outcome of a manual update check. No secret material — just which
 /// branch the App Installer engine reported. `Send` so it rides the worker
 /// `Event` across the thread boundary.
@@ -106,6 +108,63 @@ pub fn describe_install(i: &UpdateInstall) -> String {
             "Automatic updates are unavailable in this build.".to_string()
         }
         UpdateInstall::Failed(reason) => format!("Update could not be started: {reason}"),
+    }
+}
+
+// ── The update rail ─────────────────────────────────────────────────────────
+// This rail is shell-local and stays that way. Only the Slint shell ships an MSIX,
+// so `janitor-app`'s Command/Event protocol — the one both shells speak, and the
+// one UniFFI exports (ADR 0035) — carries no update variant. The rail keeps the
+// ADR 0034 guarantees it always had: manual-only, off the UI thread, and no network
+// egress until the user clicks.
+
+/// UI → the update thread.
+pub enum UpdateCommand {
+    Check,
+    Install,
+    Shutdown,
+}
+
+/// The update thread → UI. Masked outcomes only, never a Value (THREAT-MODEL).
+pub enum UpdateEvent {
+    Checked(UpdateCheck),
+    Installed(UpdateInstall),
+}
+
+/// Spawn the update thread and return its command Sender.
+///
+/// It owns a current-thread Tokio runtime, so the WinRT `IAsyncOperation` is awaited
+/// off the UI thread — the same guarantee the AWS worker gave this rail before it
+/// moved out. `on_event` is invoked for each outcome, and the caller marshals it back
+/// onto the UI loop. The thread touches the network only inside `check`/`install`,
+/// and only because a command arrived.
+pub fn spawn(on_event: impl Fn(UpdateEvent) + Send + 'static) -> Sender<UpdateCommand> {
+    let (tx, rx) = std::sync::mpsc::channel::<UpdateCommand>();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build update runtime");
+        rt.block_on(async move { run_loop(rx, &on_event).await });
+    });
+    tx
+}
+
+/// Drain the update commands. Off Windows, and in an unpackaged build, both arms
+/// resolve to a masked `Unsupported` without touching the network.
+async fn run_loop(rx: Receiver<UpdateCommand>, on_event: &impl Fn(UpdateEvent)) {
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            UpdateCommand::Shutdown => break,
+            UpdateCommand::Check => {
+                tracing::info!(target: "janitor::gui", "Checking for updates");
+                on_event(UpdateEvent::Checked(check().await));
+            }
+            UpdateCommand::Install => {
+                tracing::info!(target: "janitor::gui", "Installing update");
+                on_event(UpdateEvent::Installed(install().await));
+            }
+        }
     }
 }
 
@@ -222,6 +281,7 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn describe_check_available_offers_install() {
@@ -280,5 +340,33 @@ mod tests {
     async fn off_windows_check_and_install_are_unsupported() {
         assert_eq!(check().await, UpdateCheck::Unsupported);
         assert_eq!(install().await, UpdateInstall::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn check_reports_unsupported_through_the_update_rail() {
+        // The whole rail end to end: UpdateCommand::Check -> check().await ->
+        // UpdateEvent::Checked. A `cargo test` binary has NO MSIX package identity,
+        // so on Windows `Package::Current()` fails fast — no network — and degrades
+        // to Unsupported; off Windows the stub returns Unsupported directly. Either
+        // way: a calm, non-panicking Unsupported, proving the rail (and the await) is
+        // wired without touching the network. (Install is deliberately NOT exercised
+        // here — on Windows it would reach the real
+        // PackageManager::AddPackageByAppInstallerFileAsync and hit the network.)
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(UpdateCommand::Check).unwrap();
+        tx.send(UpdateCommand::Shutdown).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        run_loop(rx, &move |ev| sink.lock().unwrap().push(ev)).await;
+
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [UpdateEvent::Checked(UpdateCheck::Unsupported)]
+            ),
+            "an unpackaged build reports Unsupported through the update rail — not a panic, not a real network check"
+        );
     }
 }

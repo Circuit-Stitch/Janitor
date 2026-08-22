@@ -27,10 +27,11 @@ several consumers gets its own repository, and a product's own core stays with
 its app. A second shell moves Janitor from the second case into the first.
 
 **The core does not move.** `Janitor` already holds 21,066 lines across five
-crates, 36 ADRs, `CONTEXT.md`, `THREAT-MODEL.md`, and the per-crate coverage
-gates. `janitor-gui` is 7,403 lines and is a leaf — nothing in the workspace
-depends on it. Extracting the core would relocate everything expensive and leave
-the project's name on a Slint app. Extracting the shells moves one leaf.
+crates — six once the worker lands in `janitor-app` — 36 ADRs, `CONTEXT.md`,
+`THREAT-MODEL.md`, and the per-crate coverage gates. `janitor-gui` is 7,403 lines
+and is a leaf — nothing in the workspace depends on it. Extracting the core would
+relocate everything expensive and leave the project's name on a Slint app.
+Extracting the shells moves one leaf.
 
 ## Decision
 
@@ -38,7 +39,7 @@ the project's name on a Slint app. Extracting the shells moves one leaf.
 
 | Repository | Holds | Produces |
 |---|---|---|
-| `Janitor` | `janitor-core`, `-aws`, `-aws-auth`, `-ssm`, `-mock`. Every ADR, `CONTEXT.md`, `THREAT-MODEL.md`. | `JanitorKit.xcframework` on the depot. The Cargo crates. |
+| `Janitor` | `janitor-core`, `-app`, `-aws`, `-aws-auth`, `-ssm`, `-mock`. Every ADR, `CONTEXT.md`, `THREAT-MODEL.md`. | `JanitorKit.xcframework` on the depot. The Cargo crates. |
 | `Janitor-slint` | `janitor-gui`. | rpm, deb, AppImage, MSIX. |
 | `Janitor-macos` | The SwiftUI app and its Xcode project. | The Mac App Store build. |
 
@@ -51,7 +52,9 @@ platform it does not target.
 what Gonger does. Cargo cannot fetch a binary over plain HTTPS, so the depot is
 not reachable from Rust, and a path keeps the "nothing to publish, nothing to
 bump" property for the shell that changes with the core. CI checks out `Janitor`
-beside it, the way `WirelessOrderTelegraph-kmp` checks out its wire.
+beside it, the way `WirelessOrderTelegraph-kmp` checks out its wire. It takes
+`janitor-core` and `janitor-app` that way, and names no adapter crate directly
+(ADR 0035, Amendment 2026-08-21).
 
 **`Janitor-macos` takes the core as the published xcframework**, pinned by URL
 and checksum, and by a local SwiftPM path during development. A binary target is
@@ -70,7 +73,7 @@ Each shell versions for its own store. There is no single "Janitor 0.2.0" across
 three repositories, the same way `wot-sound` is 0.3.0 while Gonger is 0.1.0.
 
 **The order is fixed by one dependency.** Move the worker and the shared seams
-into `janitor-core` first, then move the Slint shell out, then build the macOS
+out of `janitor-gui` first, then move the Slint shell out, then build the macOS
 shell in its own repository from the first line.
 
 ## Considered options
@@ -95,11 +98,13 @@ shell in its own repository from the first line.
 
 ## Consequences
 
-- **Moving the shared logic into `janitor-core` becomes a hard prerequisite.**
+- **Moving the shared logic out of `janitor-gui` becomes a hard prerequisite.**
   About 2,370 lines — `worker.rs` plus `rows.rs`, `logpane.rs`, `sidebar.rs`,
   `pane.rs`, `reveal.rs`, and `errors.rs` — are bin-local modules in
-  `janitor-gui`, which has no `lib.rs`. Both shells drive them, so they must reach
-  the core before the Slint shell moves out. What is left behind is `main.rs`,
+  `janitor-gui`, which has no `lib.rs`. Both shells drive them, so they must move
+  before the Slint shell does. The six seams went to `janitor-core`; the worker
+  went to the new `janitor-app`, because it names the adapter crates and core
+  cannot (ADR 0035, Amendment 2026-08-21). What is left behind is `main.rs`,
   `view_tests.rs`, `scrollbar.rs`, and `update.rs` — Slint and Windows only.
 - **`Janitor-slint` does not build from a clean clone alone.** It needs `Janitor`
   beside it. CI needs a checkout action, and the README needs to say so.

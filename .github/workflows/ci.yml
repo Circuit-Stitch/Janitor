@@ -52,8 +52,12 @@ jobs:
 
       # Per-crate coverage gates, enforced here (not by Codecov) so build
       # pass/fail stays inside this workflow — ADR 0016. Each run gates ≥80% and
-      # emits an lcov for the badge. janitor-gui is excluded (thin view, no
-      # secret logic — ADR 0003). janitor-aws is gated on its *library* surface:
+      # emits an lcov for the badge. Two crates are excluded. janitor-gui is the
+      # thin view, with no secret logic (ADR 0003). janitor-app is the worker's
+      # I/O loop and the AWS composition root, untested by design (ADR 0010 §5);
+      # it sat inside the ungated janitor-gui until #96 moved it out, and it
+      # measures 80.2% today, which is too thin a margin to gate on.
+      # janitor-aws is gated on its *library* surface:
       # `src/bin/` holds the run-on-demand harnesses (live-verify, loopback-spike,
       # 0% by design), so they're dropped; the untestable SDK shell stays in.
       - name: Coverage — janitor-core (≥80% lines)

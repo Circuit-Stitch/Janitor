@@ -3416,6 +3416,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "janitor-app"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "janitor-aws",
+ "janitor-aws-auth",
+ "janitor-core",
+ "janitor-mock",
+ "janitor-ssm",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "janitor-aws"
 version = "0.1.0"
 dependencies = [
@@ -3488,13 +3502,10 @@ name = "janitor-gui"
 version = "0.1.4"
 dependencies = [
  "arboard",
- "async-trait",
  "i-slint-backend-testing",
- "janitor-aws",
- "janitor-aws-auth",
+ "janitor-app",
  "janitor-core",
  "janitor-mock",
- "janitor-ssm",
  "slint",
  "slint-build",
  "tokio",

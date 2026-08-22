@@ -11,9 +11,11 @@ build = "build.rs"
 
 [dependencies]
 janitor-core = { path = "../janitor-core" }
-janitor-aws = { path = "../janitor-aws" }
-janitor-aws-auth = { path = "../janitor-aws-auth" }
-janitor-ssm = { path = "../janitor-ssm" }
+# The worker and the AWS composition root (#96). This shell names no AWS adapter
+# crate directly — `janitor-app` does, and it is the only crate that can
+# (ADR 0035, Amendment 2026-08-21).
+janitor-app = { path = "../janitor-app" }
+# The offline demo config behind `JANITOR_MOCK` / `--mock`.
 janitor-mock = { path = "../janitor-mock" }
 # renderer-software kept explicit: it's the launch fallback (see main.rs), so it
 # must survive a future default-features trim. femtovg stays via the defaults.
@@ -25,9 +27,6 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # allows this; the copy is logged as "NAME[env] copied to clipboard", never as the
 # Value. #59 tracks the missing auto-clear timeout.
 arboard = "3"
-# The SsmDotenv arm's B4-placeholder SSM-tail seams (untested worker shell,
-# ADR 0010 §5 / ADR 0025 §3) implement async traits.
-async-trait = "0.1"
 # The worker emits to the Diagnostic Log; the subscriber that collects it moved to
 # `janitor-core` with `logpane` (#96), so the shell needs the emit side only.
 tracing = "0.1"
@@ -47,14 +46,6 @@ windows = { version = "0.62.2", features = ["ApplicationModel", "Foundation", "M
 # Internal Slint crate (no semver guarantee) — pinned to match slint 1.16.1.
 # Provides the headless testing backend + ElementHandle query API (ADR 0021).
 i-slint-backend-testing = "=1.16.1"
-# Test-only fakes for the offline end-to-end SSM worker test (#64 / ADR 0025):
-# the SSM-tail doubles (FakeInstanceCatalog, FakeRemoteFileReader) and the reused
-# front-half doubles (FakeReauth, FakeAccountCatalog, FakeRoleClient, FakeClock),
-# behind each crate's `test-support` feature so they never ship in a normal build
-# (ADR 0024). The union with the normal deps above enables `test-support` only in
-# test/dev builds.
-janitor-ssm = { path = "../janitor-ssm", features = ["test-support"] }
-janitor-aws-auth = { path = "../janitor-aws-auth", features = ["test-support"] }
 
 # ── Packaging (ADR 0022) ─────────────────────────────────────────────────────
 # Split by necessity: cargo-packager owns deb + AppImage + signed Windows; it has

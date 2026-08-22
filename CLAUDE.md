@@ -2,6 +2,42 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Latest: the shells are being split apart (#96, ADR 0035 Amendment 2026-08-21).**
+> The first two slices of the macOS epic (#94) landed, both behavior-preserving.
+> **The six shared presentation seams moved to `janitor-core`** — `errors`,
+> `logpane`, `pane`, `reveal`, `rows`, `sidebar`. They were bin-local `mod`s in
+> `janitor-gui`, which has no `lib.rs`, so nothing outside that binary could reach
+> them; both shells drive all six. Their 38 tests moved and pass unchanged (core
+> 133 → 171 tests, 95.8% lines). Core gained `tracing` + `tracing-subscriber`,
+> because `logpane` is both the layer and the ring buffer it feeds.
+> **The worker moved to a new `janitor-app` crate**, not to `janitor-core` as
+> ADR 0035 said. That was a **Cargo cycle**: `worker.rs` names `janitor-aws`,
+> `janitor-aws-auth`, and `janitor-ssm`, and all three depend on `janitor-core`
+> (verified — `error: cyclic package dependency`). The composition root
+> (`build_family`) is the forcing constraint: it is the only place both AWS-family
+> tails are named together, so it must sit **above** every adapter crate.
+> `janitor-app` depends on core + all four adapters and holds `Command`, `Event`,
+> `run_loop`, `discovery_event`, `write_event`, `surface_advisories`,
+> `ProviderKind`, `spawn`, `build_provider`, `build_family` — and later the UniFFI
+> boundary (#95), so **`JanitorKit.xcframework` is built from `janitor-app`**, not
+> from `janitor-core`. This is **not** the rejected `janitor-ffi`: `janitor-app` is
+> not Apple-only, it is the application layer both shells drive, and UniFFI stays
+> optional there. Core keeps its name, its meaning, and its ≥80% gate over pure
+> logic; `janitor-app` carries **no** gate (I/O loop + composition root, 80.2%).
+> **The Windows MSIX update rail left the shared protocol** (ADR 0034): its four
+> `Command`/`Event` variants carried `janitor-gui` types that UniFFI cannot export,
+> and only the Slint shell ships an MSIX, so `janitor-gui` now owns its own update
+> thread + runtime + two-command loop. Manual-only, off the UI thread, zero
+> background egress — unchanged. `janitor-gui` now depends on `janitor-core` +
+> `janitor-app` + `janitor-mock` only, and names **no** adapter crate — which is
+> what #106 needs to lift it into `Janitor-slint`. Test totals are conserved
+> exactly (235 → core 171 + app 16 + gui 48). **Next:** #95 (the UniFFI boundary in
+> `janitor-app`), then #105/#104 (depot tenant + xcframework publish), then #106
+> (the `Janitor-slint` split). Design:
+> [`docs/adr/0035-swiftui-macos-shell-over-uniffi.md`](docs/adr/0035-swiftui-macos-shell-over-uniffi.md)
+> (Amendment 2026-08-21) and
+> [`docs/adr/0036-three-repos-core-slint-shell-macos-shell.md`](docs/adr/0036-three-repos-core-slint-shell-macos-shell.md).
+>
 > **Latest: the Secrets Manager staged-put/CAS write engine landed (ADR 0001 +
 > Amendment 2026-06-25, #89) — built behind fakes + replay, shipped read-only.**
 > `SecretsManagerMethod::write` is no longer the masked `Unsupported` stub (ADR 0032
@@ -242,11 +278,17 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
 
 - **`janitor-core`** — no GUI deps. Identity Center auth + per-Environment
   Credential model, Secrets Manager I/O, the non-stomping write engine, the
-  comparison engine, Config load/save, secret-in-memory handling. **Target ≥80%
-  test coverage** — this is where correctness is proven.
+  comparison engine, Config load/save, secret-in-memory handling, and the shared
+  presentation seams (`errors`, `logpane`, `pane`, `reveal`, `rows`, `sidebar`).
+  **Target ≥80% test coverage** — this is where correctness is proven.
+- **`janitor-app`** — the worker thread, the `Command`/`Event` protocol every
+  shell speaks, and the AWS composition root. It sits above the adapter crates
+  because it names them all, which `janitor-core` cannot do (ADR 0035, Amendment
+  2026-08-21). No coverage gate: it is the I/O loop and the composition root.
 - **`janitor-gui`** — thin Slint (GPL) view: the comparison matrix (sortable,
   filterable by Entry name incl. prefix clusters), masked cells with momentary
-  per-cell reveal, confirm-diff dialogs, browser launch. No secret logic.
+  per-cell reveal, confirm-diff dialogs, browser launch. No secret logic. It
+  names no adapter crate; it drives `janitor-app`.
 
 ## Commands
 
@@ -255,7 +297,7 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
 
 ```bash
 cargo build                       # build the workspace
-cargo test --workspace            # all crates (core + gui + janitor-aws fakes)
+cargo test --workspace            # all crates (core + app + gui + janitor-aws fakes)
 cargo test -p janitor-core <name> # a single core test (substring match)
 cargo test -- --nocapture         # show test stdout/stderr
 cargo clippy --all-targets        # lint
