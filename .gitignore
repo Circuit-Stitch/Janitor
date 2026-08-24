@@ -9,6 +9,10 @@
 # Packaging output (cargo-packager + the MSIX pack layout, ADR 0022 / 0034)
 dist/
 
+# The Apple artifact: JanitorKit.xcframework, its zip, and the staging tree
+# scripts/build-xcframework.sh assembles them in (ADR 0035, #104).
+/build/
+
 # Serena local agent tooling (per-developer, not project source)
 /.serena/
 

@@ -1,0 +1,228 @@
+# JanitorKit publishes to the depot on a tag.
+#
+# One artifact: JanitorKit.xcframework.zip, the macOS slice of janitor-app with
+# the UniFFI-generated Swift compiled into it (ADR 0035, #104). It goes to
+# https://depot.circuitstitch.com and is fetched from there with no credentials.
+# Circuit-Stitch/Janitor-macos names it by URL and checksum.
+#
+# This is a separate lane from release.yml. That one tags `vX.Y.Z` off
+# janitor-gui's version and ships the Linux and Windows desktop packages. This
+# one tags `kit-vX.Y.Z` off janitor-app's version, because the two version
+# different things and a shared tag would republish one every time the other
+# moved.
+#
+# The boundaries this role runs inside are proved once, by the depot's own
+# publish-dummy.yml: a version cannot be published twice, a publisher cannot
+# write outside its prefix, and a publisher cannot read or list. This workflow is
+# a release rather than a second proof. It repeats one check only, that the Maven
+# grant is still confined, because Janitor's prefix sits inside a group shared
+# with every other Circuit-Stitch application.
+name: Publish
+
+on:
+  push:
+    tags:
+      - "kit-v*"
+
+# id-token: write is what lets a job ask GitHub for an OIDC token to trade with
+# AWS. There is no stored AWS key to fall back on.
+permissions:
+  contents: read
+  id-token: write
+
+# A version is published once, so two runs racing on one is not a case worth
+# having. A half-finished publish is worse than a queued one.
+concurrency:
+  group: publish-janitorkit
+  cancel-in-progress: false
+
+# Committed literals, matching the depot's no-tfvars convention. A workflow
+# cannot read Terraform state, so these are duplicated from it. `tofu output` in
+# the depot's serve/ is how you check they still agree.
+env:
+  AWS_REGION: us-west-2
+  PUBLISHER_ROLE_ARN: arn:aws:iam::744043381173:role/depot-publisher-janitor
+  BUCKET: depot-artifacts-744043381173
+  PUBLIC_HOST: depot.circuitstitch.com
+  MAVEN_PREFIX: open/maven/com/circuitstitch/apps/janitor
+  SWIFT_PREFIX: open/swift/janitor
+
+jobs:
+  # The tag names the version and janitor-app's manifest names it too. They have
+  # to agree, because the tag decides the URL and the manifest decides what the
+  # framework's Info.plist says it is. A build that disagreed would publish a
+  # framework that lies about which version it is.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: read
+        run: |
+          version="${GITHUB_REF_NAME#kit-v}"
+          if [ "$version" = "$GITHUB_REF_NAME" ] || [ -z "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME carries no version after kit-v"
+            exit 1
+          fi
+
+          manifest=$(cargo pkgid -p janitor-app)
+          manifest=${manifest##*[#@]}
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::tag says $version and janitor-app/Cargo.toml says $manifest"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing $version"
+
+  apple:
+    needs: version
+    # A GitHub-hosted macOS runner, because xcodebuild is what assembles an
+    # XCFramework. This runs on a tag rather than on every push, so the cost
+    # argument that keeps the SwiftUI shell's build on Xcode Cloud does not
+    # apply.
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    outputs:
+      checksum: ${{ steps.build.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Add the Intel Mac target
+        # The runner is Apple silicon, so aarch64-apple-darwin is already there
+        # and the other half of the universal slice is not.
+        run: rustup target add x86_64-apple-darwin
+
+      - id: build
+        name: Build the XCFramework
+        run: |
+          ./scripts/build-xcframework.sh
+          checksum=$(cat build/apple/JanitorKit.xcframework.zip.sha256)
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Assume the publisher role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.PUBLISHER_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # If-None-Match: * is the whole immutability mechanism. S3 refuses the
+      # write when the key is taken, in the same call that would have made it. It
+      # is a conditional write rather than a check followed by a write because a
+      # publisher cannot read. See the depot's ADR 0003.
+      - name: Publish the XCFramework and its checksum
+        run: |
+          aws --version
+
+          aws s3api put-object \
+            --bucket "$BUCKET" \
+            --key "$SWIFT_PREFIX/$VERSION/JanitorKit.xcframework.zip" \
+            --if-none-match '*' \
+            --content-type 'application/zip' \
+            --body build/apple/JanitorKit.xcframework.zip
+
+          # Beside the zip, so a reader can check a download without this log.
+          # The binaryTarget that names the zip carries the same number.
+          aws s3api put-object \
+            --bucket "$BUCKET" \
+            --key "$SWIFT_PREFIX/$VERSION/JanitorKit.xcframework.zip.sha256" \
+            --if-none-match '*' \
+            --content-type 'text/plain; charset=utf-8' \
+            --body build/apple/JanitorKit.xcframework.zip.sha256
+
+          echo "published JanitorKit.xcframework.zip"
+
+      # Janitor's Maven prefix sits under com/circuitstitch/apps, a group it
+      # shares with every other Circuit-Stitch application. Nothing writes there
+      # today. The grant still has to stop at this artifact, because a write one
+      # directory up would reach a sibling application.
+      - name: The Maven grant stops at this artifact
+        run: |
+          echo 'these bytes must never reach a consumer' > impostor.txt
+          for key in \
+            "open/maven/com/circuitstitch/apps/not-janitor/hello.jar" \
+            "open/maven/com/circuitstitch/apps/hello.jar"
+          do
+            if aws s3api put-object \
+                --bucket "$BUCKET" \
+                --key "$key" \
+                --if-none-match '*' \
+                --body impostor.txt 2> err.txt; then
+              echo "::error::the publisher wrote $key, which is another tenant's key"
+              exit 1
+            fi
+            grep -q 'AccessDenied' err.txt || { cat err.txt; exit 1; }
+            echo "denied: $key"
+          done
+
+  # curl knows nothing about AWS and sends no Authorization header. This job
+  # holds no credentials at all, so an anonymous fetch is the only kind it can
+  # make.
+  fetched:
+    needs: [version, apple]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      CHECKSUM: ${{ needs.apple.outputs.checksum }}
+    steps:
+      - name: The zip downloads over the depot's hostname with no credentials
+        run: |
+          base="https://$PUBLIC_HOST"
+
+          # The retry is for CloudFront, which caches a 404 briefly. A miss on
+          # the first attempt means the edge answered before the origin was
+          # asked.
+          fetch() {
+            local url=$1 into=$2 code=000
+            for attempt in 1 2 3 4 5 6; do
+              code=$(curl -sS -o "$into" -w '%{http_code}' "$url") || code=000
+              [ "$code" = 200 ] && return 0
+              echo "attempt $attempt: HTTP $code for $url"
+              sleep 10
+            done
+            echo "::error::$url answered $code"
+            return 1
+          }
+
+          fetch "$base/$SWIFT_PREFIX/$VERSION/JanitorKit.xcframework.zip" kit.zip
+          fetch "$base/$SWIFT_PREFIX/$VERSION/JanitorKit.xcframework.zip.sha256" kit.sha256
+
+          # A published checksum that does not describe the published bytes is
+          # worse than none: SwiftPM would fail every resolve and the artifact
+          # would look broken.
+          echo "$CHECKSUM  kit.zip" | sha256sum -c -
+          echo "$(cat kit.sha256)  kit.zip" | sha256sum -c -
+
+          # An app resolves this on its own, so the slice has to carry every
+          # half: the static library, the interface Swift reads it through, and
+          # the C header the generated Swift is written against. A slice missing
+          # the interface resolves and then fails to import.
+          #
+          # A Mac framework is a versioned bundle, so its halves sit under
+          # Versions/A.
+          unzip -l kit.zip
+          framework='macos-arm64_x86_64/JanitorKit[.]framework/Versions/A/'
+          unzip -l kit.zip | grep -qE "$framework"'JanitorKit$'
+          unzip -l kit.zip | grep -qE "$framework"'Headers/janitorFFI[.]h$'
+          unzip -l kit.zip | grep -qE "$framework"'Modules/module[.]modulemap$'
+          for arch in arm64 x86_64; do
+            unzip -l kit.zip \
+              | grep -qE "$framework"'Modules/JanitorKit[.]swiftmodule/'"$arch"'-apple-macos[.]swiftinterface$'
+          done
+
+          echo "the depot served the published bytes"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published JanitorKit \`$VERSION\`"
+            echo
+            echo "    https://$PUBLIC_HOST/$SWIFT_PREFIX/$VERSION/JanitorKit.xcframework.zip"
+            echo
+            echo "    checksum: $CHECKSUM"
+            echo
+            echo "Put both in \`JanitorKit/Package.swift\` in Circuit-Stitch/Janitor-macos."
+          } >> "$GITHUB_STEP_SUMMARY"

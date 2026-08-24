@@ -41,22 +41,13 @@ cargo rustc -p janitor-app --features uniffi --lib --crate-type staticlib
 LIB="$ROOT/target/debug/libjanitor_app.a"
 [ -f "$LIB" ] || { echo "no staticlib at $LIB" >&2; exit 1; }
 
-# The generator has to be built against the same UniFFI version as the scaffolding
-# it reads. It is a separate package outside the workspace, so nothing but this
-# check keeps the two pins together.
+# The generator has to be built against the same UniFFI version as the
+# scaffolding it reads. scripts/build-xcframework.sh runs the same check, so it
+# lives in one file that both source.
 TOOL="$ROOT/tools/uniffi-bindgen-swift"
-locked_uniffi() {
-    awk '/^name = "uniffi"$/ { found = 1; next }
-         found && /^version = / { gsub(/"/, "", $3); print $3; exit }' "$1"
-}
-APP_UNIFFI="$(locked_uniffi "$ROOT/Cargo.lock")"
-TOOL_UNIFFI="$(locked_uniffi "$TOOL/Cargo.lock")"
-if [ "$APP_UNIFFI" != "$TOOL_UNIFFI" ]; then
-    echo "uniffi version mismatch: janitor-app has $APP_UNIFFI, the generator has $TOOL_UNIFFI" >&2
-    echo "bump both pins together, or the bindings will link and then misbehave" >&2
-    exit 1
-fi
-echo "==> UniFFI $APP_UNIFFI on both sides"
+# shellcheck source=scripts/uniffi-pin.sh
+. "$ROOT/scripts/uniffi-pin.sh"
+check_uniffi_pin "$ROOT"
 
 echo "==> Generating Swift bindings into $OUT"
 rm -rf "$OUT"
