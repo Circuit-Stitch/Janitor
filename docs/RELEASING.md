@@ -1,141 +1,76 @@
-# Releasing Janitor
+# Releasing
 
-Janitor ships installable desktop packages built by the tag-triggered
-[`release.yml`](../.github/workflows/release.yml) workflow (ADR 0022, #55). This
-doc is the operator's checklist; the workflow file is the source of truth for
-exact build steps.
+This repository publishes one artifact: **`JanitorKit.xcframework`**, the macOS
+slice of `janitor-app` with the UniFFI-generated Swift compiled into it
+(ADR 0035). The tag-triggered [`publish.yml`](../.github/workflows/publish.yml)
+workflow builds it and puts it on the depot.
 
-## What a release produces
+The desktop packages — rpm, deb, AppImage, dmg, and the signed Windows MSIX — are
+released from
+[`Circuit-Stitch/Janitor-slint`](https://github.com/Circuit-Stitch/Janitor-slint),
+which holds the Slint shell and its own `docs/RELEASING.md` (ADR 0036, #106).
 
-A pushed `vX.Y.Z` tag builds, on native per-OS runners, and attaches to a
-**draft** GitHub Release for review:
+## Two tag lanes, one repository each
 
-| Platform | Artifact | Tool | Notes |
+| Tag | Repository | Versions | Produces |
 | --- | --- | --- | --- |
-| Fedora / RHEL | `.rpm` | `cargo-generate-rpm` | Native `Requires`; priority target |
-| Debian / Ubuntu | `.deb` | `cargo-packager` | Built on `ubuntu-22.04` (old-glibc floor) |
-| Linux portable | `.AppImage` | `cargo-packager` | Distro-independent |
-| macOS (Apple Silicon) | `.dmg` | `cargo-packager` | **Unsigned** — Gatekeeper warns (see below) |
-| Windows | `.msix` + `.appinstaller` | `makeappx` + Trusted Signing | Auto-updating (ADR 0034); **skip-gated** on signing (see below) |
+| `kit-vX.Y.Z` | this one | `janitor-app` | `JanitorKit.xcframework.zip` on the depot |
+| `vX.Y.Z` | `Janitor-slint` | `janitor-gui` | the desktop packages, on a draft GitHub Release |
 
-The Release is left as a **draft** — nothing is published until a human reviews
-the artifacts and clicks publish.
+They are separate because they version different things. A shared tag would
+republish one every time the other moved.
 
-## Cutting a release
+## Publishing JanitorKit
 
-The version is the single source of truth and **must equal janitor-gui's crate
-version**. Both paths below keep them equal; either ends at a **draft** you
-review and publish.
-
-### One-click (preferred)
-
-1. **Actions → Release → "Run workflow"**, type the version (e.g. `0.2.0`, no
-   leading `v`), Run. The `setup` job bumps
-   [`janitor-gui/Cargo.toml`](../janitor-gui/Cargo.toml) to that version, commits
-   it to `main`, and the same run builds every artifact and drafts the Release.
-2. Smoke-test the artifacts, edit the release notes, and **publish** the draft.
-   Publishing creates the `v0.2.0` git tag (at the bump commit) — a failed build
-   never leaves a dangling tag.
-
-> The bump commit is pushed with `GITHUB_TOKEN`, which by design does **not**
-> trigger another workflow, so the whole release is this one run (the version-bump
-> commit lands on `main` un-CI'd — acceptable for a one-line version change).
-
-### Manual (tag push)
-
-1. Bump `version` in `janitor-gui/Cargo.toml` and merge it to `main`.
-2. Tag and push the matching `v`-prefixed tag (`verify-version` fails the run if
-   the tag and crate version disagree):
+1. Bump `version` in [`janitor-app/Cargo.toml`](../janitor-app/Cargo.toml) and
+   merge it to `main`. The tag must equal it — the `version` job fails the run
+   otherwise, because the tag decides the URL and the manifest decides what the
+   framework's `Info.plist` says it is.
+2. Tag and push:
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag kit-v0.2.0
+   git push origin kit-v0.2.0
    ```
-3. Smoke-test the resulting draft, edit the notes, and **publish**.
+3. Read the checksum out of the run's job summary and put it, with the URL, into
+   `JanitorKit/Package.swift` in
+   [`Circuit-Stitch/Janitor-macos`](https://github.com/Circuit-Stitch/Janitor-macos).
 
-### Dry run (no Release)
+**A version publishes once.** Every write goes out with `If-None-Match: *`, so S3
+refuses the call when the key is taken. A Rust change that the Mac shell needs
+requires a new `kit-vX.Y.Z` and a checksum bump — there is no republishing over
+the old one.
 
-Run the workflow (`workflow_dispatch`) with the version field **left empty** to
-build + upload all artifacts **without** any bump, tag, or Release — useful for
-validating a packaging change before cutting a release.
+## What the run does
 
-## Platform signing status
-
-### Windows — MSIX, auto-updating, signed-only, gated (ADR 0034)
-
-Windows ships an **MSIX** that auto-updates via Windows' built-in **App
-Installer** engine (ADR 0034, superseding the NSIS `.exe` of ADR 0022). The
-release job assembles the package with `makeappx` from
-[`janitor-gui/msix/AppxManifest.xml`](../janitor-gui/msix/AppxManifest.xml) + the
-built `janitor-gui.exe` + the committed icons, signs the `.msix` with Trusted
-Signing, and uploads it alongside a companion
-[`Janitor.appinstaller`](../janitor-gui/msix/Janitor.appinstaller).
-
-**Update model — manual only, zero background egress.** The `.appinstaller`
-carries **no `UpdateSettings`**, so App Installer never background-checks. The
-**sole** update trigger is the in-app **"Check for updates"** button (in
-**Settings**), which reads the `.appinstaller` URL only on click. The button
-reaches the linked URL via `…/releases/latest/download/Janitor.appinstaller` — so
-a **draft** release (not "latest") never advertises an update: the draft → review
-→ publish flow is the release gate. An available update installs on confirm; it is
-**intended** to apply the next time the user closes Janitor (no forced shutdown) —
-**to be confirmed in live verification** (the `None` install option may instead
-require a forced shutdown to replace the running package; ADR 0034 checklist (f)).
-On a non-MSIX build (e.g. dev `cargo run`) the button reports "unavailable in this build".
-
-> ⚠️ **Bootstrap gap — 0.1.3 NSIS users are NOT auto-updated.** Auto-update only
-> begins **once a user is on an MSIX build**. Moving from the shipped NSIS `0.1.3`
-> to the first MSIX build (e.g. `0.1.4`) is a **one-time manual reinstall of a
-> different package type**: download `Janitor.appinstaller` and **open it** — App
-> Installer installs the `.msix` **and** records the update URL, so future "Check
-> for updates" works. Installing the bare `.msix` directly does **not** wire up
-> updates (no recorded App Installer URI), so call out *open the `.appinstaller`*
-> specifically in the first MSIX release's notes. Also: under MSIX,
-> `%APPDATA%\Janitor` writes are virtualized into the package store, so the
-> existing NSIS install's `config.toml` (start URL, last pick) does **not** carry
-> over — a one-time re-enter (no secret implication; Config holds locations only).
-
-**No unsigned Windows artifact is ever produced or published** (ADR 0022 hard
-policy). The Windows job is *skipped* unless the `WINDOWS_SIGNING_ENABLED` repo
-variable is `true`; while skipped a release simply ships the Linux + macOS
-artifacts and stays green.
-
-Signing uses **Azure Trusted Signing** over **OIDC federation** (no stored
-secret — `azure/login` mints a token, `azure/trusted-signing-action` consumes it
-to sign the `.msix` directly). **Load-bearing:** the `AppxManifest.xml`
-`Publisher` (and the `.appinstaller` `Publisher`) **must exactly equal the Subject
-(`CN=…`) of the Trusted Signing certificate profile** or signing rejects the
-package. To turn signing on, set these repo **Variables** (Settings → Secrets and
-variables → Actions → Variables):
-
-| Variable | Value |
+| Job | What it proves |
 | --- | --- |
-| `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` | the federated app registration's IDs |
-| `AZURE_SIGNING_ENDPOINT` | region endpoint, e.g. `https://eus.codesigning.azure.net/` |
-| `AZURE_SIGNING_ACCOUNT` | Trusted Signing account name |
-| `AZURE_SIGNING_PROFILE` | certificate profile name |
-| `WINDOWS_SIGNING_ENABLED` | `true` |
+| `version` | The tag and `janitor-app`'s manifest agree |
+| `apple` | The framework builds on a macOS runner, publishes under `open/swift/janitor/<version>/`, and the Maven grant still stops at this artifact |
+| `fetched` | The zip downloads over `depot.circuitstitch.com` with no credentials, its checksum matches, and the slice carries the library, both `.swiftinterface` files, and the C header |
 
-Azure-side prerequisites (one-time): a Trusted Signing account + certificate
-profile; an Entra app registration with a **federated credential** for this repo
-(subject `repo:Circuit-Stitch/Janitor:ref:refs/tags/v*`); and the **Trusted
-Signing Certificate Profile Signer** role granted to that app on the signing
-account. Tracked in **#56**.
+The depot's own `publish-dummy.yml` proves the rest of the boundary once: a
+version cannot be published twice, a publisher cannot write outside its prefix,
+and a publisher cannot read or list.
 
-### macOS — unsigned for now (#57)
+## Credentials
 
-The `.dmg` is **not signed or notarized yet** (ADR 0022 amendment, 2026-06-09). On
-first open macOS Gatekeeper will say the app "cannot be opened because the
-developer cannot be verified." Until **#57** lands Developer ID signing +
-notarization, open it via **right-click → Open** (or
-`System Settings → Privacy & Security → Open Anyway`). The build is Apple-Silicon
-only for now; an Intel/universal build is a follow-up.
+There are none to rotate. The `apple` job asks GitHub for an OIDC token and
+trades it for the `depot-publisher-janitor` role. No AWS key is stored anywhere.
 
-## Maintaining the workflow
+The role, its prefix (`open/swift/janitor`), and the bucket are committed
+literals in the workflow's `env` block, matching the depot's no-tfvars
+convention. A workflow cannot read Terraform state, so they are duplicated from
+it. Run `tofu output` in the depot's `serve/` to check they still agree.
 
-- **Linux build deps** are duplicated from `ci.yml` (Slint links system libs at
-  build time). Keep the two lists in sync when the GUI's native deps change.
-- **rpm `Requires` vs deb `depends`** use different package names per distro and
-  live in `[package.metadata.generate-rpm.requires]` / `[package.metadata.packager.deb]`
-  in `janitor-gui/Cargo.toml`.
-- **Icons** are generated + committed (`janitor-gui/assets/gen-icons.sh`); the
-  packagers consume the committed PNG/`.ico` set, so no rasterizer is needed in CI.
+## Building it locally
+
+```bash
+rustup target add x86_64-apple-darwin      # aarch64-apple-darwin comes with the Mac
+./scripts/build-xcframework.sh
+```
+
+The script builds both Darwin slices, assembles the framework, verifies the
+emitted interfaces, and then links and runs a consumer against the finished
+slice. A stale autolink list in the modulemap fails there rather than in
+somebody's app. Full build and test commands are in
+[docs/building.md](building.md).

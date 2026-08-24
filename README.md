@@ -81,7 +81,7 @@ length is a deliberate, accepted side-channel — see the
 
 ## Status
 
-The GUI is live: it signs in to IAM Identity Center in a browser, runs guided
+The app is live: it signs in to IAM Identity Center in a browser, runs guided
 Discovery, and renders the masked drift matrix from real AWS — across two
 Providers (Secrets Manager Sets and remote `.env` files over SSM) and across
 regions. Both write engines are built and tested behind fakes + replay, but the
@@ -94,7 +94,7 @@ human-gated `live-verify-*-write` binaries while live verification finishes.
 | Zeroizing secret types — `Value` kept out of `Debug` / `Display` / logs | ✅ Implemented & tested |
 | `Config` load / save — atomic TOML write, locations only | ✅ Implemented & tested |
 | Comparison matrix (Aligned / Drift / Gap) + masked read model | ✅ Implemented & tested — [ADR 0009](docs/adr/0009-comparison-engine-result-model.md) / [0014](docs/adr/0014-drift-matrix-model-n-column-and-comparison-columns.md) |
-| `janitor-gui` — masked matrix, per-cell reveal, guided Discovery wizard, Manage window, region picker, in-app diagnostic log | ✅ Live on real AWS (`JANITOR_MOCK=1` for offline mock) — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) / [0013](docs/adr/0013-guided-discovery-in-gui-step-machine-and-manage-window.md) / [0015](docs/adr/0015-region-picker-and-cross-region-discovery.md) / [0017](docs/adr/0017-in-app-diagnostic-log-panel-and-zero-terminal-output.md) |
+| The shells — masked matrix, per-cell reveal, guided Discovery wizard, Manage window, region picker, in-app diagnostic log | ✅ Live on real AWS (`JANITOR_MOCK=1` for offline mock) — [ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md) / [0013](docs/adr/0013-guided-discovery-in-gui-step-machine-and-manage-window.md) / [0015](docs/adr/0015-region-picker-and-cross-region-discovery.md) / [0017](docs/adr/0017-in-app-diagnostic-log-panel-and-zero-terminal-output.md) |
 | Identity Center sign-in + per-Environment Credentials + GUI↔AWS worker bridge | ✅ Implemented & tested (logic vs. fakes; browser/SDK shell untested by design) — [ADR 0002](docs/adr/0002-identity-center-only-memory-only-auth.md) / [0010](docs/adr/0010-aws-adapter-crate-and-auth-object-model.md) / [0012](docs/adr/0012-gui-aws-bridge-worker-and-lazy-sign-in.md) |
 | Guided sign-in + Discovery — auto-discovered account / role / secret, remembered picks | ✅ Implemented & tested — [ADR 0011](docs/adr/0011-guided-sign-in-and-discovery.md) / [0026](docs/adr/0026-shared-discovery-orchestrator-in-core.md) |
 | **Secrets Manager Provider** (read) | ✅ Live in the matrix |
@@ -102,22 +102,42 @@ human-gated `live-verify-*-write` binaries while live verification finishes.
 | Non-stomping Secrets Manager write — staged-put + atomic CAS | ⚙️ Built & tested behind fakes/replay; read-only, reachable via `live-verify-sm-write` — [ADR 0001](docs/adr/0001-non-stomping-writes-via-staged-put-and-cas.md) |
 | Remote `.env` over SSM write — non-stomping, hash-guarded | ⚙️ Built & tested; read-only, reachable via `live-verify-ssm-write` — [ADR 0029](docs/adr/0029-remote-dotenv-write-via-interactive-pty-data-channel-stream.md) |
 | Read-write lock — writes unreachable until deliberately unlocked | ✅ Worker-enforced invariant — [ADR 0032](docs/adr/0032-wire-write-seam-to-provider-port-and-read-write-lock.md) |
-| Packaging + releases — Linux deb/rpm/AppImage, macOS dmg, Windows MSIX auto-update | ✅ v0.1.4 — [ADR 0007](docs/adr/0007-ci-and-distribution.md) / [0022](docs/adr/0022-packaging-cargo-packager-and-windows-signing.md) / [0034](docs/adr/0034-windows-auto-update-via-msix-and-app-installer.md) |
+| Packaging + releases — Linux deb/rpm/AppImage, macOS dmg, Windows MSIX auto-update | ✅ v0.1.4, released from `Janitor-slint` — [ADR 0007](docs/adr/0007-ci-and-distribution.md) / [0022](docs/adr/0022-packaging-cargo-packager-and-windows-signing.md) / [0034](docs/adr/0034-windows-auto-update-via-msix-and-app-installer.md) |
+| `JanitorKit.xcframework` — the core as a checksum-pinned SwiftPM binary target | ✅ Published to the depot on a `kit-vX.Y.Z` tag — [ADR 0035](docs/adr/0035-swiftui-macos-shell-over-uniffi.md) |
 
-The workspace is seven crates: `janitor-core` (offline bedrock — model,
-compare, `Config`, the `Provider` port, the Discovery orchestrator, the shared
-presentation seams), `janitor-app` (the worker and the AWS composition root;
-ADR 0035), `janitor-gui` (Slint), `janitor-aws-auth` (shared Identity Center auth
-base; ADR 0024), `janitor-aws` (Secrets Manager Provider), `janitor-ssm` (remote
-`.env` over SSM Provider; ADR 0025), and `janitor-mock` (offline canned-data
-Provider; ADR 0019). `cargo test --workspace` runs them all; ≥80% coverage gates
-cover the crates where correctness is proven (ADR 0010 §5, ADR 0016) — the
-browser / SDK / socket shells stay untested by design.
+The workspace is six crates: `janitor-core` (offline bedrock — model, compare,
+`Config`, the `Provider` port, the Discovery orchestrator, the shared
+presentation seams), `janitor-app` (the worker, the `Command` / `Event` protocol,
+the AWS composition root, and the UniFFI boundary; ADR 0035), `janitor-aws-auth`
+(shared Identity Center auth base; ADR 0024), `janitor-aws` (Secrets Manager
+Provider), `janitor-ssm` (remote `.env` over SSM Provider; ADR 0025), and
+`janitor-mock` (offline canned-data Provider; ADR 0019). `cargo test --workspace`
+runs them all; ≥80% coverage gates cover the crates where correctness is proven
+(ADR 0010 §5, ADR 0016) — the browser / SDK / socket shells stay untested by
+design.
+
+## Three repositories
+
+The core has two shells on two toolchains, so each shell has its own repository
+([ADR 0036](docs/adr/0036-three-repos-core-slint-shell-macos-shell.md)). Every
+ADR, `CONTEXT.md`, and the threat model stay here, because a decision log split
+across repositories is a decision log nobody reads.
+
+| Repository | Holds | Produces |
+| --- | --- | --- |
+| **`Janitor`** (this one) | the six crates, every ADR, `CONTEXT.md`, `THREAT-MODEL.md` | `JanitorKit.xcframework` on the depot |
+| [`Janitor-slint`](https://github.com/Circuit-Stitch/Janitor-slint) | the Slint shell | rpm, deb, AppImage, dmg, MSIX |
+| [`Janitor-macos`](https://github.com/Circuit-Stitch/Janitor-macos) | the SwiftUI shell and its Xcode project | the Mac App Store build |
+
+`Janitor-slint` takes the core by Cargo path from a checkout beside it, so a core
+change is picked up on the next build with nothing to publish and nothing to
+bump. `Janitor-macos` takes it as `JanitorKit.xcframework`, pinned by URL and
+checksum, because a binary target is the only way an Xcode project can take Rust.
 
 ## Install
 
-Prebuilt bundles ship on the
-[Releases page](https://github.com/Circuit-Stitch/Janitor/releases):
+Prebuilt bundles ship on
+[`Janitor-slint`'s Releases page](https://github.com/Circuit-Stitch/Janitor-slint/releases):
 
 - **Linux** — `.deb`, `.rpm`, or `.AppImage`
 - **macOS** — `.dmg` (Apple Silicon)
@@ -130,9 +150,9 @@ AWS calls. You bring your own IAM Identity Center org — see
 
 ## Build & test
 
-Standard Cargo across the seven-crate workspace. Linux needs a few Slint system
-dependencies first; full commands (build, test, coverage, the GUI, and the
-human-gated live-verify binaries) live in
+Standard Cargo across the six-crate workspace. No crate here links a GUI toolkit,
+so a Linux build needs no extra system packages. Full commands — build, test,
+coverage, the xcframework, and the human-gated live-verify binaries — live in
 **[docs/building.md](docs/building.md)**.
 
 ## Architecture
@@ -141,7 +161,7 @@ Crates split along a trust boundary
 ([ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md)). The
 security-critical logic lives in `core` and the Provider crates behind a
 `Provider` port ([ADR 0019](docs/adr/0019-provider-port-in-core-and-janitor-mock-crate.md));
-the GUI is a thin, softer-trust view:
+a shell is a thin, softer-trust view:
 
 - **`janitor-core`** *(trusted)* — no GUI deps: the secret-shape model,
   zeroizing in-memory types, `Config`, the comparison engine, the write-seam
@@ -159,10 +179,11 @@ the GUI is a thin, softer-trust view:
   Manager backend, the remote-`.env`-over-SSM backend, and the offline mock.
   Network / SDK / socket I/O sits behind seams so the logic stays mockable and
   the coverage gates stay reachable.
-- **`janitor-gui`** *(softer-trust)* — a thin [Slint](https://slint.dev) view:
-  the masked comparison matrix, momentary per-cell reveal, the Discovery wizard,
-  the Manage window, and an in-app diagnostic log. No auth / AWS / compare /
-  write logic lives here. It names no adapter crate; it drives `janitor-app`.
+- **The shells** *(softer-trust)* — thin views, each in its own repository: the
+  masked comparison matrix, momentary per-cell reveal, the Discovery wizard, the
+  Manage window, and an in-app diagnostic log. No auth / AWS / compare / write
+  logic lives in either. Neither names an adapter crate; both drive
+  `janitor-app`.
 
 ## Non-negotiable invariants
 
@@ -204,6 +225,8 @@ New hard-to-reverse decisions get an ADR; new domain terms go in CONTEXT.md. See
 
 ## License
 
-[GPL-3.0-only](LICENSE). The GUI builds on [Slint](https://slint.dev) under its
-GPL terms, so the project is GPL throughout
-([ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md)).
+[GPL-3.0-only](LICENSE). The Slint shell builds on [Slint](https://slint.dev)
+under its GPL terms, so the project is GPL throughout
+([ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md)). The
+obligation follows `JanitorKit.xcframework` into whichever repository consumes
+it, because it is compiled from these crates.

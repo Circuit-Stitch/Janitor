@@ -20,18 +20,6 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
 
-      # janitor-gui (Slint) links system libraries at build time; the workspace
-      # clippy/build below needs them on the headless runner (ADR 0007).
-      - name: Install Slint Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libfontconfig1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
@@ -43,7 +31,7 @@ jobs:
 
       # Run every crate's tests, including janitor-aws's brokering / orchestration
       # / error unit tests (driven by fakes — no real AWS). This is the functional
-      # gate for the whole workspace; the coverage gate below stays core-only.
+      # gate for the whole workspace; the coverage gates below are per-crate.
       # `--all-features` is what puts janitor-app's UniFFI boundary in the gate:
       # the ffi module is behind an optional feature, so its round-trip tests do
       # not run without it (ADR 0035, #95).
@@ -55,11 +43,10 @@ jobs:
 
       # Per-crate coverage gates, enforced here (not by Codecov) so build
       # pass/fail stays inside this workflow — ADR 0016. Each run gates ≥80% and
-      # emits an lcov for the badge. Two crates are excluded. janitor-gui is the
-      # thin view, with no secret logic (ADR 0003). janitor-app is the worker's
-      # I/O loop and the AWS composition root, untested by design (ADR 0010 §5);
-      # it sat inside the ungated janitor-gui until #96 moved it out, and it
-      # measures 80.2% today, which is too thin a margin to gate on.
+      # emits an lcov for the badge. One crate is excluded: janitor-app is the
+      # worker's I/O loop and the AWS composition root, untested by design
+      # (ADR 0010 §5); it sat inside the ungated janitor-gui until #96 moved it
+      # out, and it measures 80.2% today, which is too thin a margin to gate on.
       # janitor-aws is gated on its *library* surface:
       # `src/bin/` holds the run-on-demand harnesses (live-verify, loopback-spike,
       # 0% by design), so they're dropped; the untestable SDK shell stays in.

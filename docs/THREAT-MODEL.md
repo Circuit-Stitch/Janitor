@@ -28,9 +28,12 @@ visibility** across Environments.
 
 1. **`janitor-core` (trusted)** — holds Values in zeroizing buffers, runs the
    safe-write engine, talks to AWS. The part we test to ≥80% and trust most.
-2. **`janitor-gui` (softer zone)** — when a Value is revealed/edited, plaintext
-   transiently lives in Slint widget state and, on copy, the OS clipboard.
-   Cleared on blur/close/timeout; accepted as inherent to *displaying* a secret.
+2. **The shells (softer zone)** — when a Value is revealed/edited, plaintext
+   transiently lives in widget state and, on copy, the OS clipboard. Cleared on
+   blur/close/timeout; accepted as inherent to *displaying* a secret. This
+   applies to both: the Slint shell in `Circuit-Stitch/Janitor-slint` and the
+   SwiftUI shell in `Circuit-Stitch/Janitor-macos` (ADR 0036). Neither carries
+   secret logic, so the boundary is the same shape in each.
 3. **The host OS / display surface (outside our control)** — framebuffer, GPU,
    screenshots, accessibility APIs, clipboard managers. Janitor cannot defend
    below this line (see non-goals).
@@ -120,8 +123,8 @@ visibility** across Environments.
 - **Renamed-key drift.** Entries compare by exact Name. `GITHUB_TOKEN` in one
   Environment and `GITHUB_APP_TOKEN` in another show as two separate **Gaps**, not
   a rename. v1 accepts this.
-- **GUI is a softer zone than core** (boundary 2 above): transient plaintext in
-  widget/clipboard state is inherent to displaying a secret.
+- **A shell is a softer zone than core** (boundary 2 above): transient plaintext
+  in widget/clipboard state is inherent to displaying a secret.
 - **Windows auto-update is a remote-code-install surface — but manual-only egress
   (ADR 0034).** The Windows MSIX gains a network update channel: a "Check for
   updates" button can fetch and install a new signed package. Two deliberate

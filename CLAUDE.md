@@ -2,12 +2,44 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Latest: JanitorKit is published, and the SwiftUI shell drives the real core
+> **Latest: the Slint shell moved out to `Circuit-Stitch/Janitor-slint`
+> (#106, ADR 0036 Amendment 2026-08-24).** `janitor-gui` is gone from this
+> workspace. `git subtree split` rooted its 72 commits at the new repository's
+> root, so the shell kept its real history and is that repository's **root
+> package**, not a member of a workspace. It takes `janitor-core`, `janitor-app`,
+> and `janitor-mock` by **Cargo path to a sibling checkout** — Gonger's pattern.
+> Cargo cannot fetch a binary over plain HTTPS, so the depot is unreachable from
+> Rust, and a path keeps "nothing to publish, nothing to bump" for the shell that
+> moves with the core. Its CI checks this repository out beside it through
+> `.github/actions/checkout-core`, the `checkout-wire` shape. **The whole desktop
+> release lane moved** — `release.yml` (rpm, deb, AppImage, dmg, signed MSIX),
+> `setup`, `verify-version`, `oidc-smoke.yml`, `.github/release-body.md`, the
+> Azure signing variables, and `docs/RELEASING.md`. **The version authority moved
+> with it:** `vX.Y.Z` now reads `Janitor-slint/Cargo.toml` and stops describing
+> the core. This repository keeps test, clippy, and the five coverage gates, plus
+> `publish.yml`'s `kit-vX.Y.Z` lane, and its `docs/RELEASING.md` is now about that
+> lane only. **The macOS `.dmg` stays** in `Janitor-slint`, by owner decision: a
+> Mac user who wants the Slint build rather than the SwiftUI one has somewhere to
+> get it. Two paths changed because the crate is no longer a workspace member —
+> the rpm `source` entries lost their `janitor-gui/` prefix, and the MSIX update
+> URL points at the new repository. That last one **breaks "Check for updates" for
+> anyone on 0.1.4**, who needs a one-time manual reinstall; `Janitor-slint`'s
+> `docs/RELEASING.md` carries it, the same shape as the earlier NSIS → MSIX gap.
+> **Still pending:** the Azure federated credential names
+> `repo:Circuit-Stitch/Janitor:environment:release`, so a credential for
+> `repo:Circuit-Stitch/Janitor-slint:environment:release` has to be added in the
+> Entra app registration before a Windows release can sign; `oidc-smoke.yml`
+> confirms it in ~30s. The 47 view tests pass unchanged; workspace tests 583 →
+> 536. Design:
+> [`docs/adr/0036-three-repos-core-slint-shell-macos-shell.md`](docs/adr/0036-three-repos-core-slint-shell-macos-shell.md)
+> (Amendment 2026-08-24).
+>
+> **JanitorKit is published, and the SwiftUI shell drives the real core
 > (#105/#104/#97, ADR 0035 Amendment 2026-08-24).**
 > `scripts/build-xcframework.sh` builds `JanitorKit.xcframework` — one
 > `macos-arm64_x86_64` slice carrying the Rust archive and the UniFFI-generated
 > Swift compiled over it — and `.github/workflows/publish.yml` publishes it to the
-> depot on a `kit-vX.Y.Z` tag (its own lane: `release.yml`'s `vX.Y.Z` versions
+> depot on a `kit-vX.Y.Z` tag (its own lane: `Janitor-slint`'s `vX.Y.Z` versions
 > `janitor-gui`, this one versions `janitor-app`). **The framework is one
 > mixed-language module, not two.** UniFFI emits 48 public
 > `FfiConverterType*_lift`/`_lower` functions taking a `RustBuffer`, so the C module
@@ -346,8 +378,9 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
   deliberately switches into (lockable) read-write mode. v1 ships read-only.
 - **Auth is Identity Center only, memory-only.** Browser Sign-in each launch; no
   static keys; role Credentials refreshed silently from the SSO token (ADR 0002).
-- **`core` holds the secrets logic; the GUI is a thin, softer-trust view.** Don't
-  push auth/AWS/compare/write logic into `janitor-gui` (ADR 0003).
+- **`core` holds the secrets logic; a shell is a thin, softer-trust view.** Don't
+  push auth/AWS/compare/write logic into either shell (ADR 0003). Both shells
+  live in their own repositories (ADR 0036).
 
 ## Architecture (target)
 
@@ -366,10 +399,13 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
   `JanitorKit` as a checksum-pinned SwiftPM binary target and never compiles
   Rust. Set `JANITORKIT_LOCAL=1` to build it against this repository's
   `build/apple/JanitorKit.xcframework` instead of the published zip.
-- **`janitor-gui`** — thin Slint (GPL) view: the comparison matrix (sortable,
-  filterable by Entry name incl. prefix clusters), masked cells with momentary
-  per-cell reveal, confirm-diff dialogs, browser launch. No secret logic. It
-  names no adapter crate; it drives `janitor-app`.
+- **`Janitor-slint`** — the thin Slint (GPL) view, in its own repository: the
+  comparison matrix (sortable, filterable by Entry name incl. prefix clusters),
+  masked cells with momentary per-cell reveal, confirm-diff dialogs, browser
+  launch. No secret logic. It names no adapter crate; it drives `janitor-app`. It
+  takes the core by Cargo path from a checkout beside this one, so it does not
+  build from a clean clone alone. It also owns the desktop release lane and the
+  `vX.Y.Z` version authority.
 
 ## Commands
 
@@ -378,7 +414,7 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
 
 ```bash
 cargo build                       # build the workspace
-cargo test --workspace            # all crates (core + app + gui + janitor-aws fakes)
+cargo test --workspace            # all crates (core + app + janitor-aws fakes)
 cargo test --workspace --all-features   # + janitor-app's UniFFI boundary tests (what CI runs)
 cargo test -p janitor-core <name> # a single core test (substring match)
 cargo test -- --nocapture         # show test stdout/stderr
@@ -386,9 +422,12 @@ cargo clippy --all-targets        # lint
 cargo fmt                         # format
 cargo llvm-cov -p janitor-core    # core coverage (≥80% gate)
 cargo llvm-cov -p janitor-aws --ignore-filename-regex 'src/bin/'  # aws lib coverage (≥80% gate, ADR 0016)
-cargo run -p janitor-gui          # real AWS via the worker bridge (browser sign-in; needs a configured org)
-$env:JANITOR_MOCK=1; cargo run -p janitor-gui   # offline mock — Windows PowerShell
-JANITOR_MOCK=1 cargo run -p janitor-gui         # offline mock — bash
+
+# Running a shell (#106): both live in their own repositories, checked out beside
+# this one. The Slint one takes the core by Cargo path.
+cd ../Janitor-slint && cargo run          # real AWS via the worker bridge (browser sign-in)
+JANITOR_MOCK=1 cargo run                  # offline mock — bash
+$env:JANITOR_MOCK=1; cargo run            # offline mock — Windows PowerShell
 
 # Swift bindings for the UniFFI boundary (ADR 0035 / #95). On macOS it also
 # compiles the generated Swift as module JanitorKit and verifies the interface.
@@ -401,8 +440,8 @@ rustup target add x86_64-apple-darwin      # aarch64-apple-darwin comes with the
 ./scripts/build-xcframework.sh
 
 # Publishing it: tag kit-vX.Y.Z, which must equal janitor-app's crate version.
-# That is a different lane from vX.Y.Z, which versions janitor-gui's desktop
-# packages. Needs the depot publisher role (#105) to exist first.
+# That is a different lane from Janitor-slint's vX.Y.Z, which versions that
+# repository's desktop packages. Needs the depot publisher role (#105).
 git tag kit-v0.1.0 && git push origin kit-v0.1.0
 
 # janitor-aws human-gated binaries (ADR 0010 Milestone B — need a browser):
