@@ -12,7 +12,7 @@
 > credentials of its own — it borrows them on demand and forgets them. The name
 > is the thesis: the janitor holds the most keys, yet keeps none.
 
-**License:** [GPL-3.0-only](LICENSE) · **Status:** v0.1.4 released (Linux ·
+**License:** [Apache-2.0](LICENSE) · **Status:** v0.1.4 released (Linux ·
 macOS · Windows MSIX with auto-update). The masked drift matrix reads real AWS —
 Secrets Manager Sets and remote `.env` files over SSM (offline mock behind
 `JANITOR_MOCK=1`). Both write engines are built and tested but the app ships
@@ -227,8 +227,15 @@ New hard-to-reverse decisions get an ADR; new domain terms go in CONTEXT.md. See
 
 ## License
 
-[GPL-3.0-only](LICENSE). The Slint shell builds on [Slint](https://slint.dev)
-under its GPL terms, so the project is GPL throughout
-([ADR 0003](docs/adr/0003-core-gui-split-slint-and-secret-display.md)). The
-obligation follows `JanitorKit.xcframework` into whichever repository consumes
-it, because it is compiled from these crates.
+[Apache-2.0](LICENSE). Copyright 2026 Circuit Stitch.
+
+The Slint shell is the exception. It links [Slint](https://slint.dev) under
+Slint's GPLv3 option, so
+[Janitor-slint](https://github.com/Circuit-Stitch/Janitor-slint) stays
+GPL-3.0-only and its Linux and Windows binaries are conveyed under GPLv3.
+Apache-2.0 code may be combined into a GPLv3 work, so these crates reach that
+shell unchanged.
+
+No crate here depends on the Slint shell, so no GPL obligation reaches the core
+or `JanitorKit.xcframework`
+([ADR 0037](docs/adr/0037-apache-2-0-replaces-gpl-3-0-only.md)).

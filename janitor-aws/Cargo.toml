@@ -2,7 +2,7 @@
 name = "janitor-aws"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 description = "Janitor's Secrets Manager Provider tail: GetSecretValue I/O + the SM Discovery walk over the shared janitor-aws-auth base (ADR 0010 / ADR 0024)."
 
 [dependencies]

@@ -399,7 +399,9 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
   `JanitorKit` as a checksum-pinned SwiftPM binary target and never compiles
   Rust. Set `JANITORKIT_LOCAL=1` to build it against this repository's
   `build/apple/JanitorKit.xcframework` instead of the published zip.
-- **`Janitor-slint`** — the thin Slint (GPL) view, in its own repository: the
+- **`Janitor-slint`** — the thin Slint view, in its own repository. It links
+  Slint, so it is the one GPL-3.0-only component; everything else is Apache-2.0.
+  It holds the
   comparison matrix (sortable, filterable by Entry name incl. prefix clusters),
   masked cells with momentary per-cell reveal, confirm-diff dialogs, browser
   launch. No secret logic. It names no adapter crate; it drives `janitor-app`. It

@@ -69,3 +69,17 @@ reversible choice — a future re-skin rewrites only `janitor-gui`.
 - **Slint licensed under GPL.** Janitor adopts Slint's royalty-free GPLv3
   option; Janitor itself is therefore GPL. This is acceptable for the project and
   removes the open licensing question.
+
+## Amendment 2026-08-24 — the GPL was scoped to the Slint shell (ADR 0037)
+
+This ADR made the whole project GPL because the GUI was GPL. That went further
+than the dependency required.
+
+Slint reaches `janitor-gui` and nothing else. No crate depends on `janitor-gui`,
+so Slint's GPL never propagated into the core. Making the core GPL was a policy
+choice, and GPLv3 later blocked the Mac App Store.
+
+The core is now Apache-2.0. The Slint shell stays GPL-3.0-only, because it still
+links Slint under the option this ADR chose. That part of the decision stands.
+
+See [ADR 0037](0037-apache-2-0-replaces-gpl-3-0-only.md).

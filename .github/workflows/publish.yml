@@ -103,6 +103,13 @@ jobs:
           checksum=$(cat build/apple/JanitorKit.xcframework.zip.sha256)
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
 
+      # The shell that displays this list compiles no Rust and has no
+      # Cargo.lock, so it cannot work out what it links. Generated here and
+      # published beside the zip, it stays pinned to the bytes it describes.
+      - name: Generate the third-party notices
+        run: |
+          ./scripts/third-party-licenses.py build/apple/THIRD-PARTY-LICENSES.txt
+
       - name: Assume the publisher role
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -132,6 +139,16 @@ jobs:
             --if-none-match '*' \
             --content-type 'text/plain; charset=utf-8' \
             --body build/apple/JanitorKit.xcframework.zip.sha256
+
+          # The notices for everything compiled into the zip. Janitor-macos
+          # commits a copy of this file when it bumps the version and the
+          # checksum, and shows it in the Acknowledgments window.
+          aws s3api put-object \
+            --bucket "$BUCKET" \
+            --key "$SWIFT_PREFIX/$VERSION/THIRD-PARTY-LICENSES.txt" \
+            --if-none-match '*' \
+            --content-type 'text/plain; charset=utf-8' \
+            --body build/apple/THIRD-PARTY-LICENSES.txt
 
           echo "published JanitorKit.xcframework.zip"
 

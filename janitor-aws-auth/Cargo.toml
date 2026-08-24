@@ -2,7 +2,7 @@
 name = "janitor-aws-auth"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 description = "Janitor's shared AWS Identity Center access layer: browser Sign-in, account/role catalog, and credential brokering (ADR 0024)."
 
 [features]

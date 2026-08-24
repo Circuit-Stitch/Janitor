@@ -2,7 +2,7 @@
 name = "janitor-core"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 description = "Security-critical core for Janitor: secret-shape model, zeroizing types, and config."
 
 [dependencies]

@@ -42,6 +42,7 @@ lives in these files.
 | [0034](0034-windows-auto-update-via-msix-and-app-installer.md) | Windows auto-update via MSIX and App Installer |
 | [0035](0035-swiftui-macos-shell-over-uniffi.md) | SwiftUI macOS shell over the Rust core via UniFFI |
 | [0036](0036-three-repos-core-slint-shell-macos-shell.md) | Three repositories: the core, the Slint shell, and the macOS shell |
+| [0037](0037-apache-2-0-replaces-gpl-3-0-only.md) | Apache-2.0 replaces GPL-3.0-only. The Slint shell stays GPL because it links Slint. |
 
 New hard-to-reverse decisions get the next number here. See
 [CLAUDE.md](../../CLAUDE.md) for the conventions.

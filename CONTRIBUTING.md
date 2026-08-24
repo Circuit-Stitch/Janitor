@@ -66,6 +66,6 @@ PRs are welcome. Before opening one:
 ## Ground rules
 
 Be decent. Don't submit malicious code, anything that exfiltrates data, or
-changes that weaken the security posture without saying so loudly. This is a
-GPL-3.0 project ([LICENSE](LICENSE)); by contributing you agree your work is
-licensed under the same terms.
+changes that weaken the security posture without saying so loudly. This is an
+Apache-2.0 project ([LICENSE](LICENSE)); by contributing you agree your work is
+licensed under the same terms, as Apache-2.0 section 5 sets out.

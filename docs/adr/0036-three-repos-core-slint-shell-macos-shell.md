@@ -122,7 +122,10 @@ shell in its own repository from the first line.
   `Janitor`. Shell issues move when their repository exists.
 - **The license question is unchanged.** `JanitorKit.xcframework` is compiled
   from GPL-3.0-only crates, so the obligation follows the artifact into whichever
-  repository consumes it. Splitting repositories does not answer it.
+  repository consumes it. Splitting repositories does not answer it. Answered on
+  2026-08-24: those crates are Apache-2.0
+  ([ADR 0037](0037-apache-2-0-replaces-gpl-3-0-only.md)), and the framework
+  carries no Slint.
 - **Three repositories need three sets of branch protection, labels, and CI
   secrets.** The Azure signing variables follow the MSIX to `Janitor-slint`. The
   depot publisher role stays with `Janitor`.

@@ -2,7 +2,7 @@
 name = "janitor-ssm"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-only"
+license = "Apache-2.0"
 description = "Janitor's remote-.env-over-SSM Provider (ADR 0025): the SSM Discovery tail (instance → .env path → read+parse) over the shared janitor-aws-auth base, a pure .env → SecretShape parser, and a pure-Rust Session Manager (MGS) data-channel transport (B4)."
 
 # Second real Provider (ADR 0025). Depends on janitor-core (domain + Provider

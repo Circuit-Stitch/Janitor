@@ -218,6 +218,9 @@ binary.
 - **`GPL-3.0-only` is still declared on all six crates.** Dropping Slint from the
   macOS build removes the cause of the GPL, not the license. Relicensing is a
   separate decision and is feasible: one copyright holder across 232 commits.
+  Settled on 2026-08-24: the core is Apache-2.0
+  ([ADR 0037](0037-apache-2-0-replaces-gpl-3-0-only.md)). Slint was never the
+  cause for the core, which does not depend on the Slint shell.
 - **The macOS build is universal by default.** A macOS Release archive carries
   `arm64` and `x86_64`, and the `macos-arm64_x86_64` xcframework slice must carry
   both to match. Today's `.dmg` is Apple Silicon only. Decide this once and set it
