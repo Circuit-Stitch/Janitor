@@ -131,8 +131,10 @@ across repositories is a decision log nobody reads.
 
 `Janitor-slint` takes the core by Cargo path from a checkout beside it, so a core
 change is picked up on the next build with nothing to publish and nothing to
-bump. `Janitor-macos` takes it as `JanitorKit.xcframework`, pinned by URL and
-checksum, because a binary target is the only way an Xcode project can take Rust.
+bump. **It does not build from a clean clone alone** — it needs this repository
+checked out next to it. `Janitor-macos` takes the core as
+`JanitorKit.xcframework`, pinned by URL and checksum, because a binary target is
+the only way an Xcode project can take Rust.
 
 ## Install
 
