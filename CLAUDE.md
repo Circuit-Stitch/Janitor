@@ -32,10 +32,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > lost its ~250 lines of rule copies to become a scripted fixture over an in-memory
 > `ConfigStore`; its tests kept their assertions and now pin the real rules. 83
 > Swift tests pass, three of them driving the Rust worker end to end over the FFI.
-> Rust 572 → 583; core coverage 95.93% → 96.03%. **Still pending:** the depot tenant
-> apply (#105 — the terraform is written, `tofu plan` needs an AWS session) and the
-> first `kit-v0.1.0` tag, after which `JanitorKit/Package.swift` swaps its local
-> checksum for the published one. Design:
+> Rust 572 → 583; core coverage 95.93% → 96.03%. **The rail is live end to end:** the
+> depot tenant is applied (role `depot-publisher-janitor`, prefix `open/swift/janitor`),
+> tag `kit-v0.1.0` published `JanitorKit.xcframework.zip`, and
+> `JanitorKit/Package.swift` pins the checksum that run printed. The 83 Swift tests pass
+> against the fetched slice with `JANITORKIT_LOCAL` unset, so the default route is the
+> depot. **Still pending:** the UI test lane has only run against a local build, and a
+> version publishes once — a Rust change needs a new `kit-vX.Y.Z` and a checksum bump.
+> **Next:** #106, the `Janitor-slint` split. Design:
 > [`docs/adr/0035-swiftui-macos-shell-over-uniffi.md`](docs/adr/0035-swiftui-macos-shell-over-uniffi.md)
 > (Amendment 2026-08-24).
 >
