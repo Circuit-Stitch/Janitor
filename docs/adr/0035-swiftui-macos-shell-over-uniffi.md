@@ -344,3 +344,67 @@ bindings that link and then misbehave.
 Still open for #97: `Config` crosses as a record, but nothing exports
 `Config::load` or `Config::save`. The tracer bullet is what needs them, and it is
 what will show whether `ConfigError` should cross as a thrown error.
+
+## Amendment 2026-08-24 — the artifact, and the shell on top of it
+
+`JanitorKit.xcframework` is built, published on a tag, and driven by the SwiftUI
+shell. Four decisions were forced during the build and are recorded here.
+
+**The framework is one module, not two.** ADR 0035 assumed Gonger's shape: the
+Swift compiled over the Rust, with the C module hidden behind an internal import.
+That does not work here. UniFFI generates 48 `FfiConverterType*_lift`/`_lower`
+functions that are public and take a `RustBuffer`, so the C module cannot be an
+internal import and cannot be kept out of the interface. The framework is instead
+a mixed-language one: the C header is the framework's own clang module, the
+generated Swift is compiled with `-import-underlying-module`, and both halves are
+called `JanitorKit`. `import JanitorKit` gets both. UniFFI's `--xcframework` flag
+emits exactly this modulemap, so this is the shape UniFFI expects.
+
+**The framework declares the system libraries it needs.** rustc records native
+libraries in an rlib and not in a staticlib, so a consumer would otherwise link
+twelve frameworks by hand. `scripts/build-xcframework.sh` writes them into the
+modulemap as autolink directives. The list comes from rustc rather than from
+guesswork — `cargo rustc … -- --print native-static-libs` prints it — and
+`AuthenticationServices` and `AppKit` are on it because the browser Sign-in drives
+`ASWebAuthenticationSession` through objc2. The script's last step compiles and
+runs a consumer against the finished slice, so a stale list fails the build rather
+than somebody's app.
+
+**Config crosses through an object, and its failures are thrown.** ADR 0035 left
+this open. `Config` is a record, so it crosses by value; a shell holding its own
+copy would be the place a Mapping is assembled and the place two copies disagree.
+`ConfigStore` is a UniFFI object holding the one copy: reads answer from it and
+writes run the core's own rule — the duplicate-Environment refusal, the blank-name
+refusal, the column-width floor — and then save. `ConfigError` crosses as
+`ConfigFailure`, a thrown error carrying either `NoConfigDir` or a reason string.
+The string is safe to show: Config holds locations and view preferences and cannot
+structurally hold a Value. A second constructor builds a store that never writes,
+which is what `JANITOR_MOCK=1` and the test suite use, so neither can overwrite a
+real operator's Applications.
+
+**The kit has its own tag lane.** `release.yml` tags `vX.Y.Z` off `janitor-gui`'s
+version and ships the Linux and Windows packages. `publish.yml` tags `kit-vX.Y.Z`
+off `janitor-app`'s version and publishes the xcframework. They version different
+things, and a shared tag would republish one every time the other moved.
+
+**Two rules moved out of the Slint shell.** `Method::label`, `Method::full_name`,
+`Method::from_index`, and `What::prompt` were bin-local functions in
+`janitor-gui`, which no other shell could reach. They are on the types in
+`janitor-core` now, and both shells read them. `pane::LoadStatus` is a typed
+second door onto `main_pane`, so a shell that can hold an enum need not push a
+string.
+
+**The SwiftUI shell drives the real core.** `Protocol.swift` — the hand-written
+copy of the command and event vocabulary — is deleted, and the generated types are
+what the views use. Three names are aliased, because `Method` shadows the
+Objective-C runtime's `Method` for a whole module, and `Command` and `Event` read
+badly beside SwiftUI's own vocabulary. `StubCore` survives as a test fixture with
+its rule copies removed: it scripts events and holds an in-memory `ConfigStore`,
+so every rule it enforces is the Rust one. Its tests kept their assertions and now
+pin the real rules.
+
+**Every enum arrives non-frozen.** Library evolution means Swift treats a
+JanitorKit enum as able to gain a case, so every switch over one carries an
+`@unknown default`. Each one is a real decision about what to draw or do for a
+case this build cannot name, not padding: an unknown cell draws as absent, an
+unknown event reaches the Diagnostic Log.

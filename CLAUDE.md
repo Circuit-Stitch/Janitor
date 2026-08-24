@@ -2,7 +2,44 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Latest: the UniFFI boundary landed in `janitor-app` (#95, ADR 0035 Amendment
+> **Latest: JanitorKit is published, and the SwiftUI shell drives the real core
+> (#105/#104/#97, ADR 0035 Amendment 2026-08-24).**
+> `scripts/build-xcframework.sh` builds `JanitorKit.xcframework` — one
+> `macos-arm64_x86_64` slice carrying the Rust archive and the UniFFI-generated
+> Swift compiled over it — and `.github/workflows/publish.yml` publishes it to the
+> depot on a `kit-vX.Y.Z` tag (its own lane: `release.yml`'s `vX.Y.Z` versions
+> `janitor-gui`, this one versions `janitor-app`). **The framework is one
+> mixed-language module, not two.** UniFFI emits 48 public
+> `FfiConverterType*_lift`/`_lower` functions taking a `RustBuffer`, so the C module
+> cannot be hidden the way Gonger hides `CWotSound`; the C header is the framework's
+> own clang module, the Swift is compiled `-import-underlying-module`, and both are
+> `JanitorKit`. The modulemap carries **autolink directives** for the twelve system
+> frameworks `--print native-static-libs` names (AppKit and AuthenticationServices
+> among them, from the `ASWebAuthenticationSession` sign-in), and the script's last
+> step **links and runs a consumer** against the finished slice, so a stale list
+> fails there rather than in somebody's app. **`Config` now crosses**, resolving
+> ADR 0035's open item: a `ConfigStore` UniFFI object holds the one copy and every
+> edit runs the core's own rule before saving, `ConfigError` crosses as a thrown
+> `ConfigFailure`, and an **in-memory constructor** means `JANITOR_MOCK=1` and the
+> test suite cannot touch a real `config.toml`. The boundary also gained the pure
+> rules (`matrix_items`, `display_name_parts`, `badge_label`, `state_glyph`,
+> `error_banner`, `pane_title`/`pane_body`, `choice_prompt`, `method_*`,
+> `summarize_edits`) and `apply_corrected_roles`. **Four rules left `janitor-gui`**
+> for core, where both shells reach them: `Method::{label,full_name,from_index}` and
+> `What::prompt`, plus a typed `pane::LoadStatus`. **In `Janitor-macos`,
+> `Protocol.swift` is deleted** — the generated types are what the views use, three
+> names are aliased (`Method` shadows the Objective-C runtime's), and `StubCore`
+> lost its ~250 lines of rule copies to become a scripted fixture over an in-memory
+> `ConfigStore`; its tests kept their assertions and now pin the real rules. 83
+> Swift tests pass, three of them driving the Rust worker end to end over the FFI.
+> Rust 572 → 583; core coverage 95.93% → 96.03%. **Still pending:** the depot tenant
+> apply (#105 — the terraform is written, `tofu plan` needs an AWS session) and the
+> first `kit-v0.1.0` tag, after which `JanitorKit/Package.swift` swaps its local
+> checksum for the published one. Design:
+> [`docs/adr/0035-swiftui-macos-shell-over-uniffi.md`](docs/adr/0035-swiftui-macos-shell-over-uniffi.md)
+> (Amendment 2026-08-24).
+>
+> **The UniFFI boundary landed in `janitor-app` (#95, ADR 0035 Amendment
 > 2026-08-21).** Swift drives the worker protocol directly: `Command` (10 in) and
 > `Event` (21 out) are exported, plus an `EventSink` foreign trait, a `Worker`
 > object (`start` + `send`), and `is_revealed` — so the un-mask-exactly-one rule
@@ -320,6 +357,11 @@ surface it loudly (see [THREAT-MODEL.md](docs/THREAT-MODEL.md)):
   the optional `uniffi` feature). It sits above the adapter crates because it
   names them all, which `janitor-core` cannot do (ADR 0035, Amendment
   2026-08-21). No coverage gate: it is the I/O loop and the composition root.
+  `JanitorKit.xcframework` is built from this crate.
+- **`Janitor-macos`** — the SwiftUI shell, in its own repository. It resolves
+  `JanitorKit` as a checksum-pinned SwiftPM binary target and never compiles
+  Rust. Set `JANITORKIT_LOCAL=1` to build it against this repository's
+  `build/apple/JanitorKit.xcframework` instead of the published zip.
 - **`janitor-gui`** — thin Slint (GPL) view: the comparison matrix (sortable,
   filterable by Entry name incl. prefix clusters), masked cells with momentary
   per-cell reveal, confirm-diff dialogs, browser launch. No secret logic. It
@@ -347,6 +389,17 @@ JANITOR_MOCK=1 cargo run -p janitor-gui         # offline mock — bash
 # Swift bindings for the UniFFI boundary (ADR 0035 / #95). On macOS it also
 # compiles the generated Swift as module JanitorKit and verifies the interface.
 ./scripts/generate-swift-bindings.sh
+
+# The Apple artifact (ADR 0035 / #104): JanitorKit.xcframework and its zip, into
+# build/apple. Needs full Xcode and both Darwin targets. It verifies the emitted
+# interfaces, then links and runs a consumer against the finished slice.
+rustup target add x86_64-apple-darwin      # aarch64-apple-darwin comes with the Mac
+./scripts/build-xcframework.sh
+
+# Publishing it: tag kit-vX.Y.Z, which must equal janitor-app's crate version.
+# That is a different lane from vX.Y.Z, which versions janitor-gui's desktop
+# packages. Needs the depot publisher role (#105) to exist first.
+git tag kit-v0.1.0 && git push origin kit-v0.1.0
 
 # janitor-aws human-gated binaries (ADR 0010 Milestone B — need a browser):
 # Identity Center org + permission-set setup for these: docs/iam_setup.md
