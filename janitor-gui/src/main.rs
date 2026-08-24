@@ -719,25 +719,6 @@ fn build_manage_window(state: &Rc<RefCell<AppState>>) -> ManageWindow {
     win
 }
 
-/// Short display label for a Mapping's [`Method`] (ADR 0031) — a location tag for
-/// the Manage window's Environment rows, never a Value.
-fn method_label(method: Method) -> &'static str {
-    match method {
-        Method::SecretsManager => "SM",
-        Method::SsmDotenv => "SSM",
-    }
-}
-
-/// Map the Manage-window picker index (0 = Secrets Manager, 1 = remote `.env`/SSM)
-/// to a [`Method`]; anything else falls back to the Secrets Manager default
-/// (ADR 0031 Decision 7).
-fn method_from_index(index: usize) -> Method {
-    match index {
-        1 => Method::SsmDotenv,
-        _ => Method::SecretsManager,
-    }
-}
-
 /// Start a guided walk for a typed Environment name on the bound Application, using
 /// the [`Method`] chosen in the per-row picker (ADR 0031). Region is the picker's
 /// browse region — `secret_region` else `sso_region` via [`region::browse_region`]
@@ -750,7 +731,7 @@ fn begin_discovery(state: &Rc<RefCell<AppState>>, env: String, method_index: usi
     let cmd = {
         let st = state.borrow();
         Command::BeginDiscovery {
-            method: method_from_index(method_index),
+            method: Method::from_index(method_index),
             environment: env,
             region: region::browse_region(&st.config).to_string(),
             remembered: st.config.last_pick.clone(),
@@ -859,15 +840,7 @@ fn set_manage_terminal(msg: &str) {
 /// the remembered default pre-selected. `labels` are presenter lines only
 /// (account `name (id)`, role, secret name) — never secret Values (THREAT-MODEL).
 fn set_manage_choice(what: What, labels: Vec<String>, default: Option<usize>) {
-    let prompt = match what {
-        What::Accounts => "Choose an account:",
-        What::Roles => "Choose a role:",
-        What::Secrets => "Choose a secret:",
-        What::Instances => "Choose an instance:",
-        // `FilePath` is posed as a free-text `Input`, not a list `Ask`, so it
-        // never reaches the picker; present for exhaustiveness only.
-        What::FilePath => "Choose a path:",
-    };
+    let prompt = what.prompt();
     let rows: Vec<SharedString> = labels.into_iter().map(Into::into).collect();
     MANAGE.with(|m| {
         if let Some(win) = m.borrow().as_ref() {
@@ -1031,7 +1004,7 @@ fn env_rows(config: &Config, selected: usize) -> ModelRc<EnvRow> {
                     region: m.region.clone().into(),
                     secret_id: m.secret_id.clone().into(),
                     permission_set: m.permission_set.clone().into(),
-                    method: method_label(m.method).into(),
+                    method: m.method.label().into(),
                 })
                 .collect()
         })
@@ -1554,21 +1527,6 @@ mod chrome_tests {
             kind: None,
             cells: Vec::new(),
         }
-    }
-
-    #[test]
-    fn method_picker_index_maps_to_the_method_and_back_to_a_label() {
-        // The Manage-window per-row picker (ADR 0031): index 0 = Secrets Manager
-        // (the back-compat default, also for any stray index), 1 = remote .env/SSM.
-        assert_eq!(method_from_index(0), Method::SecretsManager);
-        assert_eq!(method_from_index(1), Method::SsmDotenv);
-        assert_eq!(
-            method_from_index(99),
-            Method::SecretsManager,
-            "out-of-range falls back to the default"
-        );
-        assert_eq!(method_label(Method::SecretsManager), "SM");
-        assert_eq!(method_label(Method::SsmDotenv), "SSM");
     }
 
     #[test]

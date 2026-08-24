@@ -21,6 +21,44 @@ pub enum MainPane {
     Error,
 }
 
+/// Where the selected Application's load has got to.
+///
+/// [`main_pane`] has always taken this as a string, because the Slint shell keeps
+/// one in a property and pushes it. A shell that can hold a typed value should,
+/// so [`LoadStatus::as_token`] produces the same strings and
+/// [`main_pane_of`] takes the enum. Both routes reach the one decision below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadStatus {
+    /// Nothing has been asked for yet.
+    Idle,
+    /// Browser sign-in in flight.
+    SigningIn,
+    /// Fetching the selected Application's secrets.
+    Loading,
+    /// The matrix is current.
+    Loaded,
+    /// The load failed.
+    Failed,
+}
+
+impl LoadStatus {
+    /// The string form [`main_pane`] and [`crate::sidebar::sidebar_apps`] match on.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            LoadStatus::Idle => "idle",
+            LoadStatus::SigningIn => "signing",
+            LoadStatus::Loading => "loading",
+            LoadStatus::Loaded => "loaded",
+            LoadStatus::Failed => "error",
+        }
+    }
+}
+
+/// Decide the main pane from a typed status. The same decision as [`main_pane`].
+pub fn main_pane_of(status: LoadStatus, has_apps: bool) -> MainPane {
+    main_pane(status.as_token(), has_apps)
+}
+
 /// Decide the main pane. `has_apps` is `!Config.applications.is_empty()`.
 pub fn main_pane(status: &str, has_apps: bool) -> MainPane {
     match status {
@@ -86,6 +124,31 @@ impl MainPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_status_reaches_the_same_pane_as_its_token() {
+        // The enum is a second door onto one decision, not a second decision. A
+        // status whose token stopped matching would route a shell to SignIn while
+        // the other shell showed the matrix.
+        for status in [
+            LoadStatus::Idle,
+            LoadStatus::SigningIn,
+            LoadStatus::Loading,
+            LoadStatus::Loaded,
+            LoadStatus::Failed,
+        ] {
+            for has_apps in [false, true] {
+                assert_eq!(
+                    main_pane_of(status, has_apps),
+                    main_pane(status.as_token(), has_apps),
+                    "{status:?} with has_apps={has_apps}"
+                );
+            }
+        }
+        assert_eq!(main_pane_of(LoadStatus::Loaded, true), MainPane::Matrix);
+        assert_eq!(main_pane_of(LoadStatus::Loaded, false), MainPane::EmptyApps);
+        assert_eq!(main_pane_of(LoadStatus::Failed, true), MainPane::Error);
+    }
 
     #[test]
     fn pane_tokens_match_the_slint_arms() {

@@ -125,6 +125,23 @@ pub enum What {
     FilePath,
 }
 
+impl What {
+    /// The question a picker or a text field puts above itself. The walk decides
+    /// what it is asking for; this decides how that reads. Both shells render it.
+    ///
+    /// `FilePath` is posed as a free-text `Input` rather than a list `Ask`, so it
+    /// never titles a picker. It is here so every variant has an answer.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            What::Accounts => "Choose an account:",
+            What::Roles => "Choose a role:",
+            What::Secrets => "Choose a secret:",
+            What::Instances => "Choose an instance:",
+            What::FilePath => "Choose a path:",
+        }
+    }
+}
+
 /// What the guided walk is currently asking, or its terminal outcome (ADR 0013).
 /// `Ask` is presenter-ready: `choices` are the label lines to render in list
 /// order and `default` is the index to pre-select (the remembered pick, if still
@@ -251,6 +268,17 @@ pub trait Provider: Send {
 mod tests {
     use super::*;
     use crate::secret::SecretShape;
+
+    #[test]
+    fn every_walk_step_has_a_question() {
+        // The Slint shell built these inline. Both shells read them now (#97), so a
+        // What added without a prompt has to fail here rather than render blank.
+        assert_eq!(What::Accounts.prompt(), "Choose an account:");
+        assert_eq!(What::Roles.prompt(), "Choose a role:");
+        assert_eq!(What::Secrets.prompt(), "Choose a secret:");
+        assert_eq!(What::Instances.prompt(), "Choose an instance:");
+        assert_eq!(What::FilePath.prompt(), "Choose a path:");
+    }
 
     #[test]
     fn sign_in_failed_display_is_the_masked_message() {

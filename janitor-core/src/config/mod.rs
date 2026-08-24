@@ -153,6 +153,47 @@ pub struct Mapping {
     pub method: Method,
 }
 
+impl Method {
+    /// The short tag an Environment row shows (ADR 0031). A location tag, never a
+    /// Value. Both shells render it, so the mapping lives here rather than in
+    /// either one.
+    pub fn label(self) -> &'static str {
+        match self {
+            Method::SecretsManager => "SM",
+            Method::SsmDotenv => "SSM",
+        }
+    }
+
+    /// The full name, for the picker that chooses a Method before a walk starts.
+    pub fn full_name(self) -> &'static str {
+        match self {
+            Method::SecretsManager => "AWS Secrets Manager",
+            Method::SsmDotenv => "Remote .env over SSM",
+        }
+    }
+
+    /// Every Method, in the order a picker lists them. [`Method::from_index`] is the
+    /// inverse.
+    ///
+    /// A function rather than an associated `const`, because a `const` inside an `impl`
+    /// carries a coverage region that is never executed, and llvm-cov attributes it to
+    /// the lines that follow — which reported most of this file as unreached.
+    pub fn all() -> &'static [Method] {
+        &[Method::SecretsManager, Method::SsmDotenv]
+    }
+
+    /// Map a picker index to a Method. Index 0 is Secrets Manager and 1 is the
+    /// remote `.env`; anything else falls back to the Secrets Manager default, so
+    /// a picker that lost its selection cannot produce a Mapping with no method
+    /// (ADR 0031 Decision 7).
+    pub fn from_index(index: usize) -> Method {
+        match index {
+            1 => Method::SsmDotenv,
+            _ => Method::SecretsManager,
+        }
+    }
+}
+
 /// Errors loading or saving [`Config`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -259,6 +300,32 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_method_carries_its_own_labels_and_its_picker_index() {
+        // These moved out of janitor-gui, which had them as bin-local functions no
+        // other shell could reach (ADR 0035 / #97).
+        assert_eq!(Method::SecretsManager.label(), "SM");
+        assert_eq!(Method::SsmDotenv.label(), "SSM");
+        assert_eq!(Method::SecretsManager.full_name(), "AWS Secrets Manager");
+        assert_eq!(Method::SsmDotenv.full_name(), "Remote .env over SSM");
+
+        // ADR 0031 Decision 7: index 0 is the back-compat default, and so is any
+        // index the picker should never produce.
+        assert_eq!(Method::from_index(0), Method::SecretsManager);
+        assert_eq!(Method::from_index(1), Method::SsmDotenv);
+        assert_eq!(Method::from_index(99), Method::SecretsManager);
+    }
+
+    #[test]
+    fn every_method_appears_in_picker_order() {
+        // `all` is what a picker renders and `from_index` is what it sends back, so a
+        // Method added to one and not the other would pick the wrong backend.
+        assert_eq!(Method::all(), &[Method::SecretsManager, Method::SsmDotenv]);
+        for (index, method) in Method::all().iter().enumerate() {
+            assert_eq!(Method::from_index(index), *method);
+        }
+    }
 
     fn sample() -> Config {
         Config {
