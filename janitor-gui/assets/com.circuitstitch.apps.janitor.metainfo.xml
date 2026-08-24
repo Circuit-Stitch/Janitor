@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Shipped to /usr/share/metainfo (rpm) and /app/share/metainfo (Flatpak).
+     Validate: appstreamcli validate com.circuitstitch.apps.janitor.metainfo.xml -->
+<component type="desktop-application">
+  <id>com.circuitstitch.apps.janitor</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <name>Janitor</name>
+  <summary>Inspect drift across AWS secret sets</summary>
+
+  <developer id="com.circuitstitch">
+    <name>Circuit Stitch</name>
+  </developer>
+
+  <description>
+    <p>
+      Janitor is an ephemeral desktop client for AWS Secrets Manager. It stores
+      no secrets and no credentials of its own — it borrows them on demand over
+      Identity Center sign-in and forgets them when it closes.
+    </p>
+    <p>
+      It compares the same logical secret set across environments — prod,
+      staging, dev, possibly different accounts and regions — in a masked matrix
+      that flags every entry as:
+    </p>
+    <ul>
+      <li>Aligned — the same value everywhere</li>
+      <li>Drift — present everywhere but the values differ</li>
+      <li>Gap — missing in some environments (the high-signal config hole)</li>
+    </ul>
+    <p>
+      Values stay masked, with a momentary per-cell reveal. Janitor is
+      read-only by default; mutating a few entries is a deliberate,
+      compare-and-swap write that never overwrites the whole set.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.circuitstitch.apps.janitor.desktop</launchable>
+
+  <url type="homepage">https://github.com/Circuit-Stitch/Janitor</url>
+  <url type="bugtracker">https://github.com/Circuit-Stitch/Janitor/issues</url>
+  <url type="vcs-browser">https://github.com/Circuit-Stitch/Janitor</url>
+
+  <!-- Flathub requires at least one hosted screenshot. Commit the PNG and keep
+       this URL pointing at a stable raw path (or a release asset). -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>The masked drift matrix across environments</caption>
+      <image>https://raw.githubusercontent.com/Circuit-Stitch/Janitor/main/docs/screenshots/matrix.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.1" date="2026-06-24" type="stable">
+      <url>https://github.com/Circuit-Stitch/Janitor/releases/tag/v0.1.1</url>
+      <description>
+        <p>Drift matrix, guided Identity Center sign-in and discovery, and the SSM remote-.env provider.</p>
+      </description>
+    </release>
+  </releases>
+</component>

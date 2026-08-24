@@ -87,6 +87,7 @@ depends = ["libfontconfig1", "libxkbcommon0", "libxcb1", "libgl1"]
 assets = [
     { source = "target/release/janitor-gui", dest = "/usr/bin/janitor-gui", mode = "0755" },
     { source = "janitor-gui/assets/com.circuitstitch.apps.janitor.desktop", dest = "/usr/share/applications/com.circuitstitch.apps.janitor.desktop", mode = "0644" },
+    { source = "janitor-gui/assets/com.circuitstitch.apps.janitor.metainfo.xml", dest = "/usr/share/metainfo/com.circuitstitch.apps.janitor.metainfo.xml", mode = "0644" },
     { source = "janitor-gui/assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/com.circuitstitch.apps.janitor.svg", mode = "0644" },
     { source = "janitor-gui/assets/icons/16.png", dest = "/usr/share/icons/hicolor/16x16/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
     { source = "janitor-gui/assets/icons/32.png", dest = "/usr/share/icons/hicolor/32x32/apps/com.circuitstitch.apps.janitor.png", mode = "0644" },
