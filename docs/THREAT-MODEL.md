@@ -29,11 +29,12 @@ visibility** across Environments.
 1. **`janitor-core` (trusted)** — holds Values in zeroizing buffers, runs the
    safe-write engine, talks to AWS. The part we test to ≥80% and trust most.
 2. **The shells (softer zone)** — when a Value is revealed/edited, plaintext
-   transiently lives in widget state and, on copy, the OS clipboard. Cleared on
-   blur/close/timeout; accepted as inherent to *displaying* a secret. This
-   applies to both: the Slint shell in `Circuit-Stitch/Janitor-slint` and the
-   SwiftUI shell in `Circuit-Stitch/Janitor-macos` (ADR 0036). Neither carries
-   secret logic, so the boundary is the same shape in each.
+   transiently lives in widget state and, on copy, the OS clipboard. Accepted as
+   inherent to *displaying* a secret. This applies to both: the Slint shell in
+   `Circuit-Stitch/Janitor-slint` and the SwiftUI shell in
+   `Circuit-Stitch/Janitor-macos` (ADR 0036). Neither carries secret logic, so the
+   boundary is the same shape in each. **How long the plaintext lives is not the
+   same in each** — see *Clipboard lingering* below.
 3. **The host OS / display surface (outside our control)** — framebuffer, GPU,
    screenshots, accessibility APIs, clipboard managers. Janitor cannot defend
    below this line (see non-goals).
@@ -57,8 +58,14 @@ visibility** across Environments.
   Center only (ADR 0002).
 - **Casual shoulder/screen exposure** — masked-by-default matrix; plaintext only
   on momentary, explicit per-cell reveal (ADR 0003 / 0005).
-- **Clipboard lingering** — copy auto-clears on a timeout (not on focus loss, so
-  paste still works) and is excluded from history/sync where possible (ADR 0005).
+- **Clipboard lingering (SwiftUI macOS shell only)** — a copied Value is marked
+  concealed, transient, and sensitive, so clipboard managers skip it and Universal
+  Clipboard does not carry it to the operator's other devices. It auto-clears after
+  45 seconds, and only while Janitor still owns the clipboard, so paste still works
+  and nothing the operator copied since is wiped (ADR 0005 Amendment 2026-08-25).
+  The markers are conventions, not enforcement — a clipboard manager that ignores
+  them still records the Value. **The Slint shell has none of this**: a copied Value
+  sits on the clipboard unmarked until something replaces it. Issue #59 tracks it.
 - **Excess plaintext in memory / API cost** — manual-refresh-only read model; no
   background polling (ADR 0005).
 - **Version-quota exhaustion / AWS limits** — enforced write-rate + retry caps +
