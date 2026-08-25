@@ -129,3 +129,58 @@ shell in its own repository from the first line.
 - **Git history splits.** Moving `janitor-gui` with `git subtree split` or
   `git filter-repo` preserves its history in the new repository. Doing it with a
   plain copy does not, and the Slint shell carries real history worth keeping.
+
+## Amendment 2026-08-24 — the split as built (#106)
+
+`janitor-gui` is out of this workspace. The decision above holds; this records
+what the move actually took.
+
+**The shell is `Janitor-slint`'s root package, not a workspace member.**
+`git subtree split -P janitor-gui` rooted its 72 commits at the new repository's
+root, so `git log` there is the shell's real history rather than one import
+commit. Two paths changed as a result. The rpm `source` entries in
+`[package.metadata.generate-rpm]` lost their `janitor-gui/` prefix, because they
+are repository-root relative and the repository root is now the package. An empty
+`[workspace]` table in the manifest makes the package its own workspace root, so
+Cargo never walks up looking for a parent.
+
+**CI puts the two checkouts side by side under `$GITHUB_WORKSPACE`.** A checkout
+cannot write outside the workspace, so `../Janitor` does not resolve from a
+repository checked out at the root. Every job checks the shell out into
+`Janitor-slint/` and the core into `Janitor/` beside it, and a workflow-level
+`defaults.run.working-directory` puts every `run` step in the shell. The core
+checkout is a composite action, `.github/actions/checkout-core`, referenced as
+`./Janitor-slint/.github/actions/checkout-core` — a local action is read from a
+path under the workspace, so the shell checkout has to come first. Both
+repositories are public, so `GITHUB_TOKEN` reads the core and no second token is
+involved. The action tracks the core's `main`, and takes a `ref` input to
+reproduce an older build.
+
+**The MSIX update URL moved, and that breaks 0.1.4.** An installed MSIX records
+the App Installer URI it came from, and 0.1.4 recorded a `Circuit-Stitch/Janitor`
+Releases URL. Releases come from `Janitor-slint` now, so that URI 404s and
+"Check for updates" fails for anyone on 0.1.4. They need a one-time manual
+reinstall, the same shape as the earlier NSIS → MSIX gap. `Janitor-slint`'s
+`docs/RELEASING.md` carries it. Nobody is known to be running 0.1.4, so the clean
+break beat cutting a migration release first.
+
+**The Azure federated credential does not follow the workflow.** The OIDC subject
+is `repo:OWNER/REPO:environment:release`, which names the repository. The
+credential covering `Circuit-Stitch/Janitor` does not match
+`Circuit-Stitch/Janitor-slint`, so a credential for the new repository has to be
+added to the same Entra app registration before a Windows release can sign. The
+signing variables are set on the new repository, so the failure is loud rather
+than silent, and `oidc-smoke.yml` confirms the fix in about 30 seconds instead of
+a 17-minute build.
+
+**The macOS `.dmg` job stays.** ADR 0036 left it open. It stays in `Janitor-slint`
+permanently, not as a stopgap: a Mac user who wants the Slint build rather than
+the SwiftUI one has somewhere to get it.
+
+**What stayed here.** Every ADR, `CONTEXT.md`, `THREAT-MODEL.md`, `docs/building.md`,
+the six crates, the five coverage gates, and `publish.yml`'s `kit-vX.Y.Z` lane.
+`docs/RELEASING.md` is now about that lane only. `ci.yml` dropped its Slint system
+dependencies, because no crate here links a GUI toolkit.
+
+**Test totals are conserved.** The 47 view tests moved with the shell and pass
+unchanged against the sibling core. The workspace here goes 583 → 536.

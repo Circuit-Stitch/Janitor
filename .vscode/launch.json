@@ -1,49 +1,13 @@
 {
-  // Debug/run Janitor under VS Code. These use CodeLLDB (vadimcn.vscode-lldb) —
-  // see .vscode/extensions.json. CodeLLDB runs `cargo build` for the GUI, then
-  // launches the resulting binary under the debugger (breakpoints work).
+  // Debug/run the human-gated harnesses under VS Code. These use CodeLLDB
+  // (vadimcn.vscode-lldb) — see .vscode/extensions.json.
   //
-  // No debugger extension? Use the "Run Janitor …" tasks in tasks.json instead
-  // (Terminal → Run Task), which just `cargo run` in the integrated terminal.
+  // The Slint shell moved to Circuit-Stitch/Janitor-slint (#106), so the configs
+  // that launched it live there now.
   "version": "0.2.0",
   "configurations": [
     {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Janitor — real AWS (browser sign-in)",
-      "cargo": {
-        "args": ["build", "--bin=janitor-gui", "--package=janitor-gui"],
-        "filter": { "name": "janitor-gui", "kind": "bin" }
-      },
-      "args": [],
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Janitor — mock (offline, no AWS)",
-      "cargo": {
-        "args": ["build", "--bin=janitor-gui", "--package=janitor-gui"],
-        "filter": { "name": "janitor-gui", "kind": "bin" }
-      },
-      "args": [],
-      "env": { "JANITOR_MOCK": "1" },
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Janitor — SSM remote .env (browser sign-in)",
-      "cargo": {
-        "args": ["build", "--bin=janitor-gui", "--package=janitor-gui"],
-        "filter": { "name": "janitor-gui", "kind": "bin" }
-      },
-      "args": [],
-      "env": { "JANITOR_SSM": "1" },
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      // The human-gated Milestone-B harness (ADR 0025 §3): browser sign-in →
+      // The human-gated Milestone-B harness (ADR 0025): browser sign-in →
       // guided SSM discovery (pick the JanitorSSM role!) → read a real .env over
       // the pure-Rust MGS data channel → masked matrix. It is INTERACTIVE — the
       // discovery menu + the .env-path prompt read stdin — so it runs in the

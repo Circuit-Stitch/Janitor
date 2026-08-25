@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["janitor-core", "janitor-app", "janitor-gui", "janitor-aws", "janitor-aws-auth", "janitor-mock", "janitor-ssm"]
+members = ["janitor-core", "janitor-app", "janitor-aws", "janitor-aws-auth", "janitor-mock", "janitor-ssm"]
 # The Swift binding generator is a build tool, not part of the application. It is
 # excluded so `--all-features` never drags `uniffi_bindgen` and its template engine
 # into a lint or test run (ADR 0035, #95).

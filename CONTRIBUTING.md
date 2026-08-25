@@ -33,9 +33,11 @@ This is a security tool, so the bar is deliberately high:
 - **Test-driven.** We write the failing test first, then the code to pass it
   (red → green → refactor). New behavior arrives with the test that proves it;
   bug fixes arrive with the test that would have caught the bug.
-- **Coverage is gated.** Every non-GUI crate holds a **≥80%** coverage gate in CI
-  (`cargo llvm-cov`), and in practice the security-critical crates sit well above
-  it. All auth / AWS / compare / write logic lives in `core` and the Provider
+- **Coverage is gated.** Every crate here holds a **≥80%** coverage gate in CI
+  (`cargo llvm-cov`) except `janitor-app`, which is the worker's I/O loop and the
+  AWS composition root. In practice the security-critical crates sit well above
+  the gate. The shells live in their own repositories and carry no gate at all
+  (ADR 0003, ADR 0036). All auth / AWS / compare / write logic lives in `core` and the Provider
   crates behind seams so it stays testable; only the thin browser / SDK / socket
   shells are untested, by design. PRs that drop coverage on a file they touch
   will be asked to add tests.

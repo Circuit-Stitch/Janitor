@@ -8,8 +8,9 @@ coverage:
 
 comment: false
 
-# Per-crate flags back the README badges. Paths scope each flag to its crate;
-# janitor-gui is intentionally absent (no badge, no coverage — ADR 0003).
+# Per-crate flags back the README badges. Paths scope each flag to its crate.
+# janitor-app carries no flag: it is the worker's I/O loop and the AWS
+# composition root, ungated by design (ADR 0035, Amendment 2026-08-21).
 flags:
   core:
     paths:
